@@ -1,0 +1,311 @@
+const test = require('node:test');
+const assert = require('node:assert');
+const S = require('../scheduler.js');
+
+test('parseHM and fmtHM roundtrip', () => {
+  assert.equal(S.fmtHM(S.parseHM('07:30')), '07:30');
+  assert.equal(S.fmtHM(S.parseHM('23:59')), '23:59');
+  assert.equal(S.fmtHM(S.parseHM('00:00')), '00:00');
+});
+
+test('default schedule is blocklist and enabled', () => {
+  const s = S.defaultSchedule();
+  assert.equal(s.enabled, true);
+  assert.equal(s.mode, 'blocklist');
+  assert.equal(s.week.length, 7);
+});
+
+test('blocked slot blocks, free time allows (blocklist mode)', () => {
+  const s = S.defaultSchedule();
+  s.week[0].slots.push({ start: S.parseHM('08:00'), end: S.parseHM('16:00'), type: 'blocked' });
+  const inSlot = new Date(2026, 0, 4, 10, 0);   // Sunday 10:00
+  const outSlot = new Date(2026, 0, 4, 20, 0);  // Sunday 20:00
+  assert.equal(S.getStatus(s, inSlot).state, 'blocked');
+  assert.equal(S.getStatus(s, outSlot).state, 'allowed');
+});
+
+test('allowlist mode allows only listed slots', () => {
+  const s = S.defaultSchedule();
+  s.mode = 'allowlist';
+  s.week[0].slots.push({ start: S.parseHM('14:00'), end: S.parseHM('18:00'), type: 'allowed' });
+  const inSlot = new Date(2026, 0, 4, 15, 0);
+  const outSlot = new Date(2026, 0, 4, 10, 0);
+  assert.equal(S.getStatus(s, inSlot).state, 'allowed');
+  assert.equal(S.getStatus(s, outSlot).state, 'blocked');
+});
+
+test('overnight slot wraps to next day', () => {
+  const s = S.defaultSchedule();
+  s.week[0].slots.push({ start: S.parseHM('22:00'), end: S.parseHM('06:00'), type: 'blocked' });
+  const late = new Date(2026, 0, 4, 23, 30);   // Sunday 23:30 -> blocked
+  const early = new Date(2026, 0, 5, 5, 30);   // Monday 05:30 -> still blocked (wrapped)
+  const noon = new Date(2026, 0, 5, 12, 0);    // Monday 12:00 -> allowed
+  assert.equal(S.getStatus(s, late).state, 'blocked');
+  assert.equal(S.getStatus(s, early).state, 'blocked');
+  assert.equal(S.getStatus(s, noon).state, 'allowed');
+});
+
+test('disabled schedule is always allowed', () => {
+  const s = S.defaultSchedule();
+  s.enabled = false;
+  s.week[0].slots.push({ start: S.parseHM('00:00'), end: S.parseHM('23:59'), type: 'blocked' });
+  const now = new Date(2026, 0, 4, 12, 0);
+  const st = S.getStatus(s, now);
+  assert.equal(st.state, 'allowed');
+  assert.equal(st.enabled, false);
+});
+
+test('nextTransition reports correct time and direction', () => {
+  const s = S.defaultSchedule();
+  s.week[0].slots.push({ start: S.parseHM('08:00'), end: S.parseHM('16:00'), type: 'blocked' });
+  const at = new Date(2026, 0, 4, 7, 0); // 1 hour before block starts
+  const st = S.getStatus(s, at);
+  assert.equal(st.state, 'allowed');
+  assert.equal(st.next, 'blocked');
+  assert.equal(st.nextAt.getHours(), 8);
+  assert.equal(st.secondsUntilNext, 3600);
+});
+
+test('manual unlock overrides until next transition', () => {
+  const s = S.defaultSchedule();
+  s.week[0].slots.push({ start: S.parseHM('08:00'), end: S.parseHM('16:00'), type: 'blocked' });
+  const unlockUntil = new Date(2026, 0, 4, 12, 0).getTime();
+  s.manualUnlockUntil = unlockUntil;
+  const at = new Date(2026, 0, 4, 10, 0);
+  const st = S.getStatus(s, at);
+  assert.equal(st.state, 'allowed');
+  assert.equal(st.nextAt.getTime(), unlockUntil);
+});
+
+test('formatDuration in Hebrew', () => {
+  assert.equal(S.formatDuration(0), 'עכשיו');
+  assert.equal(S.formatDuration(60), 'דקה');
+  assert.equal(S.formatDuration(3600), 'שעה');
+  assert.equal(S.formatDuration(3660), 'שעה ודקה');
+  assert.equal(S.formatDuration(7200), 'שעתיים');
+});
+
+test('sha256 known vectors', () => {
+  assert.equal(S.sha256Hex(''), 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855');
+  assert.equal(S.sha256Hex('abc'), 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad');
+  assert.equal(S.sha256Hex('שלום'), S.sha256Hex('שלום'));
+});
+
+test('isValidPassword rules', () => {
+  assert.equal(S.isValidPassword('1234'), true);
+  assert.equal(S.isValidPassword('abcd'), true);
+  assert.equal(S.isValidPassword('123'), false);   // קצר מדי
+  assert.equal(S.isValidPassword('a'.repeat(21)), false); // ארוך מדי
+  assert.equal(S.isValidPassword('has space'), false); // רווח אסור
+  assert.equal(S.isValidPassword(''), false);
+  assert.equal(S.isValidPassword(null), false);
+});
+
+test('normalizeSchedule fills missing days', () => {
+  const s = S.normalizeSchedule({ mode: 'blocklist' });
+  assert.equal(s.week.length, 7);
+  assert.equal(s.enabled, true);
+});
+
+test('runAsAdmin flag defaults off and survives normalize', () => {
+  assert.equal(S.defaultSchedule().runAsAdmin, false);
+  assert.equal(S.normalizeSchedule({}).runAsAdmin, false);
+  assert.equal(S.normalizeSchedule({ runAsAdmin: true }).runAsAdmin, true);
+  assert.equal(S.normalizeSchedule({ runAsAdmin: 'yes' }).runAsAdmin, false);
+});
+
+test('nextTransition skips boundaries that do not change state', () => {
+  const s = S.defaultSchedule();
+  s.mode = 'allowlist';
+  // שני חלונות מותרים סמוכים — הגבול ביניהם (12:00) אינו מעבר אמיתי
+  s.week[0].slots.push({ start: S.parseHM('08:00'), end: S.parseHM('12:00'), type: 'allowed' });
+  s.week[0].slots.push({ start: S.parseHM('12:00'), end: S.parseHM('18:00'), type: 'allowed' });
+  const now = new Date(2026, 0, 4, 9, 0);
+  const st = S.getStatus(s, now);
+  assert.equal(st.state, 'allowed');
+  // המעבר הבא צריך להיות לסיום 18:00 (חזרה למצב חסום), לא ל-12:00
+  assert.equal(st.next, 'blocked');
+  assert.equal(st.nextAt.getHours(), 18);
+});
+
+test('full-day blocked slot covers whole day', () => {
+  const s = S.defaultSchedule();
+  s.week[0].slots.push({ start: 0, end: 1440, type: 'blocked' });
+  assert.equal(S.getStatus(s, new Date(2026, 0, 4, 0, 1)).state, 'blocked');
+  assert.equal(S.getStatus(s, new Date(2026, 0, 4, 12, 0)).state, 'blocked');
+  assert.equal(S.getStatus(s, new Date(2026, 0, 4, 23, 59)).state, 'blocked');
+  // למחרת כבר לא חסום
+  assert.equal(S.getStatus(s, new Date(2026, 0, 5, 10, 0)).state, 'allowed');
+});
+
+test('adjacent blocked+allowed slots produce both transitions', () => {
+  const s = S.defaultSchedule();
+  s.week[0].slots.push({ start: S.parseHM('08:00'), end: S.parseHM('12:00'), type: 'blocked' });
+  s.week[0].slots.push({ start: S.parseHM('12:00'), end: S.parseHM('18:00'), type: 'allowed' });
+  const now = new Date(2026, 0, 4, 9, 0);
+  const st = S.getStatus(s, now);
+  assert.equal(st.state, 'blocked');
+  assert.equal(st.next, 'allowed');
+  assert.equal(st.nextAt.getHours(), 12);
+});
+
+test('exact boundary times: slot end is inclusive of the start minute only', () => {
+  const s = S.defaultSchedule();
+  s.week[0].slots.push({ start: S.parseHM('09:00'), end: S.parseHM('10:00'), type: 'blocked' });
+  // 09:00 בדיוק — חסום (התחלה כלולה)
+  assert.equal(S.getStatus(s, new Date(2026, 0, 4, 9, 0)).state, 'blocked');
+  // 10:00 בדיוק — מותר (הסוף לא כלול)
+  assert.equal(S.getStatus(s, new Date(2026, 0, 4, 10, 0)).state, 'allowed');
+  // 09:59 — חסום
+  assert.equal(S.getStatus(s, new Date(2026, 0, 4, 9, 59)).state, 'blocked');
+});
+
+test('parseHM handles 24:00, midnight, invalid and out-of-range input', () => {
+  assert.equal(S.parseHM('24:00'), 1440);
+  assert.equal(S.parseHM('00:00'), 0);
+  assert.equal(S.parseHM('25:00'), 60);   // 25:00 -> 01:00 (mod 1440)
+  assert.equal(S.parseHM('10'), 600);     // '10' מתפרש כ-10:00
+  assert.equal(S.parseHM(''), 0);
+  assert.equal(S.parseHM('abc'), 0);
+  assert.equal(S.parseHM(null), 0);
+  assert.equal(S.parseHM(1440), 1440);    // מספרים נשמרים
+  assert.equal(S.parseHM(-30), 0);        // שלילי -> 0
+  assert.equal(S.parseHM(1500), 1440);    // מעל 24:00 -> capped
+});
+
+test('fmtHM shows 24:00 for end-of-day and normal times otherwise', () => {
+  assert.equal(S.fmtHM(1440), '24:00');
+  assert.equal(S.fmtHM(0), '00:00');
+  assert.equal(S.fmtHM(1439), '23:59');
+  assert.equal(S.fmtHM(720), '12:00');
+});
+
+test('overnight slot exact midnight boundaries', () => {
+  const s = S.defaultSchedule();
+  s.week[0].slots.push({ start: S.parseHM('23:00'), end: S.parseHM('01:00'), type: 'blocked' });
+  // יום ראשון 22:59 — מותר (לפני התחלה)
+  assert.equal(S.getStatus(s, new Date(2026, 0, 4, 22, 59)).state, 'allowed');
+  // 23:00 — חסום
+  assert.equal(S.getStatus(s, new Date(2026, 0, 4, 23, 0)).state, 'blocked');
+  // חצות (יום שני 00:00) — עדיין חסום (חלון מאתמול)
+  assert.equal(S.getStatus(s, new Date(2026, 0, 5, 0, 0)).state, 'blocked');
+  // 00:59 — חסום
+  assert.equal(S.getStatus(s, new Date(2026, 0, 5, 0, 59)).state, 'blocked');
+  // 01:00 בדיוק — מותר (סוף החלון לא כלול)
+  assert.equal(S.getStatus(s, new Date(2026, 0, 5, 1, 0)).state, 'allowed');
+});
+
+test('nextTransition at exact boundary returns the following one', () => {
+  const s = S.defaultSchedule();
+  s.week[0].slots.push({ start: S.parseHM('08:00'), end: S.parseHM('16:00'), type: 'blocked' });
+  // בדיוק בשעת התחלה (08:00) — מצב חסום, המעבר הבא הוא הסיום ב-16:00
+  const st = S.getStatus(s, new Date(2026, 0, 4, 8, 0));
+  assert.equal(st.state, 'blocked');
+  assert.equal(st.next, 'allowed');
+  assert.equal(st.nextAt.getHours(), 16);
+});
+
+test('manual unlock expires exactly at the boundary', () => {
+  const s = S.defaultSchedule();
+  s.week[0].slots.push({ start: S.parseHM('08:00'), end: S.parseHM('16:00'), type: 'blocked' });
+  const until = new Date(2026, 0, 4, 10, 0).getTime();
+  s.manualUnlockUntil = until;
+  // לפני התום — מותר
+  assert.equal(S.getStatus(s, new Date(2026, 0, 4, 9, 59)).state, 'allowed');
+  // בדיוק בתום — כבר חסום (התום לא כלול)
+  assert.equal(S.getStatus(s, new Date(2026, 0, 4, 10, 0)).state, 'blocked');
+});
+
+test('allowlist with no slots is blocked all week', () => {
+  const s = S.defaultSchedule();
+  s.mode = 'allowlist';
+  assert.equal(S.getStatus(s, new Date(2026, 0, 4, 0, 0)).state, 'blocked');
+  assert.equal(S.getStatus(s, new Date(2026, 0, 4, 12, 0)).state, 'blocked');
+  assert.equal(S.getStatus(s, new Date(2026, 0, 6, 23, 59)).state, 'blocked');
+});
+
+test('slot spanning Saturday-night boundary (week wrap)', () => {
+  const s = S.defaultSchedule();
+  // יום שבת (6) 22:00 - 02:00 -> חוצה ליום ראשון (0)
+  s.week[6].slots.push({ start: S.parseHM('22:00'), end: S.parseHM('02:00'), type: 'blocked' });
+  // שבת 23:00 חסום
+  assert.equal(S.getStatus(s, new Date(2026, 0, 3, 23, 0)).state, 'blocked');
+  // יום ראשון 01:00 — חסום (המשך החלון)
+  assert.equal(S.getStatus(s, new Date(2026, 0, 4, 1, 0)).state, 'blocked');
+  // יום ראשון 02:00 — מותר
+  assert.equal(S.getStatus(s, new Date(2026, 0, 4, 2, 0)).state, 'allowed');
+});
+
+test('zero-length slot is filtered by normalize (no infinite block)', () => {
+  const s = S.normalizeSchedule({
+    week: [{ day: 0, slots: [{ start: 600, end: 600, type: 'blocked' }] }]
+  });
+  assert.equal(s.week[0].slots.length, 0);
+  assert.equal(S.getStatus(s, new Date(2026, 0, 4, 12, 0)).state, 'allowed');
+});
+
+test('one-off allow override beats weekly block for its day', () => {
+  const s = S.defaultSchedule();
+  s.week[0].slots.push({ start: S.parseHM('08:00'), end: S.parseHM('16:00'), type: 'blocked' });
+  const day = new Date(2026, 0, 4); // יום ראשון
+  s.overrides = [{ date: S.dateKey(day), type: 'allow' }];
+  assert.equal(S.getStatus(s, new Date(2026, 0, 4, 10, 0)).state, 'allowed');
+  assert.equal(S.getStatus(s, new Date(2026, 0, 4, 20, 0)).state, 'allowed');
+  // למחרת — חוזר ללוח הרגיל
+  assert.equal(S.getStatus(s, new Date(2026, 0, 5, 10, 0)).state, 'allowed');
+});
+
+test('one-off block override blocks the whole day', () => {
+  const s = S.defaultSchedule();
+  const day = new Date(2026, 0, 4);
+  s.overrides = [{ date: S.dateKey(day), type: 'block' }];
+  assert.equal(S.getStatus(s, new Date(2026, 0, 4, 9, 0)).state, 'blocked');
+  assert.equal(S.getStatus(s, new Date(2026, 0, 4, 23, 0)).state, 'blocked');
+  assert.equal(S.getStatus(s, new Date(2026, 0, 5, 9, 0)).state, 'allowed');
+});
+
+test('normalizeSchedule normalizes overrides (dedupe by date, invalid dropped)', () => {
+  const s = S.normalizeSchedule({ overrides: [
+    { date: '2026-01-04', type: 'allow' },
+    { date: '2026-01-04', type: 'block' }, // האחרון מנצח
+    { date: 'bad-date', type: 'allow' },
+    null
+  ] });
+  assert.equal(s.overrides.length, 1);
+  assert.equal(s.overrides[0].type, 'block');
+  assert.equal(s.overrides[0].date, '2026-01-04');
+});
+
+test('nextTransition accounts for override days', () => {
+  // יום חסימה חד-פעמי — המעבר הבא הוא חצות (תום החריג)
+  const s = S.defaultSchedule();
+  const day = new Date(2026, 0, 4);
+  s.overrides = [{ date: S.dateKey(day), type: 'block' }];
+  const st = S.getStatus(s, new Date(2026, 0, 4, 12, 0));
+  assert.equal(st.state, 'blocked');
+  assert.equal(st.next, 'allowed');
+  assert.equal(st.nextAt.getDate(), 5);
+  assert.equal(st.nextAt.getHours(), 0);
+
+  // יום חופש חד-פעמי ביום שני חסום — המעבר הבא הוא תחילת החסימה ב-08:00
+  const s2 = S.defaultSchedule();
+  s2.week[1].slots.push({ start: S.parseHM('08:00'), end: S.parseHM('16:00'), type: 'blocked' });
+  s2.overrides = [{ date: '2026-01-04', type: 'allow' }]; // יום ראשון
+  const st2 = S.getStatus(s2, new Date(2026, 0, 4, 12, 0));
+  assert.equal(st2.state, 'allowed');
+  assert.equal(st2.next, 'blocked');
+  assert.equal(st2.nextAt.getDate(), 5);
+  assert.equal(st2.nextAt.getHours(), 8);
+});
+
+test('overlapping slots: first matching slot wins (order matters)', () => {
+  const s = S.defaultSchedule();
+  s.week[0].slots.push({ start: S.parseHM('08:00'), end: S.parseHM('12:00'), type: 'blocked' });
+  s.week[0].slots.push({ start: S.parseHM('10:00'), end: S.parseHM('11:00'), type: 'allowed' });
+  // 10:30 — שני חלונות חופפים; הראשון ברשימה מנצח -> חסום (התנהגות מתועדת)
+  assert.equal(S.getStatus(s, new Date(2026, 0, 4, 10, 30)).state, 'blocked');
+  // 09:00 — רק החלון הראשון -> חסום
+  assert.equal(S.getStatus(s, new Date(2026, 0, 4, 9, 0)).state, 'blocked');
+  // 11:30 — רק החלון הראשון -> חסום
+  assert.equal(S.getStatus(s, new Date(2026, 0, 4, 11, 30)).state, 'blocked');
+});

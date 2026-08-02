@@ -1,0 +1,1053 @@
+'use strict';
+
+const T = window.TimeScheduler;
+const API = window.electronAPI;
+
+/* ---------- אייקונים (SVG בלבד, ללא אימוג'ים) ---------- */
+const ICONS = {
+  warning: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg>',
+  close: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>',
+  plus: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
+  check: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>',
+  alert: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/></svg>'
+};
+
+/* ---------- מצב ---------- */
+let schedule = T.defaultSchedule();
+let status = null;
+let pinVerifiedAt = 0;      // מתי הוזנה סיסמה לאחרונה
+let sessionUnlocked = false; // כניסה להגדרות עם סיסמה
+let loginPending = false;
+const PIN_SESSION_MS = 5 * 60 * 1000;
+
+const $ = (id) => document.getElementById(id);
+
+/* ---------- טוסט ---------- */
+let toastTimer = null;
+function toast(msg, type = '') {
+  const el = $('toast');
+  const icon = type === 'success' ? ICONS.check : type === 'error' ? ICONS.alert : '';
+  el.innerHTML = '<span class="toast-msg"></span>';
+  if (icon) el.innerHTML = icon + el.innerHTML;
+  el.querySelector('.toast-msg').textContent = msg;
+  el.className = 'toast ' + type;
+  el.classList.remove('hidden');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => {
+    el.classList.add('fade-out'); // דעיכה חלקה ואז הסתרה
+    setTimeout(() => { el.classList.add('hidden'); el.classList.remove('fade-out'); }, 320);
+  }, 3200);
+}
+
+/* ---------- סשן כניסה להגדרות ---------- */
+function applyLoginState() {
+  const needsLogin = !!(schedule.pinHash && !sessionUnlocked);
+  $('loginModal').classList.toggle('hidden', !needsLogin);
+  if (needsLogin) {
+    $('app').classList.add('blurred');
+    setTimeout(() => $('loginInput').focus(), 80);
+  } else {
+    $('app').classList.remove('blurred');
+  }
+}
+
+async function tryLogin(pin) {
+  if (!API) { sessionUnlocked = true; applyLoginState(); return; }
+  const res = await API.unlockSession(pin);
+  if (res && res.ok) {
+    sessionUnlocked = true;
+    pinVerifiedAt = Date.now();
+    $('loginError').classList.add('hidden');
+    applyLoginState();
+    toast('ברוכים הבאים להגדרות', 'success');
+  } else {
+    $('loginError').classList.remove('hidden');
+    $('loginInput').value = '';
+    $('loginInput').focus();
+  }
+}
+
+/* ---------- PIN ---------- */
+function pinRequired() {
+  return !!(schedule.pinHash && sessionUnlocked && Date.now() - pinVerifiedAt > PIN_SESSION_MS);
+}
+
+function promptPin() {
+  return new Promise((resolve) => {
+    const modal = $('pinModal');
+    const input = $('pinModalInput');
+    modal.classList.remove('hidden');
+    input.value = '';
+    setTimeout(() => input.focus(), 50);
+
+    const done = (ok) => {
+      modal.classList.add('hidden');
+      resolve(ok ? input.value : null);
+    };
+    $('pinModalOk').onclick = () => done(true);
+    $('pinModalCancel').onclick = () => done(null);
+    input.onkeydown = (e) => { if (e.key === 'Enter') done(true); if (e.key === 'Escape') done(null); };
+  });
+}
+
+async function verifyPinSession() {
+  if (!pinRequired()) return true;
+  const pin = await promptPin();
+  if (pin == null) return false;
+  let ok = false;
+  if (API) {
+    const res = await API.verifyPin(pin);
+    ok = !!(res && res.ok);
+  } else {
+    ok = T.sha256Hex(pin) === schedule.pinHash;
+  }
+  if (!ok) { toast('סיסמה שגויה', 'error'); return false; }
+  pinVerifiedAt = Date.now();
+  return true;
+}
+
+/* ---------- שמירה ---------- */
+async function persist() {
+  try {
+    if (API) {
+      const res = await API.saveSettings(schedule);
+      if (!res || !res.ok) throw new Error('שמירה נכשלה');
+      if (res.warning) toast(res.warning);
+    } else {
+      localStorage.setItem('ben-hazmanim-settings', JSON.stringify(schedule));
+    }
+    flashSaved();
+    return true;
+  } catch (e) {
+    toast('שגיאה בשמירה: ' + e.message, 'error');
+    return false;
+  }
+}
+
+function flashSaved() {
+  const el = $('saveIndicator');
+  el.classList.add('show');
+  setTimeout(() => el.classList.remove('show'), 1800);
+}
+
+/* ---------- חלונות חופפים (בדיקה תצוגה בלבד) ----------
+   החלטה בלוח היא "הראשון שמתאים זוכה" — חלונות חופפים עלולים לבלבל,
+   אז מסמנים אותם באדום עם הסבר. */
+function slotSegments(slot) {
+  if (slot.end > slot.start) return [[slot.start, slot.end]];
+  return [[slot.start, 1440], [0, slot.end]]; // חוצה חצות = שני קטעים
+}
+function segmentsOverlap(a, b) { return a[0] < b[1] && b[0] < a[1]; }
+function overlappingIndexes(day) {
+  const idx = new Set();
+  for (let i = 0; i < day.slots.length; i++) {
+    for (let j = i + 1; j < day.slots.length; j++) {
+      for (const a of slotSegments(day.slots[i])) {
+        for (const b of slotSegments(day.slots[j])) {
+          if (segmentsOverlap(a, b)) { idx.add(i); idx.add(j); }
+        }
+      }
+    }
+  }
+  return idx;
+}
+
+/* ---------- שעון 24 שעות (SVG) ---------- */
+function polar(cx, cy, r, minutes) {
+  const deg = (minutes / 1440) * 360;
+  const rad = ((deg - 90) * Math.PI) / 180;
+  return { x: cx + r * Math.cos(rad), y: cy + r * Math.sin(rad) };
+}
+
+function arcPath(cx, cy, r, fromMin, toMin) {
+  const a = polar(cx, cy, r, fromMin);
+  const b = polar(cx, cy, r, toMin);
+  const large = (toMin - fromMin) > 720 ? 1 : 0;
+  return 'M ' + a.x.toFixed(2) + ' ' + a.y.toFixed(2) +
+    ' A ' + r + ' ' + r + ' 0 ' + large + ' 1 ' + b.x.toFixed(2) + ' ' + b.y.toFixed(2);
+}
+
+function svgEl(name, attrs) {
+  const el = document.createElementNS('http://www.w3.org/2000/svg', name);
+  for (const k in attrs) el.setAttribute(k, attrs[k]);
+  return el;
+}
+
+function renderClock(day, now, todayIdx) {
+  const svg = svgEl('svg', {
+    viewBox: '0 0 100 100',
+    class: 'day-clock',
+    role: 'img',
+    'aria-label': T.DAY_NAMES_HE[day.day] + ' — שעות היממה'
+  });
+  const cx = 50, cy = 50;
+
+  // טבעת רקע
+  svg.appendChild(svgEl('circle', { cx, cy, r: 46, class: 'clock-ring' }));
+
+  // סימוני שעות — גדול כל 6 שעות, קטן כל שעה
+  for (let m = 0; m < 1440; m += 60) {
+    const big = m % 360 === 0;
+    const a = polar(cx, cy, big ? 42 : 45, m);
+    const b = polar(cx, cy, 46, m);
+    svg.appendChild(svgEl('line', {
+      x1: a.x.toFixed(2), y1: a.y.toFixed(2), x2: b.x.toFixed(2), y2: b.y.toFixed(2),
+      class: big ? 'clock-tick big' : 'clock-tick'
+    }));
+  }
+
+  // קשתות החלונות (חסום = אדום, מותר = ירוק)
+  day.slots.forEach((slot) => {
+    const segs = slot.end <= slot.start
+      ? [[slot.start, 1440], [0, slot.end]]
+      : [[slot.start, slot.end]];
+    segs.forEach(([f, t]) => {
+      svg.appendChild(svgEl('path', { d: arcPath(cx, cy, 37, f, t), class: 'clock-seg ' + slot.type }));
+    });
+  });
+
+  // מחוג "עכשיו" ליום הנוכחי
+  if (day.day === todayIdx) {
+    const minutes = now.getHours() * 60 + now.getMinutes();
+    const tip = polar(cx, cy, 30, minutes);
+    svg.appendChild(svgEl('line', {
+      x1: cx, y1: cy, x2: tip.x.toFixed(2), y2: tip.y.toFixed(2), class: 'clock-now'
+    }));
+    svg.appendChild(svgEl('circle', { cx, cy, r: 2.2, class: 'clock-now-dot' }));
+  }
+
+  // שעות מודפסות (12, 3, 6, 9)
+  [['12', 0], ['3', 90], ['6', 180], ['9', 270]].forEach(([txt, deg]) => {
+    const p = polar(cx, cy, 29.5, deg * 4);
+    const t = svgEl('text', {
+      x: p.x.toFixed(2), y: p.y.toFixed(2),
+      'text-anchor': 'middle', 'dominant-baseline': 'central',
+      class: 'clock-label'
+    });
+    t.textContent = txt;
+    svg.appendChild(t);
+  });
+
+  return svg;
+}
+
+/* ---------- רינדור לוח שבועי ---------- */
+function renderWeek() {
+  const grid = $('weekGrid');
+  grid.innerHTML = '';
+  const now = new Date();
+  const todayIdx = now.getDay();
+
+  schedule.week.forEach((day) => {
+    const card = document.createElement('div');
+    card.className = 'day-card' + (day.day === todayIdx ? ' today' : '');
+    const overlapIdx = overlappingIndexes(day);
+
+    const head = document.createElement('div');
+    head.className = 'day-head';
+    const name = document.createElement('div');
+    name.className = 'day-name';
+    name.textContent = T.DAY_NAMES_HE[day.day];
+    if (day.day === todayIdx) {
+      const badge = document.createElement('span');
+      badge.className = 'today-badge';
+      badge.textContent = 'היום';
+      name.appendChild(badge);
+    }
+    head.appendChild(name);
+    card.appendChild(head);
+
+    if (overlapIdx.size > 0) {
+      const warn = document.createElement('div');
+      warn.className = 'overlap-note';
+      warn.innerHTML = ICONS.warning + '<span>חלונות חופפים — רק הראשון בסדר יחול</span>';
+      card.appendChild(warn);
+    }
+
+    card.appendChild(renderClock(day, now, todayIdx));
+
+    const list = document.createElement('div');
+    list.className = 'slot-list';
+    day.slots.forEach((slot, i) => list.appendChild(renderSlotRow(day, i, overlapIdx.has(i))));
+    card.appendChild(list);
+
+    const addBtn = document.createElement('button');
+    addBtn.className = 'add-slot';
+    addBtn.innerHTML = ICONS.plus + '<span>הוסף חלון זמן</span>';
+    addBtn.onclick = async () => {
+      if (!(await verifyPinSession())) return;
+      day.slots.push({ start: T.parseHM('09:00'), end: T.parseHM('14:00'), type: 'blocked' });
+      renderWeek();
+      persist();
+    };
+    card.appendChild(addBtn);
+
+    grid.appendChild(card);
+  });
+}
+
+function renderSlotRow(day, idx, isOverlap) {
+  const slot = day.slots[idx];
+  const row = document.createElement('div');
+  row.className = 'slot-row ' + slot.type + (isOverlap ? ' overlap' : '');
+
+  const start = document.createElement('input');
+  start.type = 'time';
+  start.className = 'time-input';
+  start.value = T.fmtHM(slot.start);
+  start.onchange = async () => {
+    if (!(await verifyPinSession())) { renderWeek(); return; }
+    slot.start = T.parseHM(start.value);
+    renderWeek();
+    persist();
+  };
+
+  const dash = document.createElement('span');
+  dash.textContent = '–';
+  dash.style.color = 'var(--muted)';
+
+  const end = document.createElement('input');
+  end.type = 'time';
+  end.className = 'time-input';
+  end.value = slot.end >= 1440 ? '23:59' : T.fmtHM(slot.end);
+  end.onchange = async () => {
+    if (!(await verifyPinSession())) { renderWeek(); return; }
+    slot.end = T.parseHM(end.value);
+    renderWeek();
+    persist();
+  };
+
+  const typeBtn = document.createElement('button');
+  typeBtn.className = 'type-badge ' + slot.type;
+  typeBtn.textContent = slot.type === 'blocked' ? 'חסום' : 'מותר';
+  typeBtn.onclick = async () => {
+    if (!(await verifyPinSession())) { renderWeek(); return; }
+    slot.type = slot.type === 'blocked' ? 'allowed' : 'blocked';
+    renderWeek();
+    persist();
+  };
+
+  const del = document.createElement('button');
+  del.className = 'del-btn';
+  del.innerHTML = ICONS.close;
+  del.title = 'מחק חלון';
+  del.onclick = async () => {
+    if (!(await verifyPinSession())) { renderWeek(); return; }
+    day.slots.splice(idx, 1);
+    renderWeek();
+    persist();
+  };
+
+  row.append(start, dash, end, typeBtn, del);
+  return row;
+}
+
+/* ---------- ערכת נושא (מערכת / בהיר / כהה) ---------- */
+const mqLight = window.matchMedia('(prefers-color-scheme: light)');
+
+function resolvedTheme() {
+  const t = schedule.theme || 'system';
+  if (t === 'light') return 'light';
+  if (t === 'dark') return 'dark';
+  return mqLight.matches ? 'light' : 'dark';
+}
+
+function applyTheme() {
+  const resolved = resolvedTheme();
+  document.documentElement.dataset.theme = resolved;
+  if (API) API.applyTheme(resolved);
+  setThemeUI();
+}
+
+function setThemeUI() {
+  document.querySelectorAll('.theme-btn').forEach((btn) => {
+    const on = btn.dataset.themeChoice === (schedule.theme || 'system');
+    btn.classList.toggle('active', on);
+    btn.setAttribute('aria-checked', on ? 'true' : 'false');
+  });
+}
+
+// מעקב אחר שינוי ערכת המערכת — מתעדכן אוטומטית במצב "מערכת"
+mqLight.addEventListener('change', () => {
+  if ((schedule.theme || 'system') === 'system') applyTheme();
+});
+
+/* ---------- שעון חי + ספירה לאחור + טבעת התקדמות ---------- */
+const RING_C = 2 * Math.PI * 44; // היקף טבעת ההתקדמות
+let segmentStart = Date.now();
+let lastNextAtTs = null;
+
+function updateLiveClock() {
+  const now = new Date();
+  const hh = String(now.getHours()).padStart(2, '0');
+  const mm = String(now.getMinutes()).padStart(2, '0');
+  const timeEl = $('liveClockTime');
+  const dayEl = $('liveClockDay');
+  if (timeEl) timeEl.textContent = hh + ':' + mm;
+  if (dayEl) {
+    dayEl.textContent = T.DAY_NAMES_HE[now.getDay()] + ' • ' +
+      now.getDate() + '.' + String(now.getMonth() + 1).padStart(2, '0');
+  }
+}
+
+// תחילת המקטע הנוכחי — מאפשר לטבעת למלא בצורה חלקה עד למעבר הבא
+function trackSegment(st) {
+  const nextAtTs = st.nextAt ? new Date(st.nextAt).getTime() : null;
+  if (nextAtTs !== lastNextAtTs) {
+    if (lastNextAtTs !== null && nextAtTs !== null && lastNextAtTs <= Date.now()) {
+      segmentStart = lastNextAtTs; // המקטע הנוכחי התחיל במעבר הקודם
+    } else {
+      segmentStart = Date.now();
+    }
+    lastNextAtTs = nextAtTs;
+  }
+}
+
+function renderRing(st) {
+  const prog = $('ringProgress');
+  if (!prog) return;
+  trackSegment(st);
+  let p = 0;
+  if (st.nextAt) {
+    const nextAtTs = new Date(st.nextAt).getTime();
+    const total = nextAtTs - segmentStart;
+    if (total > 0) p = Math.min(1, Math.max(0, (Date.now() - segmentStart) / total));
+  }
+  prog.style.strokeDasharray = (RING_C * p).toFixed(2) + ' ' + RING_C;
+}
+
+function fmtCountdown(sec) {
+  sec = Math.max(0, Math.floor(sec || 0));
+  const d = Math.floor(sec / 86400);
+  const h = Math.floor((sec % 86400) / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  const pad = (n) => String(n).padStart(2, '0');
+  return (d > 0 ? d + ' ימים ' : '') + pad(h) + ':' + pad(m) + ':' + pad(s);
+}
+
+function updateCountdown(st) {
+  const el = $('countdownBig');
+  if (!el) return;
+  const blocked = st.state === 'blocked' || !!st.manualLock;
+  const label = el.closest('.countdown-row').querySelector('.countdown-label');
+  if (st.secondsUntilNext != null && st.nextAt) {
+    el.textContent = fmtCountdown(st.secondsUntilNext);
+    label.textContent = blocked ? 'עד לפתיחה' : 'עד למעבר הבא';
+    el.parentElement.classList.remove('hidden');
+  } else {
+    el.textContent = st.enabled === false ? 'האכיפה מושבתת' : '—';
+    label.textContent = 'סטטוס';
+  }
+}
+
+/* ---------- עדכון מצב ---------- */
+function applyStatus(st) {
+  status = st;
+  const card = $('statusCard');
+  const blocked = st.state === 'blocked' || !!st.manualLock;
+  card.classList.toggle('blocked', blocked);
+  card.classList.toggle('allowed', !blocked);
+  renderRing(st);
+  updateCountdown(st);
+
+  $('statusState').textContent = blocked ? 'חסום' : 'מותר';
+  $('statusTitle').textContent = blocked
+    ? (st.manualLock ? 'המחשב חסום (נעילה ידנית)' : 'המחשב חסום בשעה זו')
+    : st.enabled === false
+      ? 'האכיפה מושבתת'
+      : 'המחשב פתוח לשימוש';
+
+  const atLabel = st.nextAtLabel || (st.nextAt ? T.formatDate(new Date(st.nextAt)) : '');
+  const inLabel = st.secondsUntilLabel || (st.secondsUntilNext != null ? T.formatDuration(st.secondsUntilNext) : '');
+  if (blocked) {
+    $('statusDetail').textContent = st.manualLock
+      ? 'נעילה ידנית — פתחו עם סיסמה'
+      : 'הגישה תיפתח ' + atLabel + ' • בעוד ' + inLabel;
+  } else if (st.nextAt) {
+    const dir = st.next === 'blocked' ? 'המעבר הבא לחסימה' : 'המעבר הבא';
+    $('statusDetail').textContent = dir + ': ' + atLabel + ' • בעוד ' + inLabel;
+  } else {
+    $('statusDetail').textContent = 'אין שינוי צפוי לפי הלוח הנוכחי';
+  }
+
+  // כפתור הפתיחה מוצג רק כשהמחשב חסום — כשהוא פתוח הוא חסר משמעות
+  $('unlockBtn').classList.toggle('hidden', !blocked);
+}
+
+async function refreshStatus() {
+  try {
+    const st = API ? await API.getStatus() : T.getStatus(schedule, new Date());
+    applyStatus(st);
+  } catch (e) { /* ignore */ }
+}
+
+/* ---------- שליטה ---------- */
+function applySettingsToUI() {
+  $('masterToggle').checked = schedule.enabled;
+  $('graceInput').value = schedule.graceSeconds;
+  $('lockWsToggle').checked = schedule.lockWorkstation;
+  $('pinStatus').textContent = schedule.pinHash ? 'מוגדרת' : 'לא מוגדרת';
+  $('recoveryEmail').value = schedule.recoveryEmail || '';
+  $('blockMessage').value = schedule.blockMessage || '';
+  updateMasterLabel();
+  setModeUI();
+  applyTheme();
+  renderOverrides();
+}
+
+function updateMasterLabel() {
+  const label = $('masterLabel');
+  label.textContent = schedule.enabled ? 'האכיפה פעילה' : 'האכיפה מושבתת';
+  label.classList.toggle('off', !schedule.enabled);
+}
+
+function setModeUI() {
+  $('modeBlocklist').classList.toggle('active', schedule.mode === 'blocklist');
+  $('modeAllowlist').classList.toggle('active', schedule.mode === 'allowlist');
+}
+
+function showUpdateBanner(note) {
+  $('updateText').textContent = 'עדכון זמין: גרסה ' + note.version;
+  const link = $('updateLink');
+  if (note.url && /^https?:\/\//.test(note.url)) {
+    link.style.display = '';
+    link.onclick = (e) => {
+      e.preventDefault();
+      if (API) API.openExternal(note.url);
+    };
+  } else {
+    link.style.display = 'none';
+  }
+  $('updateBanner').classList.remove('hidden');
+}
+
+/* ---------- סטטיסטיקות (דשבורד) ---------- */
+function dateKeyStr(d) {
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return d.getFullYear() + '-' + m + '-' + dd;
+}
+
+const EVENT_LABELS = {
+  'app-start': 'הפעלת התוכנה',
+  'app-quit': 'סגירת התוכנה',
+  'block-start': 'תחילת חסימה',
+  'block-end': 'סיום חסימה',
+  'lock-manual': 'נעילה ידנית',
+  'unlock-success': 'פתיחה עם סיסמה',
+  'unlock-fail': 'ניסיון פתיחה נכשל',
+  'settings': 'שינוי הגדרות'
+};
+
+function addBlockSpan(dayMap, from, to) {
+  let cur = from;
+  while (cur < to) {
+    const d = new Date(cur);
+    const dayEnd = new Date(d);
+    dayEnd.setHours(23, 59, 59, 999);
+    const segEnd = Math.min(to, dayEnd.getTime() + 1);
+    const key = dateKeyStr(d);
+    dayMap[key] = (dayMap[key] || 0) + (segEnd - cur) / 60000;
+    cur = segEnd;
+  }
+}
+
+function fmtHours(min) {
+  const h = Math.floor(min / 60);
+  const m = Math.round(min % 60);
+  if (h <= 0) return m <= 0 ? '0 דק׳' : m + ' דק׳';
+  if (m === 0) return h + ' שעות';
+  return h + ' שע׳ ' + m + ' דק׳';
+}
+
+async function renderStats() {
+  const chart = $('barChart');
+  if (!chart) return;
+  const hasApi = !!API;
+  const events = hasApi ? (await API.getActivity(2000)) : [];
+  const now = Date.now();
+  const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+
+  const dayBlocks = {};
+  let blockStart = null;
+  let todayUnlockOk = 0, todayUnlockFail = 0, todayManual = 0;
+  for (const e of events) {
+    if (e.type === 'block-start') blockStart = e.ts;
+    else if (e.type === 'block-end') {
+      if (blockStart != null) { addBlockSpan(dayBlocks, blockStart, e.ts); blockStart = null; }
+    } else if (e.type === 'unlock-success' && e.ts >= todayStart.getTime()) todayUnlockOk++;
+    else if (e.type === 'unlock-fail' && e.ts >= todayStart.getTime()) todayUnlockFail++;
+    else if (e.type === 'lock-manual' && e.ts >= todayStart.getTime()) todayManual++;
+  }
+  if (blockStart != null) addBlockSpan(dayBlocks, blockStart, now); // עדיין חסום כרגע
+
+  const todayKey = dateKeyStr(new Date());
+  const blockedToday = Math.round(dayBlocks[todayKey] || 0);
+  let blockedWeek = 0;
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(todayStart);
+    d.setDate(d.getDate() - (6 - i));
+    blockedWeek += Math.round(dayBlocks[dateKeyStr(d)] || 0);
+  }
+
+  $('statBlockedToday').textContent = hasApi ? fmtHours(blockedToday) : '—';
+  $('statBlockedWeek').textContent = hasApi ? fmtHours(blockedWeek) : '—';
+  $('statManualToday').textContent = hasApi ? String(todayManual) : '—';
+  $('statUnlockOk').textContent = hasApi ? String(todayUnlockOk) : '—';
+  $('statUnlockFail').textContent = hasApi ? String(todayUnlockFail) : '—';
+
+  // גרף עמודות — 7 הימים האחרונים
+  chart.innerHTML = '';
+  const todayIdx = new Date().getDay();
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(todayStart);
+    d.setDate(d.getDate() - (6 - i));
+    const min = dayBlocks[dateKeyStr(d)] || 0;
+    const pct = Math.min(100, (min / 1440) * 100);
+    const col = document.createElement('div');
+    col.className = 'bar-col';
+    col.title = T.DAY_NAMES_HE[d.getDay()] + ' — ' + fmtHours(min);
+    const bar = document.createElement('div');
+    bar.className = 'bar-fill' + (d.getDay() === todayIdx ? ' today' : '');
+    bar.style.height = (pct > 0 ? Math.max(pct, 3) : 2) + '%';
+    col.appendChild(bar);
+    const lbl = document.createElement('div');
+    lbl.className = 'bar-label';
+    lbl.textContent = T.DAY_SHORT_HE[d.getDay()];
+    col.appendChild(lbl);
+    chart.appendChild(col);
+  }
+
+  // יומן פעילות אחרונה
+  const list = $('eventList');
+  list.innerHTML = '';
+  const recent = events.slice(-30).reverse();
+  if (!hasApi || recent.length === 0) {
+    $('statsEmpty').classList.remove('hidden');
+    list.classList.add('hidden');
+  } else {
+    $('statsEmpty').classList.add('hidden');
+    list.classList.remove('hidden');
+    recent.forEach((e) => {
+      const row = document.createElement('div');
+      row.className = 'event-row ' + e.type;
+      const d = new Date(e.ts);
+      const time = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+      const t = document.createElement('span');
+      t.className = 'event-time';
+      t.textContent = time;
+      const n = document.createElement('span');
+      n.className = 'event-name';
+      n.textContent = EVENT_LABELS[e.type] || e.type;
+      row.append(t, n);
+      list.appendChild(row);
+    });
+  }
+}
+
+/* ---------- חריגים חד-פעמיים ---------- */
+function setOverride(date, type) {
+  if (!schedule.overrides) schedule.overrides = [];
+  const idx = schedule.overrides.findIndex((o) => o.date === date);
+  if (idx >= 0) schedule.overrides[idx] = { date, type };
+  else schedule.overrides.push({ date, type });
+}
+
+function tomorrowKey() {
+  const t = new Date();
+  t.setDate(t.getDate() + 1);
+  return dateKeyStr(t);
+}
+
+function renderOverrides() {
+  const list = $('overrideList');
+  if (!list) return;
+  list.innerHTML = '';
+  const ovs = (schedule.overrides || []).slice().sort((a, b) => (a.date < b.date ? -1 : 1));
+  if (ovs.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'override-empty';
+    empty.textContent = 'אין חריגים — הלוח השבועי חל בכל הימים';
+    list.appendChild(empty);
+    return;
+  }
+  ovs.forEach((ov) => {
+    const [y, m, d] = ov.date.split('-').map(Number);
+    const dt = new Date(y, m - 1, d);
+    const row = document.createElement('div');
+    row.className = 'override-row';
+    const info = document.createElement('div');
+    info.className = 'override-info';
+    const dateEl = document.createElement('strong');
+    dateEl.textContent = d + '/' + m + '/' + y + ' (' + T.DAY_NAMES_HE[dt.getDay()] + ')';
+    const badge = document.createElement('span');
+    badge.className = 'type-badge ' + (ov.type === 'block' ? 'blocked' : 'allowed');
+    badge.textContent = ov.type === 'block' ? 'חסום' : 'מותר';
+    info.append(dateEl, badge);
+    const del = document.createElement('button');
+    del.className = 'del-btn';
+    del.innerHTML = ICONS.close;
+    del.title = 'הסר חריג';
+    del.onclick = async () => {
+      if (!(await verifyPinSession())) { renderOverrides(); return; }
+      schedule.overrides = schedule.overrides.filter((o) => o.date !== ov.date);
+      renderOverrides();
+      persist();
+    };
+    row.append(info, del);
+    list.appendChild(row);
+  });
+}
+
+/* ---------- מצב ההגנה ---------- */
+async function renderSecurity() {
+  const list = $('securityList');
+  if (!list) return;
+  if (!API) {
+    list.innerHTML = '<div class="check-item pending">זמין רק בגרסת המחשב המלאה</div>';
+    return;
+  }
+  const sec = await API.getSecurity();
+  const items = [
+    { ok: sec.pin, label: 'סיסמה מוגדרת', hint: 'מגנה על ההגדרות ועל מסך החסימה' },
+    { ok: sec.lockWs, label: 'נעילת מסך פיזית', hint: 'Windows ננעלת בשעות החסימה' },
+    { ok: sec.enabled, label: 'האכיפה פעילה', hint: 'המתג הראשי דלוק' },
+    { ok: sec.elevated, label: 'הרצה עם הרשאות מנהל', hint: 'מאפשרת חסימת כל המשתמשים' },
+    { ok: sec.shared, label: 'הגדרות משותפות לכל המשתמשים', hint: 'כל חשבון במחשב נחסם לפי אותו לוח' },
+    { ok: sec.recovery, label: 'מייל לשחזור סיסמה', hint: 'לשחזור אם שוכחים את הסיסמה' }
+  ];
+  list.innerHTML = '';
+  items.forEach((it) => {
+    const row = document.createElement('div');
+    row.className = 'check-item ' + (it.ok ? 'ok' : 'warn');
+    const dot = document.createElement('span');
+    dot.className = 'check-dot';
+    const texts = document.createElement('div');
+    texts.className = 'check-text';
+    const strong = document.createElement('strong');
+    strong.textContent = it.label;
+    const hint = document.createElement('span');
+    hint.textContent = it.hint;
+    texts.append(strong, hint);
+    row.append(dot, texts);
+    list.appendChild(row);
+  });
+}
+
+/* ---------- לשוניות ---------- */
+function initTabs() {
+  const buttons = document.querySelectorAll('.tab-btn');
+  const panels = document.querySelectorAll('.tab-panel');
+  const activate = (name) => {
+    buttons.forEach((b) => {
+      const on = b.dataset.tab === name;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+    panels.forEach((p) => p.classList.toggle('hidden', p.dataset.panel !== name));
+    if (name === 'stats') renderStats();
+    if (name === 'settings') { renderSecurity(); renderOverrides(); }
+  };
+  buttons.forEach((b) => b.addEventListener('click', () => activate(b.dataset.tab)));
+  activate('schedule');
+}
+
+/* ---------- אתחול ---------- */
+function init() {
+  initTabs();
+  const load = async () => {
+    if (API) {
+      const data = await API.getSettings();
+      schedule = T.normalizeSchedule(data);
+      sessionUnlocked = !!(data && data.sessionUnlocked);
+    } else {
+      try {
+        const raw = localStorage.getItem('ben-hazmanim-settings');
+        if (raw) schedule = T.normalizeSchedule(JSON.parse(raw));
+        sessionUnlocked = true; // בדפדפן אין נעילה
+      } catch { /* ignore */ }
+    }
+    applySettingsToUI();
+    renderWeek();
+    refreshStatus();
+    applyLoginState();
+    updateLiveClock();
+    renderSecurity();
+    renderStats();
+    setInterval(() => { refreshStatus(); updateLiveClock(); }, 1000);
+    if (API) {
+      API.onStatus(applyStatus);
+      API.onUpdate(showUpdateBanner);
+    }
+  };
+
+  load();
+
+  /* ---------- כניסה ---------- */
+  const doLogin = () => {
+    if (loginPending) return;
+    const pin = $('loginInput').value;
+    if (!pin) return;
+    loginPending = true;
+    tryLogin(pin).finally(() => { loginPending = false; });
+  };
+  $('loginOk').onclick = doLogin;
+  $('loginInput').onkeydown = (e) => { if (e.key === 'Enter') doLogin(); };
+  $('loginForgot').onclick = async () => {
+    if (!API) { toast('שחזור זמין רק בגרסת המחשב המלאה'); return; }
+    const res = await API.sendRecovery();
+    if (res && res.ok) {
+      toast('הסיסמה נשלחה למייל המוגדר', 'success');
+    } else {
+      toast((res && res.error) || 'שליחה נכשלה', 'error');
+    }
+  };
+
+  /* ---------- אירועים ---------- */
+
+  $('masterToggle').onchange = async () => {
+    const desired = $('masterToggle').checked;
+    if (!(await verifyPinSession())) { $('masterToggle').checked = schedule.enabled; return; }
+    schedule.enabled = desired;
+    updateMasterLabel();
+    await persist();
+    refreshStatus();
+  };
+
+  $('modeBlocklist').onclick = async () => {
+    if (!(await verifyPinSession())) { setModeUI(); return; }
+    schedule.mode = 'blocklist';
+    setModeUI();
+    persist();
+  };
+  $('modeAllowlist').onclick = async () => {
+    if (!(await verifyPinSession())) { setModeUI(); return; }
+    schedule.mode = 'allowlist';
+    setModeUI();
+    persist();
+  };
+
+  $('graceInput').onchange = async () => {
+    const val = Math.max(0, Math.min(600, Number($('graceInput').value) || 0));
+    if (!(await verifyPinSession())) { $('graceInput').value = schedule.graceSeconds; return; }
+    schedule.graceSeconds = val;
+    $('graceInput').value = val;
+    persist();
+  };
+
+  $('lockWsToggle').onchange = async () => {
+    const desired = $('lockWsToggle').checked;
+    if (!(await verifyPinSession())) { $('lockWsToggle').checked = schedule.lockWorkstation; return; }
+    schedule.lockWorkstation = desired;
+    persist();
+  };
+
+  /* ---------- ערכת נושא ---------- */
+  document.querySelectorAll('.theme-btn').forEach((btn) => {
+    btn.onclick = async () => {
+      // שינוי ערכת נושא הוא שינוי ויזואלי בלבד — אינו דורש אימות חוזר
+      schedule.theme = btn.dataset.themeChoice;
+      applyTheme();
+      await persist();
+    };
+  });
+
+  /* ---------- סיסמה ---------- */
+  $('pinSaveBtn').onclick = async () => {
+    const pin = $('pinInput').value;
+    const confirm = $('pinInput2').value;
+    if (!T.isValidPassword(pin)) {
+      toast('הסיסמה צריכה להיות 4-20 תווים ללא רווחים', 'error');
+      return;
+    }
+    if (pin !== confirm) {
+      toast('הסיסמאות אינן תואמות — הזינו שוב', 'error');
+      $('pinInput2').value = '';
+      return;
+    }
+    let oldPin = null;
+    if (schedule.pinHash) {
+      oldPin = await promptPin();
+      if (oldPin == null) return;
+    }
+    let ok = false;
+    if (API) {
+      const res = await API.setPin(pin, oldPin);
+      ok = !!(res && res.ok);
+      if (!ok) toast((res && res.error) || 'שגיאה בשמירת סיסמה', 'error');
+    } else {
+      schedule.pinHash = T.sha256Hex(pin);
+      ok = true;
+    }
+    if (!ok) return;
+    schedule.pinHash = T.sha256Hex(pin);
+    pinVerifiedAt = Date.now();
+    $('pinInput').value = '';
+    $('pinInput2').value = '';
+    $('pinStatus').textContent = 'מוגדרת';
+    await persist();
+    toast('הסיסמה נשמרה', 'success');
+  };
+
+  $('pinClearBtn').onclick = async () => {
+    if (!schedule.pinHash) return;
+    const oldPin = await promptPin();
+    if (oldPin == null) return;
+    let ok = false;
+    if (API) {
+      const res = await API.clearPin(oldPin);
+      ok = !!(res && res.ok);
+      if (!ok) toast((res && res.error) || 'סיסמה שגויה', 'error');
+    } else {
+      schedule.pinHash = null;
+      ok = true;
+    }
+    if (!ok) return;
+    schedule.pinHash = null;
+    pinVerifiedAt = Date.now();
+    $('pinStatus').textContent = 'לא מוגדרת';
+    $('pinInput').value = '';
+    $('pinInput2').value = '';
+    await persist();
+    toast('הסיסמה בוטלה', 'success');
+  };
+
+  /* ---------- שחזור ועדכונים ---------- */
+  const saveSecurity = async (silent) => {
+    // אימות סיסמה לפני שינוי המצב — כדי לא להשאיר ערכים לא שמורים בממשק
+    if (!(await verifyPinSession())) { applySettingsToUI(); return; }
+    schedule.recoveryEmail = $('recoveryEmail').value.trim();
+    await persist();
+    if (!silent) toast('הגדרות האבטחה נשמרו', 'success');
+  };
+  ['recoveryEmail'].forEach((id) => {
+    $(id).addEventListener('change', () => saveSecurity(false));
+  });
+
+  $('testRecoveryBtn').onclick = async () => {
+    if (!API) { toast('שליחה זמינה רק בגרסת המחשב המלאה'); return; }
+    if (!(await verifyPinSession())) return;
+    await saveSecurity(true);
+    toast('שולח את הסיסמה למייל…');
+    const res = await API.sendRecovery();
+    if (res && res.ok) {
+      toast('הסיסמה נשלחה למייל המוגדר', 'success');
+    } else {
+      toast((res && res.error) || 'שליחה נכשלה', 'error');
+    }
+  };
+
+  $('checkUpdateBtn').onclick = async () => {
+    if (!API) { toast('בדיקת עדכונים זמינה רק בגרסת המחשב המלאה'); return; }
+    if (!(await verifyPinSession())) return;
+    await saveSecurity(true);
+    const res = await API.checkUpdate();
+    if (res && res.ok && res.update) {
+      showUpdateBanner(res.update);
+    } else if (res && res.ok) {
+      toast('הגרסה שלך עדכנית', 'success');
+    } else {
+      toast((res && res.error) || 'לא ניתן לבדוק עדכונים', 'error');
+    }
+  };
+
+  $('updateClose').onclick = () => $('updateBanner').classList.add('hidden');
+
+  /* ---------- הודעה אישית במסך החסימה ---------- */
+  $('blockMessage').addEventListener('change', async () => {
+    if (!(await verifyPinSession())) { $('blockMessage').value = schedule.blockMessage || ''; return; }
+    schedule.blockMessage = $('blockMessage').value.trim();
+    await persist();
+    toast('הודעת מסך החסימה נשמרה', 'success');
+  });
+
+  /* ---------- חריגים חד-פעמיים ---------- */
+  const addOverrideUi = async (date, type) => {
+    if (!(await verifyPinSession())) { renderOverrides(); return; }
+    setOverride(date, type);
+    renderOverrides();
+    await persist();
+    toast('החריג נשמר — ' + (type === 'block' ? 'חסום' : 'מותר') + ' כל היום', 'success');
+  };
+  $('addOverrideBtn').onclick = async () => {
+    const date = $('overrideDate').value;
+    if (!date) { toast('בחרו תאריך תחילה', 'error'); return; }
+    await addOverrideUi(date, $('overrideType').value);
+  };
+  $('allowTomorrowBtn').onclick = () => addOverrideUi(tomorrowKey(), 'allow');
+  $('blockTomorrowBtn').onclick = () => addOverrideUi(tomorrowKey(), 'block');
+
+  /* ---------- גיבוי ושחזור ---------- */
+  $('backupExportBtn').onclick = async () => {
+    if (!API) { toast('גיבוי זמין רק בגרסת המחשב המלאה'); return; }
+    if (!(await verifyPinSession())) return;
+    const res = await API.exportBackup();
+    if (res && res.ok) toast('הגיבוי נשמר בהצלחה', 'success');
+    else toast((res && res.error) || 'הגיבוי נכשל', 'error');
+  };
+  $('backupImportBtn').onclick = async () => {
+    if (!API) { toast('שחזור זמין רק בגרסת המחשב המלאה'); return; }
+    if (!(await verifyPinSession())) return;
+    const res = await API.importBackup();
+    if (res && res.ok) {
+      toast('ההגדרות שוחזרו', 'success');
+      if (API) {
+        const data = await API.getSettings();
+        schedule = T.normalizeSchedule(data);
+      }
+      applySettingsToUI();
+      renderWeek();
+      renderSecurity();
+      refreshStatus();
+      applyLoginState();
+    } else {
+      toast((res && res.error) || 'השחזור נכשל', 'error');
+    }
+  };
+
+  /* ---------- נעילה / פתיחה ---------- */
+  $('lockNowBtn').onclick = () => {
+    if (API) {
+      API.lockNow();
+      toast('המחשב ננעל — מסך החסימה פעיל', 'success');
+    } else {
+      toast('נעילה זמינה רק בגרסת המחשב המלאה');
+    }
+  };
+
+  $('unlockBtn').onclick = async () => {
+    if (!API) {
+      toast('פתיחה זמינה רק בגרסת המחשב המלאה');
+      return;
+    }
+    const pin = await promptPin();
+    if (pin == null) return;
+    const res = await API.unlockNow(pin);
+    if (res.ok) {
+      toast('המחשב נפתח עד המעבר הבא', 'success');
+      refreshStatus();
+    } else {
+      toast(res.error || 'סיסמה שגויה', 'error');
+    }
+  };
+
+  /* ---------- קרדיט ---------- */
+  $('siteLink').onclick = (e) => {
+    e.preventDefault();
+    if (API) API.openExternal('https://digital.levtov.uk/');
+  };
+  $('mailLink').onclick = (e) => {
+    e.preventDefault();
+    if (API) API.openExternal('mailto:mytovmail@gmail.com');
+  };
+
+  if (API) {
+    API.getVersion().then((v) => {
+      $('version').textContent = v;
+      $('version2').textContent = v;
+    });
+  }
+}
+
+document.addEventListener('DOMContentLoaded', init);

@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>בין הזמנים — ניהול זמן מחשב</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app" id="app">
+
+    <!-- באנר עדכון -->
+    <div class="update-banner hidden" id="updateBanner">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+      <span id="updateText">עדכון זמין</span>
+      <a href="#" id="updateLink">להורדה
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12l7 7 7-7"/></svg>
+      </a>
+      <button class="close-x" id="updateClose" title="סגירה">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+
+    <!-- כותרת -->
+    <header class="hero">
+      <div class="hero-top">
+        <div class="brand">
+          <div class="logo">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+          </div>
+          <div>
+            <h1>בין הזמנים</h1>
+            <p class="subtitle">ניהול זמן גישה למחשב</p>
+          </div>
+        </div>
+        <div class="clock-chip">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+          <div>
+            <span class="clock-chip-time" id="liveClockTime">--:--</span>
+            <span class="clock-chip-day" id="liveClockDay">טוען…</span>
+          </div>
+        </div>
+        <div class="master">
+          <span class="master-label" id="masterLabel">האכיפה פעילה</span>
+          <label class="switch">
+            <input type="checkbox" id="masterToggle" checked />
+            <span class="slider"></span>
+          </label>
+        </div>
+      </div>
+
+      <!-- מצב נוכחי -->
+      <div class="status-card" id="statusCard">
+        <div class="status-ring" id="statusRing">
+          <svg viewBox="0 0 100 100" class="ring-svg">
+            <circle class="ring-track" cx="50" cy="50" r="44"></circle>
+            <circle class="ring-progress" id="ringProgress" cx="50" cy="50" r="44"></circle>
+          </svg>
+          <div class="status-inner">
+            <div class="status-dot" id="statusDot"></div>
+            <div class="status-state" id="statusState">מותר</div>
+          </div>
+        </div>
+        <div class="status-info">
+          <div class="status-title" id="statusTitle">המחשב פתוח לשימוש</div>
+          <div class="status-detail" id="statusDetail">טוען…</div>
+          <div class="countdown-row">
+            <span class="countdown-label">עד למעבר הבא</span>
+            <span class="countdown-time" id="countdownBig">--:--:--</span>
+          </div>
+          <div class="status-actions">
+            <button class="btn btn-danger" id="lockNowBtn">
+              <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+              נעל עכשיו
+            </button>
+            <button class="btn btn-ghost hidden" id="unlockBtn">
+              <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>
+              פתח את המחשב (סיסמה)
+            </button>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <!-- לשוניות -->
+    <nav class="tabs" id="tabsBar" role="tablist" aria-label="ניווט ראשי">
+      <button class="tab-btn active" data-tab="schedule" role="tab" aria-selected="true">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M8 3v4M16 3v4M3 10h18"/></svg>
+        לוח זמנים
+      </button>
+      <button class="tab-btn" data-tab="stats" role="tab" aria-selected="false">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>
+        סטטיסטיקות
+      </button>
+      <button class="tab-btn" data-tab="settings" role="tab" aria-selected="false">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/></svg>
+        הגדרות
+      </button>
+    </nav>
+
+    <!-- לוח זמנים -->
+    <section class="card tab-panel" data-panel="schedule">
+      <div class="card-head">
+        <h2>ברירת המחדל של המחשב</h2>
+        <p class="hint">מה קורה בימים ובשעות שלא כתבתם בהם כלום? ההגדרה הזו היא גלובלית — והיא נפרדת לגמרי מהחלוניות של הימים והשעות שלמטה.</p>
+      </div>
+      <div class="mode-toggle">
+        <button class="mode-btn active" data-mode="blocklist" id="modeBlocklist">
+          <div class="mode-icon">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>
+          </div>
+          <div class="mode-text">
+            <strong>המחשב פתוח תמיד</strong>
+            <span>המחשב פתוח כברירת מחדל, וייחסם רק בחלונות שתסמנו כ"חסום"</span>
+          </div>
+        </button>
+        <button class="mode-btn" data-mode="allowlist" id="modeAllowlist">
+          <div class="mode-icon">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+          </div>
+          <div class="mode-text">
+            <strong>המחשב חסום תמיד</strong>
+            <span>המחשב חסום כברירת מחדל, וייפתח רק בחלונות שתסמנו כ"מותר"</span>
+          </div>
+        </button>
+      </div>
+      <div class="mode-note">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg>
+        <span><strong>הערה:</strong> הגדרה זו אינה קשורה לחלוניות הימים והשעות — שם מסמנים רק את החלונות המיוחדים. גם בימים ובשעות שלא כתבתם כלום, חלה ברירת המחדל שנבחרה כאן.</span>
+      </div>
+
+      <div class="card-head" style="margin-top:22px">
+        <h2>לוח זמנים שבועי</h2>
+        <p class="hint">לחצו על יום כדי להוסיף חלון זמן. חלון שסופו לפני תחילתו — למשל 22:00 עד 06:00 — חוצה חצות וממשיך למחרת בבוקר. השעון שלצד כל יום מראה את כל שעות היממה.</p>
+      </div>
+      <div class="week-grid" id="weekGrid"></div>
+    </section>
+
+    <!-- סטטיסטיקות -->
+    <section class="card tab-panel hidden" data-panel="stats">
+      <div class="card-head">
+        <h2>יומן וסטטיסטיקות</h2>
+        <p class="hint">כמה זמן המחשב היה חסום, כמה ניסיונות פתיחה היו, ומה קרה ביומן — לפי תיעוד התוכנה.</p>
+      </div>
+      <div class="stats-cards">
+        <div class="stat-card">
+          <span class="stat-label">חסום היום</span>
+          <span class="stat-value" id="statBlockedToday">–</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-label">חסום בשבוע</span>
+          <span class="stat-value" id="statBlockedWeek">–</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-label">נעילות ידניות היום</span>
+          <span class="stat-value" id="statManualToday">–</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-label">פתיחות מוצלחות היום</span>
+          <span class="stat-value" id="statUnlockOk">–</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-label">ניסיונות כושלים היום</span>
+          <span class="stat-value" id="statUnlockFail">–</span>
+        </div>
+      </div>
+      <h3 class="stats-sub">שעות חסימה — 7 הימים האחרונים</h3>
+      <div class="bar-chart" id="barChart"></div>
+      <h3 class="stats-sub">פעילות אחרונה</h3>
+      <div class="event-list" id="eventList"></div>
+      <div class="stats-empty hidden" id="statsEmpty">אין עדיין נתונים — הנתונים נאספים מהפעלת התוכנה.</div>
+    </section>
+
+    <!-- הגדרות -->
+    <section class="card tab-panel hidden" data-panel="settings">
+      <div class="card-head">
+        <h2>הגדרות נוספות</h2>
+      </div>
+      <div class="settings-grid">
+
+        <div class="setting theme-setting">
+          <div class="setting-text">
+            <strong>ערכת נושא</strong>
+            <span>בהיר, כהה, או התאמה אוטומטית להגדרת Windows</span>
+          </div>
+          <div class="theme-toggle" role="radiogroup" aria-label="ערכת נושא">
+            <button class="theme-btn" data-theme-choice="system" role="radio" aria-checked="true">
+              <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+              מערכת
+            </button>
+            <button class="theme-btn" data-theme-choice="light" role="radio" aria-checked="false">
+              <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+              בהיר
+            </button>
+            <button class="theme-btn" data-theme-choice="dark" role="radio" aria-checked="false">
+              <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+              כהה
+            </button>
+          </div>
+        </div>
+
+        <div class="setting">
+          <div class="setting-text">
+            <strong>זמן התראה לפני הנעילה</strong>
+            <span>כמה שניות להזהיר לפני נעילת המחשב (ברירת מחדל: 2 דקות)</span>
+          </div>
+          <input type="number" id="graceInput" min="0" max="600" step="10" value="120" class="num-input" />
+        </div>
+
+        <div class="setting">
+          <div class="setting-text">
+            <strong>נעילת מסך פיזית</strong>
+            <span>מה זה אומר? בזמן החסימה — ווינדוס עצמה ננעלת (כמו לחיצה על Win+L): גם אם מישהו סוגר את מסך החסימה שלנו, אי אפשר לחזור למחשב בלי סיסמת ווינדוס.
+              אם זה כבוי — מסך החסימה שלנו עדיין מופיע, אבל ווינדוס עצמה לא ננעלת.</span>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="lockWsToggle" checked />
+            <span class="slider"></span>
+          </label>
+        </div>
+
+        <div class="setting">
+          <div class="setting-text">
+            <strong>סיסמה</strong>
+            <span id="pinStatus">לא מוגדרת</span>
+          </div>
+          <div class="pin-controls">
+            <input type="password" id="pinInput" placeholder="סיסמה חדשה" class="text-input" autocomplete="new-password" />
+            <input type="password" id="pinInput2" placeholder="אימות סיסמה" class="text-input" autocomplete="new-password" />
+            <button class="btn btn-primary btn-sm" id="pinSaveBtn">שמור</button>
+            <button class="btn btn-ghost btn-sm" id="pinClearBtn">בטל</button>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- מסך חסימה -->
+      <div class="card-head" style="margin-top:26px">
+        <h2>מסך החסימה</h2>
+        <p class="hint">מסר אישי שמוצג למשתמש כשהמחשב חסום — למשל תזכורת ללימוד.</p>
+      </div>
+      <div class="setting">
+        <div class="setting-text">
+          <strong>הודעה אישית</strong>
+          <span>מופיעה מתחת לכותרת במסך החסימה</span>
+        </div>
+        <input type="text" id="blockMessage" class="text-input wide-msg" placeholder="למשל: נלמד עכשיו בשקט" maxlength="300" />
+      </div>
+
+      <!-- חריגים חד-פעמיים -->
+      <div class="card-head" style="margin-top:26px">
+        <h2>חריגים חד-פעמיים</h2>
+        <p class="hint">דילוג על הלוח הרגיל ליום מסוים — מתאים לחופשה, חג או יום מיוחד. החריג גובר על לוח הזמנים השבועי.</p>
+      </div>
+      <div class="override-controls">
+        <input type="date" id="overrideDate" class="date-input" />
+        <select id="overrideType" class="select-input">
+          <option value="allow">אפשר כל היום</option>
+          <option value="block">חסום כל היום</option>
+        </select>
+        <button class="btn btn-primary btn-sm" id="addOverrideBtn">הוסף</button>
+        <button class="btn btn-ghost btn-sm" id="allowTomorrowBtn">אפשר מחר</button>
+        <button class="btn btn-ghost btn-sm" id="blockTomorrowBtn">חסום מחר</button>
+      </div>
+      <div class="override-list" id="overrideList"></div>
+
+      <!-- אבטחה ושחזור (בתוך הגדרות) -->
+      <div class="card-head" style="margin-top:26px">
+        <h2>אבטחה ושחזור סיסמה</h2>
+        <p class="hint">שכחתם את הסיסמה? התוכנה שולחת אותה למייל שמוגדר כאן. שחזור דורש גישה לאינטרנט; כל שאר פעולות התוכנה פועלות במצב אופליין מלא.</p>
+      </div>
+      <div class="recovery-grid single">
+        <div class="field">
+          <label>כתובת מייל לשחזור</label>
+          <input type="email" id="recoveryEmail" class="text-input wide" placeholder="me@example.com" />
+        </div>
+        <div class="recovery-actions">
+          <button class="btn btn-ghost" id="testRecoveryBtn">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>
+            שליחת סיסמה לבדיקה
+          </button>
+          <button class="btn btn-ghost" id="checkUpdateBtn">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+            בדוק עדכונים
+          </button>
+        </div>
+      </div>
+
+      <!-- מצב ההגנה + גיבוי -->
+      <div class="card-head" style="margin-top:26px">
+        <h2>מצב ההגנה שלך</h2>
+        <p class="hint">בדיקת תקינות מהירה — ודאו שכל ההגנות פעילות כדי שהתוכנה תעשה את העבודה.</p>
+      </div>
+      <div class="checklist" id="securityList">
+        <div class="check-item pending">טוען…</div>
+      </div>
+      <div class="recovery-actions">
+        <button class="btn btn-ghost" id="backupExportBtn">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>
+          גיבוי הגדרות
+        </button>
+        <button class="btn btn-ghost" id="backupImportBtn">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21V9M7 14l5-5 5 5"/><path d="M5 3h14"/></svg>
+          שחזור מגיבוי
+        </button>
+      </div>
+
+      <!-- אודות (בתוך הגדרות) -->
+      <div class="card-head" style="margin-top:26px">
+        <h2>אודות</h2>
+      </div>
+      <div class="about">
+        <div class="logo small">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+        </div>
+        <div>
+          <h2>בין הזמנים <span class="version">v<span id="version">1.1.0</span></span></h2>
+          <p class="hint">נוצר באהבה על ידי <strong>לב טוב דיגיטל</strong>
+            <svg class="icon inline-heart" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
+          </p>
+          <div class="about-links">
+            <a href="#" id="siteLink">
+              <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18 15 15 0 0 1 0-18z"/></svg>
+              אתר הבית: digital.levtov.uk
+            </a>
+            <a href="#" id="mailLink">
+              <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>
+              צרו קשר: mytovmail@gmail.com
+            </a>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <footer class="footer">
+      <span>בין הזמנים v<span id="version2">1.1.0</span> • לב טוב דיגיטל</span>
+      <span class="save-indicator" id="saveIndicator">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+        נשמר
+      </span>
+    </footer>
+  </div>
+
+  <!-- חלונית כניסה -->
+  <div class="modal-overlay hidden" id="loginModal">
+    <div class="modal login">
+      <div class="logo center">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+      </div>
+      <h3>הגדרות נעולות</h3>
+      <p>הזינו את הסיסמה כדי לנהל את ההגדרות</p>
+      <input type="password" id="loginInput" placeholder="סיסמה" class="text-input" autofocus />
+      <button class="btn btn-primary btn-full" id="loginOk">היכנסו להגדרות</button>
+      <button class="btn btn-ghost btn-full" id="loginForgot">שכחתי סיסמה — שלחו למייל</button>
+      <div class="login-error hidden" id="loginError">סיסמה שגויה</div>
+    </div>
+  </div>
+
+  <!-- חלונית PIN -->
+  <div class="modal-overlay hidden" id="pinModal">
+    <div class="modal">
+      <h3>נדרשת סיסמה</h3>
+      <p>הזינו את הסיסמה כדי לבצע שינוי</p>
+      <input type="password" id="pinModalInput" placeholder="סיסמה" class="text-input" inputmode="numeric" autofocus />
+      <div class="modal-actions">
+        <button class="btn btn-primary" id="pinModalOk">אישור</button>
+        <button class="btn btn-ghost" id="pinModalCancel">ביטול</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast hidden" id="toast"></div>
+
+  <script src="../scheduler.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

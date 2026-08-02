@@ -1,0 +1,19 @@
+node_modules/
+dist/
+out/
+*.log
+.DS_Store
+Thumbs.db
+
+# קבצי Freebuff (מסד הנתונים של סביבת הפיתוח — לא חלק מהתוכנה)
+.freebuff/
+desktop-v2.db
+desktop-v2.db-shm
+desktop-v2.db-wal
+
+# קובץ תצוגה מקדימה (נוצר ע"י npm run preview)
+preview.html
+
+# הגדרות מקומיות וסודות
+.env
+*.local

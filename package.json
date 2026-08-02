@@ -1,0 +1,46 @@
+{
+  "name": "ben-hazmanim",
+  "productName": "בין הזמנים - ניהול זמן מחשב",
+  "version": "1.1.0",
+  "description": "ניהול שעות גישה למחשב - הגדרת שעות וימים מותרים/חסומים מראש",
+  "main": "main.js",
+  "author": "לב טוב דיגיטל <mytovmail@gmail.com> (https://digital.levtov.uk/)",
+  "homepage": "https://digital.levtov.uk/",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test \"test/**/*.test.js\"",
+    "preview": "node scripts/build-preview.js",
+    "dist": "electron-builder --win"
+  },
+  "devDependencies": {
+    "electron": "^37.2.0",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "com.levtov.benhazmanim",
+    "productName": "בין הזמנים",
+    "files": [
+      "main.js",
+      "preload.js",
+      "scheduler.js",
+      "renderer/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "assets/icon.ico"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "installerLanguages": [
+        "he_IL",
+        "en_US"
+      ]
+    }
+  }
+}
