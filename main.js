@@ -612,7 +612,9 @@ try {
 
 // מקור העדכונים — URL לקובץ JSON עם גרסה. נקבע כאן בקוד בלבד
 // (אין שדה בממשק) — הכפתור "בדוק עדכונים" משתמש בכתובת זו.
-const UPDATE_URL = ''; // ← הכניסו כאן את הכתובת לקובץ version.json
+// הקובץ version.json מתגורר במאגר הגיטהאב הציבורי, וכל שינוי בו
+// (גרסה חדשה) יימצא מיד על ידי כל העותקים המותקנים של התוכנה.
+const UPDATE_URL = 'https://raw.githubusercontent.com/Lev-Good/Between-times/main/version.json';
 
 async function sendRecovery() {
   const email = schedule.recoveryEmail;
