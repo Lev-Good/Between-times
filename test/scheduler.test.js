@@ -15,6 +15,30 @@ test('default schedule is blocklist and enabled', () => {
   assert.equal(s.week.length, 7);
 });
 
+test('fresh install: default is open always unless blocked windows defined (not the opposite)', () => {
+  // ללא שום חלון — המחשב פתוח בכל שעות היממה (blocklist),
+  // ולא חסום (אלא אם הגדירו חלונות חסימה).
+  const s = S.defaultSchedule();
+  for (let d = 0; d < 7; d++) {
+    for (const h of [0, 6, 12, 18, 23]) {
+      assert.equal(
+        S.getStatus(s, new Date(2026, 0, 4 + d, h, 30)).state,
+        'allowed',
+        'יום ' + d + ' ב-' + h + ':00 צריך להיות פתוח כברירת מחדל'
+      );
+    }
+  }
+  assert.equal(s.blockMessage, '', 'הודעה אישית צריכה להיות ריקה בהתקנה ראשונית');
+  assert.equal(S.normalizeSchedule({}).blockMessage, '');
+});
+
+test('fresh install: adding a blocked window turns only that window blocked', () => {
+  const s = S.defaultSchedule();
+  s.week[0].slots.push({ start: S.parseHM('09:00'), end: S.parseHM('14:00'), type: 'blocked' });
+  assert.equal(S.getStatus(s, new Date(2026, 0, 4, 10, 0)).state, 'blocked');
+  assert.equal(S.getStatus(s, new Date(2026, 0, 4, 20, 0)).state, 'allowed');
+});
+
 test('blocked slot blocks, free time allows (blocklist mode)', () => {
   const s = S.defaultSchedule();
   s.week[0].slots.push({ start: S.parseHM('08:00'), end: S.parseHM('16:00'), type: 'blocked' });

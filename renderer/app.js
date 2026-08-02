@@ -9,7 +9,8 @@ const ICONS = {
   close: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>',
   plus: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
   check: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>',
-  alert: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/></svg>'
+  alert: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/></svg>',
+  swap: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 16V4m0 0L3 8m4-4 4 4"/><path d="M17 8v12m0 0 4-4m-4 4-4-4"/></svg>'
 };
 
 /* ---------- מצב ---------- */
@@ -206,25 +207,27 @@ function renderClock(day, now, todayIdx) {
     });
   });
 
-  // מחוג "עכשיו" ליום הנוכחי
+  // מחוג "עכשיו" ליום הנוכחי — קצר מהשעות המודפסות כדי לא לכסות אותן
   if (day.day === todayIdx) {
     const minutes = now.getHours() * 60 + now.getMinutes();
-    const tip = polar(cx, cy, 30, minutes);
+    const tip = polar(cx, cy, 24, minutes);
     svg.appendChild(svgEl('line', {
       x1: cx, y1: cy, x2: tip.x.toFixed(2), y2: tip.y.toFixed(2), class: 'clock-now'
     }));
     svg.appendChild(svgEl('circle', { cx, cy, r: 2.2, class: 'clock-now-dot' }));
   }
 
-  // שעות מודפסות (12, 3, 6, 9)
-  [['12', 0], ['3', 90], ['6', 180], ['9', 270]].forEach(([txt, deg]) => {
-    const p = polar(cx, cy, 29.5, deg * 4);
+  // שעות מודפסות — השעות האמיתיות של השעון (כל 3 שעות),
+  // כך שהקשתות של החלונות תואמות בדיוק לשעות שמסמנים ומגדירים.
+  // העיקריות (0/6/12/18) מודגשות, והבינוניות (3/9/15/21) קטנות יותר.
+  [0, 3, 6, 9, 12, 15, 18, 21].forEach((h) => {
+    const p = polar(cx, cy, 26.5, h * 60);
     const t = svgEl('text', {
       x: p.x.toFixed(2), y: p.y.toFixed(2),
       'text-anchor': 'middle', 'dominant-baseline': 'central',
-      class: 'clock-label'
+      class: 'clock-label' + (h % 6 === 0 ? ' major' : '')
     });
-    t.textContent = txt;
+    t.textContent = String(h);
     svg.appendChild(t);
   });
 
@@ -271,12 +274,29 @@ function renderWeek() {
     day.slots.forEach((slot, i) => list.appendChild(renderSlotRow(day, i, overlapIdx.has(i))));
     card.appendChild(list);
 
+    // כשאין חלונות ליום — להציג בבירור מה חל באותו יום לפי ברירת המחדל,
+    // כדי שלא יהיה בלבול בין "פתוח תמיד" ל"חסום תמיד".
+    // הניסוח "כברירת מחדל" מדויק גם כשיש חריג חד-פעמי לאותו תאריך
+    // או חלון שחוצה חצות מהיום הקודם — אז בפועל היום יכול להיות חסום.
+    if (day.slots.length === 0) {
+      const note = document.createElement('div');
+      const open = schedule.mode !== 'allowlist';
+      note.className = 'day-empty-note ' + (open ? 'open' : 'blocked');
+      note.textContent = open
+        ? 'פתוח כברירת מחדל — הוסיפו חלון כדי לחסום'
+        : 'חסום כברירת מחדל — הוסיפו חלון כדי להתיר';
+      card.appendChild(note);
+    }
+
     const addBtn = document.createElement('button');
     addBtn.className = 'add-slot';
     addBtn.innerHTML = ICONS.plus + '<span>הוסף חלון זמן</span>';
     addBtn.onclick = async () => {
       if (!(await verifyPinSession())) return;
-      day.slots.push({ start: T.parseHM('09:00'), end: T.parseHM('14:00'), type: 'blocked' });
+      // ברירת המחדל של חלון חדש תלויה בשיטה: במצב "פתוח תמיד" — חלון חסום;
+      // במצב "חסום תמיד" — חלון מותר. כך החלון החדש תמיד "משנה" משהו בלוח.
+      const newSlotType = schedule.mode === 'allowlist' ? 'allowed' : 'blocked';
+      day.slots.push({ start: T.parseHM('09:00'), end: T.parseHM('14:00'), type: newSlotType });
       renderWeek();
       persist();
     };
@@ -319,7 +339,8 @@ function renderSlotRow(day, idx, isOverlap) {
 
   const typeBtn = document.createElement('button');
   typeBtn.className = 'type-badge ' + slot.type;
-  typeBtn.textContent = slot.type === 'blocked' ? 'חסום' : 'מותר';
+  typeBtn.title = 'לחיצה מחליפה בין חסום למותר';
+  typeBtn.innerHTML = '<span>' + (slot.type === 'blocked' ? 'חסום' : 'מותר') + '</span>' + ICONS.swap;
   typeBtn.onclick = async () => {
     if (!(await verifyPinSession())) { renderWeek(); return; }
     slot.type = slot.type === 'blocked' ? 'allowed' : 'blocked';

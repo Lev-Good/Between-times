@@ -69,6 +69,7 @@ let schedule = S.defaultSchedule();
 let win = null;            // חלון ההגדרות
 let blockWins = [];        // חלונות החסימה (אחד לכל מסך)
 let tray = null;
+let quitWin = null;        // חלון אימות היציאה (סיסמת הורה) — למניעת עקיפת חסימה
 let lockedAt = null;       // מתי נכנסנו למצב חסום (לזמן התראה)
 let lastLockCall = 0;
 let isQuitting = false;
@@ -309,6 +310,8 @@ function showBlockWindows(status) {
 }
 
 function focusBlockWindows() {
+  // בזמן חלון אימות היציאה — לא לגנוב את המיקוד מההורה (אחרת אי אפשר להקליד סיסמה)
+  if (quitPromptOpen()) return;
   blockWins.forEach((bw) => {
     if (bw && !bw.isDestroyed()) {
       bw.show();
@@ -436,9 +439,43 @@ function updateTray(status) {
       click: () => enforce()
     },
     { type: 'separator' },
-    { label: 'יציאה', click: () => gracefulQuit() }
+    { label: 'יציאה', click: () => showQuitPrompt() }
   ]);
   tray.setContextMenu(menu);
+}
+
+/* ================= יציאה עם אימות סיסמה =================
+   כדי שילד לא יוכל לעקוף את החסימה בלחיצה על "יציאה" מתפריט המגש,
+   היציאה דורשת סיסמת הורה. האימות מתבצע בתהליך הראשי (verifyPinServer)
+   עם נעילה זמנית אחרי 5 ניסיונות שגויים — כמו בכל מקום אחר בתוכנה. */
+function quitPromptOpen() {
+  return !!(quitWin && !quitWin.isDestroyed());
+}
+
+function showQuitPrompt() {
+  // ללא סיסמה מוגדרת — החסימה אינה פעילה בכל מקרה, יציאה חופשית (כמו במסך החסימה)
+  if (!schedule.pinHash) { gracefulQuit(); return; }
+  if (quitPromptOpen()) { quitWin.show(); quitWin.focus(); return; }
+  quitWin = new BrowserWindow({
+    width: 420,
+    height: 360,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    title: 'יציאה — בין הזמנים',
+    backgroundColor: windowBg(),
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  });
+  quitWin.setAlwaysOnTop(true, 'screen-saver');
+  quitWin.loadFile(path.join(__dirname, 'renderer', 'quit.html'));
+  quitWin.on('closed', () => { quitWin = null; });
 }
 
 /* ================= חלון ראשי ================= */
@@ -638,11 +675,31 @@ async function sendRecovery() {
       signal: AbortSignal.timeout(15000)
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok || data.ok !== true) return { ok: false, error: data.error || 'שירות השחזור החזיר שגיאה' };
+    if (!res.ok || data.ok !== true) {
+      // תרגום שגיאות ידועות מהשרת להודעה ברורה בעברית
+      const raw = String(data.error || '');
+      const msg = recoveryErrorToHebrew(raw);
+      return { ok: false, error: msg };
+    }
     return { ok: true };
   } catch {
     return { ok: false, error: 'נדרשת גישה לאינטרנט לשחזור הסיסמה' };
   }
+}
+
+// תרגום שגיאות ידועות של שרת השחזור להודעה ברורה בעברית.
+// "secret invalid" נגרם כשהמפתח הסודי בסקריפט הפרוס (SECRET_KEY)
+// אינו תואם למפתח שמוגדר בתוכנה (secret.local.js).
+function recoveryErrorToHebrew(raw) {
+  const s = String(raw || '');
+  if (/secret invalid/i.test(s)) {
+    return 'השרת דחה את הבקשה (secret invalid) — המפתח הסודי בשרת השחזור אינו תואם למפתח שבתוכנה. עדכנו את SECRET_KEY בסקריפט הפרוס (gas/PasswordRecovery.gs) כך שיהיה זהה למפתח ב-secret.local.js, ופרסו מחדש.';
+  }
+  if (/missing fields/i.test(s)) {
+    return 'חסרים פרטים בבקשה — ודאו שמוגדרים מייל שחזור וסיסמה';
+  }
+  if (s) return 'שירות השחזור החזיר שגיאה: ' + s;
+  return 'שירות השחזור החזיר שגיאה';
 }
 
 /* ================= בדיקת עדכונים ================= */
@@ -822,7 +879,20 @@ function registerIpc() {
     return { ok: true };
   });
 
-  ipcMain.handle('app:quit', () => { gracefulQuit(); return { ok: true }; });
+  ipcMain.handle('app:quit', (_e, pin) => {
+    // יציאה דורשת אימות סיסמה בתהליך הראשי — מניעת עקיפת חסימה על ידי ילדים
+    if (schedule.pinHash) {
+      const v = verifyPinServer(pin);
+      if (!v.ok) return { ok: false, error: v.error };
+    }
+    gracefulQuit();
+    return { ok: true };
+  });
+
+  ipcMain.handle('quit:cancel', () => {
+    if (quitPromptOpen()) quitWin.destroy();
+    return { ok: true };
+  });
   ipcMain.handle('app:version', () => app.getVersion());
   ipcMain.handle('app:hide', () => {
     if (win && !win.isDestroyed()) win.hide();

@@ -559,10 +559,23 @@ body::after {
 .clock-seg.allowed { stroke: var(--green); filter: drop-shadow(0 0 4px rgba(52, 211, 153, 0.4)); }
 .clock-now { stroke: var(--now-hand); stroke-width: 1.6; stroke-linecap: round; filter: drop-shadow(0 0 4px var(--now-hand)); }
 .clock-now-dot { fill: var(--now-hand); }
-.clock-label { fill: var(--muted); font-size: 7.5px; font-weight: 700; font-family: inherit; }
+.clock-label { fill: var(--muted); font-size: 6.2px; font-weight: 600; font-family: inherit; }
+.clock-label.major { fill: var(--text); font-size: 7.2px; font-weight: 800; }
 .day-card.today .clock-ring { stroke: rgba(123, 107, 255, 0.65); }
 
 .slot-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
+
+.day-empty-note {
+  display: flex; align-items: center; gap: 7px;
+  justify-content: center;
+  font-size: 11.5px; font-weight: 600;
+  padding: 7px 10px; border-radius: 10px;
+  margin-bottom: 12px;
+  border: 1px dashed var(--border-strong);
+  animation: fadeSlide 0.25s var(--ease);
+}
+.day-empty-note.open { color: var(--green); background: var(--green-bg); }
+.day-empty-note.blocked { color: var(--red); background: var(--red-bg); }
 
 .slot-row {
   display: flex; align-items: center; gap: 7px;
@@ -599,19 +612,40 @@ body::after {
 }
 
 .type-badge {
-  display: inline-flex; align-items: center; gap: 6px;
+  display: inline-flex; align-items: center; gap: 5px;
   font-size: 11px; font-weight: 700; padding: 4px 10px; border-radius: 999px;
-  cursor: pointer; border: none; font-family: inherit;
-  transition: filter 0.15s var(--ease), transform 0.15s var(--ease);
+  border: 1px solid transparent; font-family: inherit;
+  position: relative;
+  transition: filter 0.15s var(--ease), transform 0.15s var(--ease),
+    border-color 0.15s var(--ease), box-shadow 0.15s var(--ease);
+  user-select: none;
 }
+/* רק תגיות לחיצה (כפתורים) מראות את אפקט הלחיצה — תגיות סטטיות (חריגים) לא */
+button.type-badge { cursor: pointer; }
+span.type-badge { cursor: default; }
 .type-badge::before {
   content: "";
   width: 6px; height: 6px; border-radius: 50%;
   background: currentColor;
+  flex-shrink: 0;
+}
+.type-badge .icon {
+  width: 11px; height: 11px;
+  opacity: 0;
+  transform: rotate(0deg);
+  margin-inline-end: -2px;
+  transition: opacity 0.15s var(--ease), transform 0.25s var(--ease);
 }
 .type-badge.blocked { background: var(--red-bg); color: var(--red); }
 .type-badge.allowed { background: var(--green-bg); color: var(--green); }
-.type-badge:hover { filter: brightness(1.25); transform: scale(1.05); }
+button.type-badge:hover {
+  filter: brightness(1.25);
+  transform: scale(1.06);
+  border-color: currentColor;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.25);
+}
+button.type-badge:hover .icon { opacity: 0.85; transform: rotate(180deg); }
+button.type-badge:active { transform: scale(0.97); }
 
 .del-btn {
   background: none; border: none; color: var(--muted);
