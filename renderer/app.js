@@ -452,8 +452,10 @@ function applyStatus(st) {
   updateCountdown(st);
 
   $('statusState').textContent = blocked ? 'חסום' : 'מותר';
+  // ללא סיסמה — החסימה אינה פעילה (הגנה מפני נעילה בלי מוצא)
+  const noPin = !st.pinSet;
   $('statusTitle').textContent = blocked
-    ? (st.manualLock ? 'המחשב חסום (נעילה ידנית)' : 'המחשב חסום בשעה זו')
+    ? (st.manualLock ? 'המחשב חסום (נעילה ידנית)' : (noPin ? 'החסימה אינה פעילה — אין סיסמה' : 'המחשב חסום בשעה זו'))
     : st.enabled === false
       ? 'האכיפה מושבתת'
       : 'המחשב פתוח לשימוש';
@@ -463,7 +465,9 @@ function applyStatus(st) {
   if (blocked) {
     $('statusDetail').textContent = st.manualLock
       ? 'נעילה ידנית — פתחו עם סיסמה'
-      : 'הגישה תיפתח ' + atLabel + ' • בעוד ' + inLabel;
+      : noPin
+        ? 'המחשב לא ננעל בפועל — הגדירו סיסמה כדי שהחסימה תופעל'
+        : 'הגישה תיפתח ' + atLabel + ' • בעוד ' + inLabel;
   } else if (st.nextAt) {
     const dir = st.next === 'blocked' ? 'המעבר הבא לחסימה' : 'המעבר הבא';
     $('statusDetail').textContent = dir + ': ' + atLabel + ' • בעוד ' + inLabel;
@@ -483,6 +487,12 @@ async function refreshStatus() {
 }
 
 /* ---------- שליטה ---------- */
+// באנר ראשוני: בלי סיסמה אין חסימה פעילה — מנחה להגדיר סיסמה כדי שהגנה תופעל
+function updateSetupBanner() {
+  const el = $('setupBanner');
+  if (el) el.classList.toggle('hidden', !!schedule.pinHash);
+}
+
 function applySettingsToUI() {
   $('masterToggle').checked = schedule.enabled;
   $('graceInput').value = schedule.graceSeconds;
@@ -494,6 +504,7 @@ function applySettingsToUI() {
   setModeUI();
   applyTheme();
   renderOverrides();
+  updateSetupBanner();
 }
 
 function updateMasterLabel() {
@@ -733,10 +744,18 @@ async function renderSecurity() {
     row.append(dot, texts);
     list.appendChild(row);
   });
-}
+}  /* ---------- באנר הגדרת סיסמה ראשונית ---------- */
+  const setupPinBtn = $('setupPinBtn');
+  if (setupPinBtn) {
+    setupPinBtn.onclick = () => {
+      const settingsTab = document.querySelector('.tab-btn[data-tab="settings"]');
+      if (settingsTab) settingsTab.click();
+      setTimeout(() => { const pi = $('pinInput'); if (pi) pi.focus(); }, 180);
+    };
+  }
 
-/* ---------- לשוניות ---------- */
-function initTabs() {
+  /* ---------- לשוניות ---------- */
+  function initTabs() {
   const buttons = document.querySelectorAll('.tab-btn');
   const panels = document.querySelectorAll('.tab-panel');
   const activate = (name) => {

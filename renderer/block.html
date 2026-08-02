@@ -86,6 +86,9 @@
       max-width: 400px; margin-inline: auto;
       font-style: italic;
     }
+    .no-pin-note { font-size: 22px; font-weight: 800; margin-top: 22px; color: var(--accent-2, #6ee7b7); }
+    .no-pin-sub { color: var(--muted, #94a3b8); font-size: 14px; margin-top: 8px; line-height: 1.7; max-width: 380px; margin-inline: auto; }
+    #noPinBox .btn { min-width: 260px; margin-top: 4px; }
     :root[data-theme='light'] .block-msg { color: #a11c2e; }
     .block-count {
       font-size: 25px; font-weight: 800; margin-top: 22px;
@@ -157,6 +160,14 @@
       <br />
       <button class="btn btn-ghost btn-sm" id="forgotBtn">שכחתי סיסמה — שלחו למייל</button>
     </div>
+    <div class="pin-box" id="noPinBox" style="display:none">
+      <div class="no-pin-note">עוד לא הוגדרה סיסמה</div>
+      <div class="no-pin-sub">החסימה אינה פעילה עד שמגדירים סיסמה — כדי שלא תהיה נעילה בלי מוצא. פתחו את ההגדרות והגדירו סיסמה.</div>
+      <br />
+      <button class="btn btn-primary" id="openSettingsBtn">פתחו את ההגדרות — הגדרת סיסמה</button>
+      <br />
+      <button class="btn btn-ghost btn-sm" id="skipPinBtn">פתח את המחשב עכשיו</button>
+    </div>
     <div class="lock-msg" id="lockMsg"></div>
     <div class="hint-lock">
       <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
@@ -180,9 +191,19 @@
       if (theme) document.documentElement.dataset.theme = theme;
     }
 
+    const noPinBox = document.getElementById('noPinBox');
+
     function render(status) {
       if (!status) return;
       applyBlockTheme(status.theme);
+      // ללא סיסמה מוגדרת — מסך החסימה מציע דרך החוצה במקום שדה סיסמה
+      if (status.pinSet === false) {
+        pinBox.style.display = 'none';
+        noPinBox.style.display = '';
+      } else {
+        pinBox.style.display = '';
+        noPinBox.style.display = 'none';
+      }
       // הודעה אישית שהוגדרה על ידי ההורה (מוצגת גם במנעול ידני)
       if (status.blockMessage && (status.state === 'blocked' || status.manualLock)) {
         blockMsg.textContent = status.blockMessage;
@@ -251,6 +272,17 @@
         } else {
           lockMsg.textContent = 'נפתח — הגישה שוחררה עד המעבר הבא';
           lockMsg.classList.add('ok');
+        }
+      };
+      document.getElementById('openSettingsBtn').onclick = () => { if (API) API.openSettings(); };
+      document.getElementById('skipPinBtn').onclick = async () => {
+        const res = await API.unlockNow('');
+        if (res && res.ok) {
+          lockMsg.textContent = 'נפתח — הגישה שוחררה';
+          lockMsg.classList.add('ok');
+        } else {
+          lockMsg.textContent = (res && res.error) || 'הפתיחה נכשלה';
+          lockMsg.classList.remove('ok');
         }
       };
       document.getElementById('forgotBtn').onclick = async () => {

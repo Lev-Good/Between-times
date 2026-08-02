@@ -275,7 +275,8 @@ function createBlockWindow(display) {
 
   // מניעת עקיפה: איבוד מיקוד = החזרה מיידית לחלון החסימה
   bw.on('blur', () => {
-    if (!isQuitting && isBlockedNow()) focusBlockWindows();
+    // גניבת מיקוד מתבצעת רק כשיש סיסמה — ללא סיסמה החסימה אינה פעילה
+    if (!isQuitting && isBlockedNow() && schedule.pinHash) focusBlockWindows();
   });
   bw.on('close', (e) => {
     if (!isQuitting && isBlockedNow()) e.preventDefault();
@@ -359,7 +360,8 @@ function buildStatus() {
     stateLabel: st.state === 'blocked' ? 'חסום' : 'מותר',
     nextLabel: st.next === 'blocked' ? 'חסום' : st.next === 'allowed' ? 'מותר' : null,
     nextAtLabel: st.nextAt ? S.formatDate(st.nextAt) : null,
-    secondsUntilLabel: st.secondsUntilNext != null ? S.formatDuration(st.secondsUntilNext) : null
+    secondsUntilLabel: st.secondsUntilNext != null ? S.formatDuration(st.secondsUntilNext) : null,
+    pinSet: !!schedule.pinHash
   };
 }
 
@@ -367,6 +369,10 @@ function enforce() {
   const status = buildStatus();
   // נעילה ידנית חלה תמיד — גם אם האכיפה לפי הלוח מושבתת
   const blocked = !!(manualLock || (schedule.enabled && status.state === 'blocked'));
+  // ללא סיסמה מוגדרת (התקנה ראשונית) — החסימה אינה פעילה כלל, כדי שלעולם
+  // לא יהיה מצב של חסימה בלי דרך החוצה. המשתמש מתבקש להגדיר סיסמה תחילה.
+  const pinSet = !!schedule.pinHash;
+  const activeBlock = blocked && pinSet;
 
   // תיעוד מעברים ביומן הפעילות
   if (blocked !== lastBlockedState) {
@@ -379,7 +385,7 @@ function enforce() {
   if (win && !win.isDestroyed()) win.webContents.send('status', status);
   blockWins.forEach((bw) => { if (bw && !bw.isDestroyed()) bw.webContents.send('status', status); });
 
-  if (!blocked) {
+  if (!activeBlock) {
     lockedAt = null;
     manualLock = false;
     hideBlockWindows();
@@ -723,6 +729,9 @@ function registerIpc() {
   ipcMain.handle('lock:now', () => {
     // נעילה ידנית: מפעילה את מסך החסימה המלא של בין הזמנים על כל המסכים
     // (ולא רק את נעילת Windows הרגילה). הפתיחה מתבצעת עם סיסמה.
+    if (!schedule.pinHash) {
+      return { ok: false, error: 'לא הוגדרה סיסמה — הגדירו סיסמה בהגדרות לפני נעילה ידנית' };
+    }
     manualLock = true;
     lockedAt = 0;
     enforce();
@@ -731,7 +740,18 @@ function registerIpc() {
   });
 
   ipcMain.handle('unlock:now', (_e, pin) => {
-    if (!schedule.pinHash) return { ok: false, error: 'לא הוגדרה סיסמה' };
+    // ללא סיסמה מוגדרת אין מה לאמת — הפתיחה מתאפשרת תמיד, כדי שלעולם לא
+    // יהיה מצב של חסימה בלי דרך החוצה (גם אם חלון חסימה נפתח בהיעדר סיסמה).
+    if (!schedule.pinHash) {
+      manualLock = false;
+      const st = S.getStatus(schedule, trustedDate());
+      schedule.manualUnlockUntil = st.state === 'blocked'
+        ? (st.nextAt ? st.nextAt.getTime() : trustedNow() + 3600 * 1000)
+        : null;
+      saveSettings();
+      enforce();
+      return { ok: true };
+    }
     const v = verifyPinServer(pin);
     if (!v.ok) {
       logEvent('unlock-fail');
@@ -805,6 +825,9 @@ function registerIpc() {
   ipcMain.handle('app:hide', () => {
     if (win && !win.isDestroyed()) win.hide();
   });
+
+  // פתיחת חלון ההגדרות — ממסך החסימה או מכל מקום אחר
+  ipcMain.handle('settings:open', () => { showMainWindow(); return { ok: true }; });
 
   // עדכון צבע הרקע של החלונות כשערכת הנושא משתנה (מניעת הבזקים בטעינה)
   ipcMain.handle('theme:apply', (_e, resolved) => {
@@ -1007,7 +1030,8 @@ if (isWatchdog) {
 
     // איבוד מיקוד מכל חלון בזמן חסימה = החזרת מסך החסימה (מניעת Alt+Tab וכיו"ב)
     app.on('browser-window-blur', () => {
-      if (!isQuitting && isBlockedNow()) {
+      // גניבת מיקוד מתבצעת רק כשיש סיסמה — ללא סיסמה החסימה אינה פעילה
+      if (!isQuitting && isBlockedNow() && schedule.pinHash) {
         setTimeout(focusBlockWindows, 60);
       }
     });

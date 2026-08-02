@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getStatus: () => ipcRenderer.invoke('status:get'),
   lockNow: () => ipcRenderer.invoke('lock:now'),
   unlockNow: (pin) => ipcRenderer.invoke('unlock:now', pin),
+  openSettings: () => ipcRenderer.invoke('settings:open'),
 
   setPin: (pin, oldPin) => ipcRenderer.invoke('pin:set', pin, oldPin),
   clearPin: (oldPin) => ipcRenderer.invoke('pin:clear', oldPin),

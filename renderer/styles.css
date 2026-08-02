@@ -740,6 +740,21 @@ body::after {
 .save-indicator .icon { width: 14px; height: 14px; }
 .save-indicator.show { opacity: 1; }
 
+/* ---------- באנר הגדרת סיסמה ראשונית ---------- */
+.setup-banner {
+  display: flex; align-items: center; gap: 12px;
+  background: linear-gradient(135deg, rgba(251, 191, 36, 0.18), rgba(251, 113, 133, 0.08));
+  border: 1px solid rgba(251, 191, 36, 0.45);
+  border-radius: 15px; padding: 13px 18px; margin-bottom: 18px;
+  font-size: 14px;
+  animation: fadeSlide 0.35s var(--ease);
+}
+.setup-banner > .icon { color: #fbbf24; flex-shrink: 0; }
+.setup-banner-text { display: flex; flex-direction: column; gap: 2px; flex: 1; }
+.setup-banner-text strong { font-size: 15px; }
+.setup-banner-text span { color: var(--muted); font-size: 13px; line-height: 1.6; }
+.setup-banner .btn { flex-shrink: 0; }
+
 /* ---------- באנר עדכון ---------- */
 .update-banner {
   display: flex; align-items: center; gap: 12px;
