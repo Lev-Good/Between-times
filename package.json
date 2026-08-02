@@ -26,7 +26,8 @@
       "scheduler.js",
       "renderer/**/*",
       "assets/**/*",
-      "package.json"
+      "package.json",
+      "secret.local.js"
     ],
     "win": {
       "target": [

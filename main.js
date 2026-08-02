@@ -590,9 +590,19 @@ function getStartupStatus() {
 // לב טוב דיגיטל — https://digital.levtov.uk/
 const RECOVERY_URL = 'https://script.google.com/macros/s/AKfycbzn0E8JIRLsmJqlYXQMoqpNSqAKALUDbgdcxwBT2zn_1ZqZEpYCZ2pyBeNYyb2rfuvyGQ/exec';
 
-// המפתח הסודי המשותף עם הסקריפט (SECRET_KEY). נקבע כאן בקוד בלבד
-// (אין שדה בממשק), כך שכל ההתקנות שולחות עם אותו סוד.
-const RECOVERY_SECRET = 'CHANdgsfuiodru8747589yhfdf9ECRET';
+// המפתח הסודי המשותף עם הסקריפט (SECRET_KEY).
+// נטען מקובץ מקומי בלבד (secret.local.js) שאינו עולה לגיטהאב — כך
+// שהקוד הציבורי אינו חושף את הסוד. לפני בניית ה-EXE ודאו שהקובץ קיים
+// (הוא נכלל בהתקנה דרך רשימת files ב-package.json).
+let RECOVERY_SECRET = '';
+try {
+  const local = require('./secret.local.js');
+  if (local && typeof local.secret === 'string' && local.secret) {
+    RECOVERY_SECRET = local.secret;
+  }
+} catch {
+  /* אין קובץ מקומי — השחזור מושבת עם הודעת שגיאה ברורה */
+}
 
 // מקור העדכונים — URL לקובץ JSON עם גרסה. נקבע כאן בקוד בלבד
 // (אין שדה בממשק) — הכפתור "בדוק עדכונים" משתמש בכתובת זו.

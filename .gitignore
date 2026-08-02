@@ -17,3 +17,4 @@ preview.html
 # הגדרות מקומיות וסודות
 .env
 *.local
+secret.local.js
