@@ -54,9 +54,7 @@
       version: 1,
       enabled: true,
       mode: 'blocklist',          // blocklist = חסום רק את החלונות; allowlist = התר רק את החלונות
-      graceSeconds: 120,          // שניות עד לנעילת המחשב (ברירת מחדל: 2 דקות)
       warnMinutes: 5,             // דקות אזהרה לפני תחילת החסימה (0 = ללא אזהרה)
-      lockWorkstation: true,      // לנעול את המחשב פיזית (LockWorkStation)
       pinHash: null,
       theme: 'system',          // ערכת נושא: system = לפי המערכת | light | dark
       blockMessage: '',         // הודעה אישית שמוצגת במסך החסימה
@@ -75,11 +73,9 @@
       version: 1,
       enabled: s.enabled !== false,
       mode: s.mode === 'allowlist' ? 'allowlist' : 'blocklist',
-      graceSeconds: Math.max(0, Number(s.graceSeconds) || 120),
       warnMinutes: (s.warnMinutes === undefined || s.warnMinutes === null || s.warnMinutes === '')
         ? 5 // ברירת מחדל: 5 דקות
         : Math.max(0, Math.min(60, Math.round(Number(s.warnMinutes) || 0))), // 0 = ללא אזהרה
-      lockWorkstation: s.lockWorkstation !== false,
       pinHash: s.pinHash || null,
       passwordPlain: s.passwordPlain || null,
       passwordEnc: s.passwordEnc || null,
@@ -220,7 +216,6 @@
       nextAt,
       secondsUntilNext,
       enabled: true,
-      graceSeconds: s.graceSeconds,
       warnMinutes: s.warnMinutes,
       warning,
       warningSeconds: warning ? secondsUntilNext : null

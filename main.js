@@ -70,8 +70,6 @@ let win = null;            // חלון ההגדרות
 let blockWins = [];        // חלונות החסימה (אחד לכל מסך)
 let tray = null;
 let quitWin = null;        // חלון אימות היציאה (סיסמת הורה) — למניעת עקיפת חסימה
-let lockedAt = null;       // מתי נכנסנו למצב חסום (לזמן התראה)
-let lastLockCall = 0;
 let isQuitting = false;
 let sessionUnlocked = false; // כניסה מוצלחת עם סיסמה לניהול ההגדרות
 let manualLock = false;      // נעילה ידנית (נעל עכשיו) — מפעילה את מסך החסימה המלא
@@ -225,22 +223,6 @@ function saveSettings() {
   }
 }
 
-/* ================= נעילת המחשב ================= */
-
-function lockWorkstation(force) {
-  if (!isWin) return;
-  if (!force && !schedule.lockWorkstation) return;
-  const now = trustedNow();
-  // חנק (throttle) מופעל רק לנעילות אוטומטיות — נעילה ידנית/כפויה תמיד מתבצעת
-  if (!force && now - lastLockCall < 20000) return; // לא להציף
-  lastLockCall = now;
-  try {
-    spawn('rundll32.exe', ['user32.dll,LockWorkStation'], { windowsHide: true });
-  } catch {
-    /* ignore */
-  }
-}
-
 /* ================= חלונות חסימה (כל המסכים) ================= */
 
 function isBlockedNow() {
@@ -338,7 +320,6 @@ function registerBlockShortcuts() {
       globalShortcut.register(accel, () => {
         // הקיצור נבלע — החזרת חלון החסימה לקדמת המסך
         focusBlockWindows();
-        if (isWin) lockWorkstation(true);
       });
     } catch { /* חלק מהקיצורים אינם ניתנים לרישום */ }
   }
@@ -415,7 +396,6 @@ function enforce() {
   blockWins.forEach((bw) => { if (bw && !bw.isDestroyed()) bw.webContents.send('status', status); });
 
   if (!activeBlock) {
-    lockedAt = null;
     manualLock = false;
     hideBlockWindows();
     unregisterBlockShortcuts();
@@ -424,12 +404,6 @@ function enforce() {
 
   showBlockWindows(status);
   registerBlockShortcuts();
-  if (!lockedAt) lockedAt = trustedNow();
-  // נעילה ידנית: ללא זמן התראה — נעילה מיידית (גם אם נעילת המסך האוטומטית כבויה)
-  const grace = (manualLock ? 0 : (schedule.graceSeconds || 0) * 1000);
-  if (trustedNow() - lockedAt >= grace) {
-    lockWorkstation(manualLock);
-  }
 }
 
 /* ================= מגש מערכת ================= */
@@ -461,7 +435,7 @@ function updateTray(status) {
     { label: 'פתח הגדרות', click: () => showMainWindow() },
     {
       label: 'נעל עכשיו',
-      click: () => { manualLock = true; lockedAt = 0; enforce(); }
+      click: () => { manualLock = true; enforce(); }
     },
     {
       label: 'בדוק עכשיו',
@@ -822,7 +796,6 @@ function registerIpc() {
       return { ok: false, error: 'לא הוגדרה סיסמה — הגדירו סיסמה בהגדרות לפני נעילה ידנית' };
     }
     manualLock = true;
-    lockedAt = 0;
     enforce();
     logEvent('lock-manual');
     return { ok: true };
@@ -945,7 +918,6 @@ function registerIpc() {
 
   ipcMain.handle('security:get', () => ({
     pin: !!schedule.pinHash,
-    lockWs: schedule.lockWorkstation !== false,
     enabled: schedule.enabled !== false,
     elevated: isElevated(),
     shared: isWin && fs.existsSync(machineSettingsFile()),

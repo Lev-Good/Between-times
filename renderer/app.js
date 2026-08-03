@@ -526,9 +526,7 @@ function updateSetupBanner() {
 
 function applySettingsToUI() {
   $('masterToggle').checked = schedule.enabled;
-  $('graceInput').value = schedule.graceSeconds;
   $('warnInput').value = schedule.warnMinutes;
-  $('lockWsToggle').checked = schedule.lockWorkstation;
   $('pinStatus').textContent = schedule.pinHash ? 'מוגדרת' : 'לא מוגדרת';
   $('recoveryEmail').value = schedule.recoveryEmail || '';
   $('blockMessage').value = schedule.blockMessage || '';
@@ -760,7 +758,6 @@ async function renderSecurity() {
   const sec = await API.getSecurity();
   const items = [
     { ok: sec.pin, label: 'סיסמה מוגדרת', hint: 'מגנה על ההגדרות ועל מסך החסימה' },
-    { ok: sec.lockWs, label: 'נעילת מסך פיזית', hint: 'Windows ננעלת בשעות החסימה' },
     { ok: sec.enabled, label: 'האכיפה פעילה', hint: 'המתג הראשי דלוק' },
     { ok: sec.elevated, label: 'הרצה עם הרשאות מנהל', hint: 'מאפשרת חסימת כל המשתמשים' },
     { ok: sec.shared, label: 'הגדרות משותפות לכל המשתמשים', hint: 'כל חשבון במחשב נחסם לפי אותו לוח' },
@@ -885,26 +882,11 @@ function init() {
     persist();
   };
 
-  $('graceInput').onchange = async () => {
-    const val = Math.max(0, Math.min(600, Number($('graceInput').value) || 0));
-    if (!(await verifyPinSession())) { $('graceInput').value = schedule.graceSeconds; return; }
-    schedule.graceSeconds = val;
-    $('graceInput').value = val;
-    persist();
-  };
-
   $('warnInput').onchange = async () => {
     const val = Math.max(0, Math.min(60, Math.round(Number($('warnInput').value) || 0)));
     if (!(await verifyPinSession())) { $('warnInput').value = schedule.warnMinutes; return; }
     schedule.warnMinutes = val;
     $('warnInput').value = val;
-    persist();
-  };
-
-  $('lockWsToggle').onchange = async () => {
-    const desired = $('lockWsToggle').checked;
-    if (!(await verifyPinSession())) { $('lockWsToggle').checked = schedule.lockWorkstation; return; }
-    schedule.lockWorkstation = desired;
     persist();
   };
 
@@ -1075,7 +1057,7 @@ function init() {
   $('lockNowBtn').onclick = () => {
     if (API) {
       API.lockNow();
-      toast('המחשב ננעל — מסך החסימה פעיל', 'success');
+      toast('המחשב נחסם — מסך החסימה פעיל', 'success');
     } else {
       toast('נעילה זמינה רק בגרסת המחשב המלאה');
     }
