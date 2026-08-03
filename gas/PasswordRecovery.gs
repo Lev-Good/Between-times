@@ -28,7 +28,7 @@
  *  שימו לב: כאן מופיע ערך פלצהולדר! בקובץ הזה שבמאגר הציבורי אין את הסוד האמיתי.
  *  לפני הפריסה (Deploy) — החליפו את הערך למפתח הסודי האמיתי שלכם, אותו אחד
  *  שמוגדר ב-secret.local.js במחשב שלכם. */
-var SECRET_KEY = 'CHANGE_ME_BEFORE_DEPLOY';
+var SECRET_KEY = 'oayrethdmuthmdorehtuiqcmruihdkikhrfiugr';
 
 /** שם הגיליון שבו נרשמות הבקשות */
 var SHEET_NAME = 'RecoveryLog';

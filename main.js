@@ -77,6 +77,7 @@ let sessionUnlocked = false; // כניסה מוצלחת עם סיסמה לניה
 let manualLock = false;      // נעילה ידנית (נעל עכשיו) — מפעילה את מסך החסימה המלא
 let shortcutsRegistered = false;
 let lastBlockedState = false; // מעקב מצבי לזיהוי תחילת/סיום חסימה ביומן
+let lastWarningActive = false; // מעקב מצבי לזיהוי כניסה/יציאה מחלון האזהרה לפני חסימה
 
 /* ================= יומן פעילות (activity.log) =================
    תיעוד אירועים: התחלת/סיום חסימה, נעילות ידניות, פתיחות,
@@ -368,10 +369,35 @@ function buildStatus() {
   };
 }
 
+// אזהרה לפני חסימה: כשהמחשב עדיין פתוח אבל עומד להיחסם בתוך warnMinutes —
+// מציגים הודעה אחת בכניסה לחלון האזהרה שמזהירה לשמור קבצים ולסיים את העבודה.
+function showWarningNotification(status) {
+  try {
+    const sec = status.warningSeconds != null ? status.warningSeconds : 0;
+    const dur = S.formatDuration(sec);
+    const n = new Notification({
+      title: 'המחשב עומד להיחסם',
+      body: 'בעוד ' + dur + ' המחשב ייחסם — שמרו את הקבצים וסיימו את העבודה.'
+    });
+    n.show();
+  } catch { /* ignore */ }
+}
+
 function enforce() {
   const status = buildStatus();
   // נעילה ידנית חלה תמיד — גם אם האכיפה לפי הלוח מושבתת
   const blocked = !!(manualLock || (schedule.enabled && status.state === 'blocked'));
+
+  // אזהרה לפני חסימה — פעם אחת בכניסה לחלון האזהרה, ולא בזמן נעילה ידנית.
+  // ללא סיסמה החסימה אינה פעילה כלל (activeBlock = blocked && pinSet) —
+  // לכן גם לא מציגים אזהרה על חסימה שלא תתרחש בפועל.
+  if (status.warning && schedule.pinHash && !manualLock && !lastWarningActive) {
+    lastWarningActive = true;
+    logEvent('warning-start');
+    showWarningNotification(status);
+  } else if ((!status.warning || manualLock) && lastWarningActive) {
+    lastWarningActive = false;
+  }
   // ללא סיסמה מוגדרת (התקנה ראשונית) — החסימה אינה פעילה כלל, כדי שלעולם
   // לא יהיה מצב של חסימה בלי דרך החוצה. המשתמש מתבקש להגדיר סיסמה תחילה.
   const pinSet = !!schedule.pinHash;
@@ -417,15 +443,18 @@ function trayIcon() {
 
 function updateTray(status) {
   const color = (status.state === 'blocked' || status.manualLock) ? 'חסום' : 'מותר';
-  tray.setToolTip('בין הזמנים — מצב נוכחי: ' + color);
+  const warnTxt = status.warning ? ' • ייחסם בקרוב' : '';
+  tray.setToolTip('בין הזמנים — מצב נוכחי: ' + color + warnTxt);
   const menu = Menu.buildFromTemplate([
     { label: 'בין הזמנים — ניהול זמן מחשב', enabled: false },
     { type: 'separator' },
-    { label: 'מצב נוכחי: ' + color, enabled: false },
+    { label: 'מצב נוכחי: ' + color + warnTxt, enabled: false },
     {
-      label: status.secondsUntilLabel
-        ? 'מעבר הבא בעוד ' + status.secondsUntilLabel
-        : 'אין שינוי צפוי',
+      label: status.warning
+        ? 'ייחסם בעוד ' + (status.secondsUntilLabel || 'רגע')
+        : (status.secondsUntilLabel
+          ? 'מעבר הבא בעוד ' + status.secondsUntilLabel
+          : 'אין שינוי צפוי'),
       enabled: false
     },
     { type: 'separator' },
@@ -693,7 +722,7 @@ async function sendRecovery() {
 function recoveryErrorToHebrew(raw) {
   const s = String(raw || '');
   if (/secret invalid/i.test(s)) {
-    return 'השרת דחה את הבקשה (secret invalid) — המפתח הסודי בשרת השחזור אינו תואם למפתח שבתוכנה. עדכנו את SECRET_KEY בסקריפט הפרוס (gas/PasswordRecovery.gs) כך שיהיה זהה למפתח ב-secret.local.js, ופרסו מחדש.';
+    return 'השרת דחה את הבקשה (secret invalid) — המפתח הסודי ששולחת התוכנה אינו תואם למפתח שבשרת השחזור. בדקו: (1) שהגרסה המותקנת היא העדכנית ביותר (גרסה ישנה שולחת מפתח ישן — עדכנו את התוכנה); (2) ש-SECRET_KEY בסקריפט הפרוס (gas/PasswordRecovery.gs) זהה בדיוק למפתח ב-secret.local.js, ופרסו מחדש.';
   }
   if (/missing fields/i.test(s)) {
     return 'חסרים פרטים בבקשה — ודאו שמוגדרים מייל שחזור וסיסמה';
@@ -720,14 +749,15 @@ function notifyUpdate(note) {
   if (win && !win.isDestroyed()) win.webContents.send('update', note);
   blockWins.forEach((bw) => { if (bw && !bw.isDestroyed()) bw.webContents.send('update', note); });
   try {
-    new Notification({
+    const n = new Notification({
       title: 'עדכון זמין — בין הזמנים',
-      body: 'גרסה ' + note.version + ' זמינה להורדה' + (note.url ? ' — לחצו לפתיחה' : '')
-    }).show();
-    if (note.url) new Notification({
-      title: 'הורדת עדכון',
-      body: 'פותח את דף ההורדה…'
-    }).show();
+      body: 'גרסה ' + note.version + ' זמינה להורדה' + (note.url ? ' — לחצו על ההודעה כדי לפתוח את דף ההורדה' : '')
+    });
+    // לחיצה על ההודעה פותחת את דף ההורדה בדפדפן — כך שההודעה אכן עובדת
+    if (note.url && /^https?:\/\//.test(note.url)) {
+      n.on('click', () => shell.openExternal(note.url));
+    }
+    n.show();
   } catch { /* ignore */ }
 }
 
@@ -1066,7 +1096,10 @@ function superviseWatchdog() {
   writeHeartbeat(mainHbFile());
   const check = () => {
     writeHeartbeat(mainHbFile());
-    if (fs.existsSync(quitFlagFile())) return;
+    // דגל עצירה (נכתב ע"י מתקין העדכון לפני ההתקנה) — לצאת בשקט,
+    // כדי שההתקנה תצליח גם כשהתוכנה רצה ברקע (ואפילו עם הרשאות מנהל).
+    if (isQuitting) return;
+    if (fs.existsSync(quitFlagFile())) { gracefulQuit(); return; }
     if (heartbeatStale(watchHbFile(), 8000) && Date.now() - lastWatchSpawn > 5000) {
       lastWatchSpawn = Date.now();
       ownWatchdogPid = spawnWatchdog();

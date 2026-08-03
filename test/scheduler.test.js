@@ -322,14 +322,58 @@ test('nextTransition accounts for override days', () => {
   assert.equal(st2.nextAt.getHours(), 8);
 });
 
-test('overlapping slots: first matching slot wins (order matters)', () => {
+test('warning: fires within warnMinutes before an upcoming block', () => {
   const s = S.defaultSchedule();
-  s.week[0].slots.push({ start: S.parseHM('08:00'), end: S.parseHM('12:00'), type: 'blocked' });
-  s.week[0].slots.push({ start: S.parseHM('10:00'), end: S.parseHM('11:00'), type: 'allowed' });
-  // 10:30 — שני חלונות חופפים; הראשון ברשימה מנצח -> חסום (התנהגות מתועדת)
-  assert.equal(S.getStatus(s, new Date(2026, 0, 4, 10, 30)).state, 'blocked');
-  // 09:00 — רק החלון הראשון -> חסום
-  assert.equal(S.getStatus(s, new Date(2026, 0, 4, 9, 0)).state, 'blocked');
-  // 11:30 — רק החלון הראשון -> חסום
-  assert.equal(S.getStatus(s, new Date(2026, 0, 4, 11, 30)).state, 'blocked');
+  s.warnMinutes = 5;
+  s.week[0].slots.push({ start: S.parseHM('08:00'), end: S.parseHM('16:00'), type: 'blocked' });
+  // 07:00 — שעתיים לפני החסימה: אין אזהרה
+  assert.equal(S.getStatus(s, new Date(2026, 0, 4, 7, 0)).warning, false);
+  // 07:57 — 3 דקות לפני: אזהרה פעילה
+  const near = S.getStatus(s, new Date(2026, 0, 4, 7, 57));
+  assert.equal(near.warning, true);
+  assert.equal(near.state, 'allowed');
+  assert.equal(near.next, 'blocked');
+  assert.ok(near.warningSeconds > 0 && near.warningSeconds <= 180);
+  // 08:00 — כבר חסום: לא "אזהרה" אלא חסימה בפועל
+  assert.equal(S.getStatus(s, new Date(2026, 0, 4, 8, 0)).warning, false);
 });
+
+test('warning: zero warnMinutes disables the warning', () => {
+  const s = S.defaultSchedule();
+  s.warnMinutes = 0;
+  s.week[0].slots.push({ start: S.parseHM('08:00'), end: S.parseHM('16:00'), type: 'blocked' });
+  const st = S.getStatus(s, new Date(2026, 0, 4, 7, 57));
+  assert.equal(st.warning, false);
+  assert.equal(st.warningSeconds, null);
+});
+
+test('warning: no warning when next transition is to allowed', () => {
+  const s = S.defaultSchedule();
+  s.warnMinutes = 5;
+  s.week[0].slots.push({ start: S.parseHM('08:00'), end: S.parseHM('10:00'), type: 'blocked' });
+  // בתוך החסימה, המעבר הבא הוא לפתיחה — אין אזהרה על חסימה
+  assert.equal(S.getStatus(s, new Date(2026, 0, 4, 9, 30)).warning, false);
+});
+
+test('warning: allowlist mode warns before the default block returns', () => {
+  const s = S.defaultSchedule();
+  s.mode = 'allowlist';
+  s.warnMinutes = 5;
+  s.week[0].slots.push({ start: S.parseHM('09:00'), end: S.parseHM('10:00'), type: 'allowed' });
+  // 09:58 — 2 דקות לפני שהחלון המותא מסתיים וחזרה לחסום: אזהרה
+  const st = S.getStatus(s, new Date(2026, 0, 4, 9, 58));
+  assert.equal(st.state, 'allowed');
+  assert.equal(st.next, 'blocked');
+  assert.equal(st.warning, true);
+  assert.ok(st.warningSeconds <= 120);
+});
+
+test('warning: default warnMinutes is 5 and normalized', () => {
+  assert.equal(S.defaultSchedule().warnMinutes, 5);
+  assert.equal(S.normalizeSchedule({ warnMinutes: 7 }).warnMinutes, 7);
+  assert.equal(S.normalizeSchedule({ warnMinutes: 0 }).warnMinutes, 0);
+  assert.equal(S.normalizeSchedule({ warnMinutes: 200 }).warnMinutes, 60); // capped
+  assert.equal(S.normalizeSchedule({ warnMinutes: -3 }).warnMinutes, 0);
+  assert.equal(S.normalizeSchedule({}).warnMinutes, 5);
+});
+

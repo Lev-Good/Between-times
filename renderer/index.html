@@ -12,13 +12,27 @@
     <!-- באנר עדכון -->
     <div class="update-banner hidden" id="updateBanner">
       <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-      <span id="updateText">עדכון זמין</span>
-      <a href="#" id="updateLink">להורדה
+      <div class="update-info">
+        <span id="updateText">עדכון זמין</span>
+        <span class="update-notes" id="updateNotes"></span>
+      </div>
+      <button class="btn btn-primary btn-sm update-dl" id="updateLink">
         <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12l7 7 7-7"/></svg>
-      </a>
+        הורד עכשיו
+      </button>
       <button class="close-x" id="updateClose" title="סגירה">
         <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
       </button>
+    </div>
+
+    <!-- באנר אזהרה לפני חסימה -->
+    <div class="warn-banner hidden" id="warnBanner">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg>
+      <div class="warn-banner-text">
+        <strong>המחשב עומד להיחסם</strong>
+        <span id="warnText">שמרו את הקבצים וסיימו את העבודה — החסימה מתחילה בעוד 5 דקות</span>
+      </div>
+      <span class="warn-count" id="warnCount">--:--</span>
     </div>
 
     <!-- באנר הגדרת סיסמה ראשונית -->
@@ -211,8 +225,16 @@
 
         <div class="setting">
           <div class="setting-text">
-            <strong>זמן התראה לפני הנעילה</strong>
-            <span>כמה שניות להזהיר לפני נעילת המחשב (ברירת מחדל: 2 דקות)</span>
+            <strong>אזהרה לפני החסימה</strong>
+            <span>כמה דקות לפני שהמחשב נחסם — להציג הודעה שמזהירה לשמור קבצים ולסיים את העבודה (0 = ללא אזהרה; ברירת מחדל: 5 דקות)</span>
+          </div>
+          <input type="number" id="warnInput" min="0" max="60" step="1" value="5" class="num-input" />
+        </div>
+
+        <div class="setting">
+          <div class="setting-text">
+            <strong>שהייה לפני נעילת ווינדוס</strong>
+            <span>אחרי שהחסימה כבר החלה — כמה שניות מסך החסימה יוצג לפני שווינדוס עצמה ננעלת (ברירת מחדל: 2 דקות). האזהרה שמזהירה לשמור קבצים מוצגת לפני החסימה, בשדה שלמעלה.</span>
           </div>
           <input type="number" id="graceInput" min="0" max="600" step="10" value="120" class="num-input" />
         </div>

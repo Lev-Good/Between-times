@@ -472,6 +472,16 @@ function applyStatus(st) {
   renderRing(st);
   updateCountdown(st);
 
+  // באנר אזהרה לפני חסימה — ספירה לאחור חיה עד תחילת החסימה.
+  // ללא סיסמה החסימה אינה פעילה כלל — לא מציגים אזהרה על חסימה שלא תתרחש.
+  const warnEl = $('warnBanner');
+  const warnOn = !!st.warning && st.pinSet && !blocked && st.warningSeconds != null;
+  warnEl.classList.toggle('hidden', !warnOn);
+  if (warnOn) {
+    $('warnText').textContent = 'שמרו את הקבצים וסיימו את העבודה — החסימה מתחילה בעוד ' + T.formatDuration(st.warningSeconds);
+    $('warnCount').textContent = fmtCountdown(st.warningSeconds);
+  }
+
   $('statusState').textContent = blocked ? 'חסום' : 'מותר';
   // ללא סיסמה — החסימה אינה פעילה (הגנה מפני נעילה בלי מוצא)
   const noPin = !st.pinSet;
@@ -517,6 +527,7 @@ function updateSetupBanner() {
 function applySettingsToUI() {
   $('masterToggle').checked = schedule.enabled;
   $('graceInput').value = schedule.graceSeconds;
+  $('warnInput').value = schedule.warnMinutes;
   $('lockWsToggle').checked = schedule.lockWorkstation;
   $('pinStatus').textContent = schedule.pinHash ? 'מוגדרת' : 'לא מוגדרת';
   $('recoveryEmail').value = schedule.recoveryEmail || '';
@@ -541,15 +552,20 @@ function setModeUI() {
 
 function showUpdateBanner(note) {
   $('updateText').textContent = 'עדכון זמין: גרסה ' + note.version;
-  const link = $('updateLink');
+  const notesEl = $('updateNotes');
+  const notes = note.notes ? String(note.notes).trim() : '';
+  notesEl.textContent = notes;
+  notesEl.title = notes; // הטקסט המלא מוצג בריחוף אם הוא נחתך
+  notesEl.style.display = notes ? '' : 'none'; // ללא הערות — ללא רווח ריק
+  const btn = $('updateLink');
   if (note.url && /^https?:\/\//.test(note.url)) {
-    link.style.display = '';
-    link.onclick = (e) => {
-      e.preventDefault();
+    btn.style.display = '';
+    btn.disabled = false;
+    btn.onclick = () => {
       if (API) API.openExternal(note.url);
     };
   } else {
-    link.style.display = 'none';
+    btn.style.display = 'none';
   }
   $('updateBanner').classList.remove('hidden');
 }
@@ -566,6 +582,7 @@ const EVENT_LABELS = {
   'app-quit': 'סגירת התוכנה',
   'block-start': 'תחילת חסימה',
   'block-end': 'סיום חסימה',
+  'warning-start': 'אזהרה לפני חסימה',
   'lock-manual': 'נעילה ידנית',
   'unlock-success': 'פתיחה עם סיסמה',
   'unlock-fail': 'ניסיון פתיחה נכשל',
@@ -873,6 +890,14 @@ function init() {
     if (!(await verifyPinSession())) { $('graceInput').value = schedule.graceSeconds; return; }
     schedule.graceSeconds = val;
     $('graceInput').value = val;
+    persist();
+  };
+
+  $('warnInput').onchange = async () => {
+    const val = Math.max(0, Math.min(60, Math.round(Number($('warnInput').value) || 0)));
+    if (!(await verifyPinSession())) { $('warnInput').value = schedule.warnMinutes; return; }
+    schedule.warnMinutes = val;
+    $('warnInput').value = val;
     persist();
   };
 

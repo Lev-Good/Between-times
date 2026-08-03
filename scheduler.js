@@ -55,6 +55,7 @@
       enabled: true,
       mode: 'blocklist',          // blocklist = חסום רק את החלונות; allowlist = התר רק את החלונות
       graceSeconds: 120,          // שניות עד לנעילת המחשב (ברירת מחדל: 2 דקות)
+      warnMinutes: 5,             // דקות אזהרה לפני תחילת החסימה (0 = ללא אזהרה)
       lockWorkstation: true,      // לנעול את המחשב פיזית (LockWorkStation)
       pinHash: null,
       theme: 'system',          // ערכת נושא: system = לפי המערכת | light | dark
@@ -75,6 +76,9 @@
       enabled: s.enabled !== false,
       mode: s.mode === 'allowlist' ? 'allowlist' : 'blocklist',
       graceSeconds: Math.max(0, Number(s.graceSeconds) || 120),
+      warnMinutes: (s.warnMinutes === undefined || s.warnMinutes === null || s.warnMinutes === '')
+        ? 5 // ברירת מחדל: 5 דקות
+        : Math.max(0, Math.min(60, Math.round(Number(s.warnMinutes) || 0))), // 0 = ללא אזהרה
       lockWorkstation: s.lockWorkstation !== false,
       pinHash: s.pinHash || null,
       passwordPlain: s.passwordPlain || null,
@@ -194,13 +198,32 @@
     const t = nextTransition(s, d);
     const nextAt = override ? new Date(s.manualUnlockUntil) : t.at;
 
+    const secondsUntilNext = nextAt ? Math.max(0, Math.round((nextAt.getTime() - d.getTime()) / 1000)) : null;
+
+    // חלון אזהרה לפני חסימה: כשהמחשב עדיין פתוח אבל עומד להיחסם בתוך
+    // warnMinutes — מסמנים warning עם ספירה לאחור עד תחילת החסימה.
+    // (ההתראה היא רק כשהמעבר הבא הוא לחסימה, ולא בזמן נעילה ידנית/הסרת חסימה.)
+    const warnSec = (s.warnMinutes || 0) * 60;
+    const warning = !!(
+      s.enabled &&
+      state === 'allowed' &&
+      t.to === 'blocked' &&
+      t.at &&
+      warnSec > 0 &&
+      secondsUntilNext != null &&
+      secondsUntilNext <= warnSec
+    );
+
     return {
       state,
       next: t.to,
       nextAt,
-      secondsUntilNext: nextAt ? Math.max(0, Math.round((nextAt.getTime() - d.getTime()) / 1000)) : null,
+      secondsUntilNext,
       enabled: true,
-      graceSeconds: s.graceSeconds
+      graceSeconds: s.graceSeconds,
+      warnMinutes: s.warnMinutes,
+      warning,
+      warningSeconds: warning ? secondsUntilNext : null
     };
   }
 
