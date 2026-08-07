@@ -578,6 +578,204 @@ test('update:check tolerates network failure silently', async () => {
   }
 });
 
+/* ================= הורדה והתקנה אוטומטית של עדכון ================= */
+
+// זרם פשוט שמדמה את הגוף של תגובת fetch (res.body.getReader())
+function fakeStream(chunks) {
+  let i = 0;
+  return {
+    getReader: () => ({
+      read: async () => {
+        if (i < chunks.length) return { done: false, value: chunks[i++] };
+        return { done: true, value: undefined };
+      }
+    })
+  };
+}
+
+// תשובת ה-API הרשמית של GitHub (שחרור v9.9.9 עם קובץ Setup)
+function githubApiRelease(url) {
+  if (!url.includes('api.github.com/repos/Lev-Good/Between-times/releases/tags/v9.9.9')) return null;
+  return {
+    ok: true,
+    json: async () => ({
+      assets: [{
+        name: 'Setup.9.9.9.exe',
+        browser_download_url: 'https://github.com/Lev-Good/Between-times/releases/download/v9.9.9/Setup.9.9.9.exe'
+      }]
+    })
+  };
+}
+
+test('update:download downloads installer and starts silent install', async () => {
+  // 1) version.json (raw.githubusercontent) — מצביע על גרסה חדשה
+  // 2) GitHub API — שם הקובץ המדויק
+  // 3) כתובת ההורדה — זרם של 2MB
+  fetchMock = async (url) => {
+    const api = githubApiRelease(url);
+    if (api) return api;
+    if (url.includes('raw.githubusercontent.com')) {
+      return { ok: true, json: async () => ({ version: '9.9.9', url: 'https://github.com/Lev-Good/Between-times/releases/latest' }) };
+    }
+    if (url.includes('releases/download/v9.9.9/Setup.9.9.9.exe')) {
+      // 2MB תקין — חייב להתחיל בחותמת PE (MZ) כמו EXE אמיתי
+      const bytes = Buffer.alloc(2 * 1024 * 1024, 7);
+      bytes[0] = 0x4d; bytes[1] = 0x5a; // 'MZ'
+      return { ok: true, headers: { get: () => String(bytes.length) }, body: fakeStream([bytes]) };
+    }
+    throw new Error('unexpected fetch: ' + url);
+  };
+  try {
+    const m = loadMain({});
+    await m.ready();
+
+    const res = await m.ipcHandlers.get('update:download')();
+    assert.ok(res.ok, 'ההורדה צריכה להצליח: ' + JSON.stringify(res));
+
+    // המתקין שהורד הופעל בשקט (/S) בתהליך נפרד
+    // שם הקובץ: BenHazmanim-Setup-9.9.9.exe (מקפים, לא נקודות)
+    const spawn = m.state.spawnCalls.find((s) => s.cmd && /BenHazmanim-Setup-9\.9\.9\.exe$/.test(s.cmd));
+    assert.ok(spawn, 'המתקין שהורד צריך להיות מופעל');
+    assert.ok(spawn.args.includes('/S'), 'התקנה שקטה');
+    assert.equal(spawn.opts.detached, true, 'תהליך נפרד — ממשיך גם אחרי סגירת התוכנה');
+
+    // דגל עצירה נכתב + התוכנה נסגרת — כדי שהמתקין יצליח להחליף את הקבצים
+    assert.ok(m.state.quitCalled, 'התוכנה צריכה להיסגר כדי לאפשר התקנה');
+    assert.ok(fs.existsSync(path.join(m.tmpRoot, 'userData', 'quit.flag')), 'quit.flag ב-userData');
+    assert.ok(fs.existsSync(path.join(process.env.APPDATA, 'BenHazmanim', 'quit.flag')), 'quit.flag בנתיב ה-NSIS');
+    m.cleanup();
+  } finally {
+    fetchMock = null;
+  }
+});
+
+test('update:download refuses corrupt/tiny downloads (no install, no quit)', async () => {
+  fetchMock = async (url) => {
+    const api = githubApiRelease(url);
+    if (api) return api;
+    if (url.includes('raw.githubusercontent.com')) {
+      return { ok: true, json: async () => ({ version: '9.9.9' }) };
+    }
+    if (url.includes('releases/download/v9.9.9/Setup.9.9.9.exe')) {
+      // קובץ גדול מספיק אבל ללא חותמת MZ — לא תקין
+      return { ok: true, headers: { get: () => '2097152' }, body: fakeStream([Buffer.alloc(2 * 1024 * 1024, 1)]) };
+    }
+    throw new Error('unexpected fetch: ' + url);
+  };
+  try {
+    const m = loadMain({});
+    await m.ready();
+    const res = await m.ipcHandlers.get('update:download')();
+    assert.equal(res.ok, false, 'קובץ ללא חותמת PE אינו תקין');
+    assert.equal(m.state.quitCalled, false, 'אסור לסגור את התוכנה על קובץ שגוי');
+    // ה-spawn היחיד האפשרי הוא של השומר-שער (heartbeat) — אסור שהמתקין יופעל
+    const installerSpawns = m.state.spawnCalls.filter((s) => s.args && s.args.includes('/S'));
+    assert.equal(installerSpawns.length, 0, 'אסור להריץ מתקין לא תקין');
+    m.cleanup();
+  } finally {
+    fetchMock = null;
+  }
+});
+
+test('update:download rejects download URLs outside the official repo', async () => {
+  fetchMock = async (url) => {
+    const api = githubApiRelease(url);
+    if (api) {
+      // ה-API חוזר עם קובץ ממקור זדוני — אסור להריץ אותו
+      return {
+        ok: true,
+        json: async () => ({
+          assets: [{ name: 'Setup.9.9.9.exe', browser_download_url: 'https://evil.example/x.exe' }]
+        })
+      };
+    }
+    if (url.includes('raw.githubusercontent.com')) {
+      return { ok: true, json: async () => ({ version: '9.9.9' }) };
+    }
+    throw new Error('unexpected fetch: ' + url);
+  };
+  try {
+    const m = loadMain({});
+    await m.ready();
+    const res = await m.ipcHandlers.get('update:download')();
+    assert.equal(res.ok, false);
+    assert.match(res.error || '', /מקור ההורדה אינו תקין/);
+    assert.equal(m.state.quitCalled, false);
+    const installerSpawns = m.state.spawnCalls.filter((s) => s.args && s.args.includes('/S'));
+    assert.equal(installerSpawns.length, 0, 'אסור להריץ מתקין ממקור לא רשמי');
+    m.cleanup();
+  } finally {
+    fetchMock = null;
+  }
+});
+
+test('update:download cleans up partial file when download fails mid-stream', async () => {
+  const destPath = null;
+  fetchMock = async (url) => {
+    const api = githubApiRelease(url);
+    if (api) return api;
+    if (url.includes('raw.githubusercontent.com')) {
+      return { ok: true, json: async () => ({ version: '9.9.9' }) };
+    }
+    if (url.includes('releases/download/v9.9.9/Setup.9.9.9.exe')) {
+      // זרם שנקטע באמצע — שידור שני מחזיר done מיד
+      return {
+        ok: true,
+        headers: { get: () => '2097152' },
+        body: {
+          getReader: () => {
+            let sent = 0;
+            return {
+              read: async () => {
+                if (sent === 0) { sent++; return { done: false, value: Buffer.alloc(512 * 1024, 7) }; }
+                throw new Error('connection lost');
+              }
+            };
+          }
+        }
+      };
+    }
+    throw new Error('unexpected fetch: ' + url);
+  };
+  try {
+    const m = loadMain({});
+    await m.ready();
+    const res = await m.ipcHandlers.get('update:download')();
+    assert.equal(res.ok, false, 'כישלון אמצע ההורדה צריך להחזיר שגיאה');
+    assert.ok(res.error);
+    assert.equal(m.state.quitCalled, false);
+    // הקובץ החלקי נמחק — לא נשאר זבל ב-Temp
+    const tempDir = path.join(m.tmpRoot, 'app');
+    const leftovers = fs.existsSync(tempDir)
+      ? fs.readdirSync(tempDir).filter((f) => f.includes('BenHazmanim-Setup'))
+      : [];
+    assert.equal(leftovers.length, 0, 'הקובץ החלקי צריך להימחק: ' + JSON.stringify(leftovers));
+    m.cleanup();
+  } finally {
+    fetchMock = null;
+  }
+});
+
+test('update:download reports clear error when no update is available', async () => {
+  fetchMock = async (url) => {
+    if (url.includes('raw.githubusercontent.com')) {
+      return { ok: true, json: async () => ({ version: '1.2.3' }) }; // שווה לגרסה — אין עדכון
+    }
+    throw new Error('unexpected fetch: ' + url);
+  };
+  try {
+    const m = loadMain({});
+    await m.ready();
+    const res = await m.ipcHandlers.get('update:download')();
+    assert.equal(res.ok, false);
+    assert.ok(res.error);
+    assert.equal(m.state.quitCalled, false);
+    m.cleanup();
+  } finally {
+    fetchMock = null;
+  }
+});
+
 /* ================= מצב וסטטיסטיקות ================= */
 
 test('status:get reflects enabled=false as allowed', async () => {

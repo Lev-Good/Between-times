@@ -143,6 +143,23 @@
       font-size: 14px; font-weight: 600; margin-top: 14px;
       color: var(--muted); min-height: 20px;
     }
+    /* כפתור פתיחה קטן ושקט — שדה הסיסמה מוסתר כברירת מחדל (לחיצה פותחת) */
+    .unlock-toggle {
+      margin-top: 24px;
+      display: inline-flex; align-items: center; gap: 8px;
+      background: transparent;
+      border: 1px dashed var(--border-strong);
+      color: var(--muted);
+      border-radius: 999px;
+      padding: 9px 20px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      font-family: inherit;
+      transition: color 0.2s var(--ease, ease), border-color 0.2s var(--ease, ease), background 0.2s var(--ease, ease);
+    }
+    .unlock-toggle:hover { color: var(--text); border-color: var(--accent); background: rgba(123, 107, 255, 0.1); }
+    .unlock-toggle .icon { width: 15px; height: 15px; }
     .pin-box { margin-top: 26px; }
     .pin-box .text-input {
       width: 210px; text-align: center; font-size: 21px;
@@ -213,7 +230,13 @@
       </div>
     </div>
     <div class="block-count" id="countdown"></div>
-    <div class="pin-box" id="pinBox">
+    <!-- כפתור קטן ושקט לפתיחה בסיסמה — מיועד למקרי חירום בלבד,
+         ולכן שדה הסיסמה מוסתר ומוצג רק בלחיצה על הכפתור -->
+    <button class="unlock-toggle" id="pinToggle" type="button">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>
+      פתיחה בסיסמת ההורה
+    </button>
+    <div class="pin-box" id="pinBox" style="display:none">
       <input type="password" id="pinInput" class="text-input" placeholder="סיסמה להורה" />
       <br />
       <button class="btn btn-primary" id="pinBtn">פתח עכשיו</button>
@@ -231,7 +254,7 @@
     <div class="lock-msg" id="lockMsg"></div>
     <div class="hint-lock">
       <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-      המחשב נשאר חסום עד לפתיחה בסיסמת ההורה
+      פתיחה בסיסמת ההורה מיועדת למקרי חירום בלבד
     </div>
   </div>
 
@@ -242,9 +265,11 @@
     const countdown = document.getElementById('countdown');
     const pinInput = document.getElementById('pinInput');
     const pinBox = document.getElementById('pinBox');
+    const pinToggle = document.getElementById('pinToggle');
     const lockMsg = document.getElementById('lockMsg');
     const blockMsg = document.getElementById('blockMsg');
     let lockUntil = 0; // אם במצב נעילה זמנית — מתי היא מסתיימת
+    let pinExpanded = false; // המשתמש לחץ על "פתיחה בסיסמת ההורה"
 
     /* ---------- שלושת השעונים ----------
        השעון החי מבוסס על הזמן המהימן שהתהליך הראשי שולח (status.now) — כך
@@ -346,16 +371,27 @@
 
     const noPinBox = document.getElementById('noPinBox');
 
+    // הרחבת שדה הסיסמה בלחיצה על הכפתור הקטן (מצב חירום)
+    pinToggle.addEventListener('click', () => {
+      pinExpanded = true;
+      pinToggle.style.display = 'none';
+      pinBox.style.display = '';
+      setTimeout(() => pinInput.focus(), 40);
+    });
+
     function render(status) {
       if (!status) return;
       applyBlockTheme(status.theme);
       // ללא סיסמה מוגדרת — מסך החסימה מציע דרך החוצה במקום שדה סיסמה
       if (status.pinSet === false) {
         pinBox.style.display = 'none';
+        pinToggle.style.display = 'none';
         noPinBox.style.display = '';
       } else {
-        pinBox.style.display = '';
+        // עם סיסמה — שדה הפתיחה מוסתר ומוצג רק בלחיצה על הכפתור
         noPinBox.style.display = 'none';
+        pinToggle.style.display = pinExpanded ? 'none' : '';
+        pinBox.style.display = pinExpanded ? '' : 'none';
       }
       // הודעה אישית שהוגדרה על ידי ההורה (מוצגת גם במנעול ידני)
       if (status.blockMessage && (status.state === 'blocked' || status.manualLock)) {

@@ -19,6 +19,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   sendRecovery: () => ipcRenderer.invoke('recovery:send'),
   checkUpdate: () => ipcRenderer.invoke('update:check'),
+  downloadUpdate: () => ipcRenderer.invoke('update:download'),
   openExternal: (url) => ipcRenderer.invoke('shell:open', url),
 
   getActivity: (limit) => ipcRenderer.invoke('activity:get', limit),
@@ -42,5 +43,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const listener = (_e, note) => cb(note);
     ipcRenderer.on('update', listener);
     return () => ipcRenderer.removeListener('update', listener);
+  },
+  onUpdateProgress: (cb) => {
+    const listener = (_e, p) => cb(p);
+    ipcRenderer.on('update-progress', listener);
+    return () => ipcRenderer.removeListener('update-progress', listener);
   }
 });

@@ -10,6 +10,7 @@ const ICONS = {
   plus: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
   check: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>',
   alert: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/></svg>',
+  download: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12l7 7 7-7"/></svg>',
   swap: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 16V4m0 0L3 8m4-4 4 4"/><path d="M17 8v12m0 0 4-4m-4 4-4-4"/></svg>'
 };
 
@@ -556,16 +557,47 @@ function showUpdateBanner(note) {
   notesEl.title = notes; // הטקסט המלא מוצג בריחוף אם הוא נחתך
   notesEl.style.display = notes ? '' : 'none'; // ללא הערות — ללא רווח ריק
   const btn = $('updateLink');
-  if (note.url && /^https?:\/\//.test(note.url)) {
+  const canDirect = !!(API && API.downloadUpdate);
+  if (canDirect || (note.url && /^https?:\/\//.test(note.url))) {
     btn.style.display = '';
     btn.disabled = false;
-    btn.onclick = () => {
-      if (API) API.openExternal(note.url);
+    btn.classList.remove('downloading');
+    btn.innerHTML = ICONS.download + '<span>הורד והתקן עכשיו</span>';
+    btn.onclick = async () => {
+      // הורדה ישירה בתוך התוכנה: מורידים את המתקין ומתקינים אותו אוטומטית
+      // (התהליך הראשי שולח התקדמות ומפעיל את המתקין בשקט).
+      if (canDirect) {
+        btn.disabled = true;
+        btn.classList.add('downloading');
+        btn.innerHTML = ICONS.download + '<span>מוריד…</span>';
+        const res = await API.downloadUpdate();
+        if (!res || !res.ok) {
+          btn.disabled = false;
+          btn.classList.remove('downloading');
+          btn.innerHTML = ICONS.download + '<span>הורד והתקן עכשיו</span>';
+          toast((res && res.error) || 'ההורדה נכשלה', 'error');
+        }
+        // הצלחה: המתקין רץ — התוכנה תיסגר ותיפתח מחדש עם הגרסה החדשה
+      } else if (API) {
+        API.openExternal(note.url);
+      }
     };
   } else {
     btn.style.display = 'none';
   }
   $('updateBanner').classList.remove('hidden');
+}
+
+// התקדמות ההורדה/ההתקנה (מ-update:download) — עדכון הכפתור באחוזים
+function onUpdateProgress(p) {
+  if (!p) return;
+  const btn = $('updateLink');
+  if (!btn || !btn.classList.contains('downloading')) return;
+  if (p.phase === 'download') {
+    btn.innerHTML = ICONS.download + '<span>מוריד… ' + (p.percent != null ? p.percent + '%' : '') + '</span>';
+  } else if (p.phase === 'install') {
+    btn.innerHTML = ICONS.download + '<span>מתקין…</span>';
+  }
 }
 
 /* ---------- סטטיסטיקות (דשבורד) ---------- */
@@ -833,6 +865,7 @@ function init() {
     if (API) {
       API.onStatus(applyStatus);
       API.onUpdate(showUpdateBanner);
+      if (API.onUpdateProgress) API.onUpdateProgress(onUpdateProgress);
     }
   };
 
@@ -873,13 +906,17 @@ function init() {
     if (!(await verifyPinSession())) { setModeUI(); return; }
     schedule.mode = 'blocklist';
     setModeUI();
+    renderWeek(); // עדכון מיידי של כרטיסי הימים (טקסט "פתוח/חסום כברירת מחדל")
     persist();
+    refreshStatus();
   };
   $('modeAllowlist').onclick = async () => {
     if (!(await verifyPinSession())) { setModeUI(); return; }
     schedule.mode = 'allowlist';
     setModeUI();
+    renderWeek(); // עדכון מיידי של כרטיסי הימים (טקסט "פתוח/חסום כברירת מחדל")
     persist();
+    refreshStatus();
   };
 
   $('warnInput').onchange = async () => {

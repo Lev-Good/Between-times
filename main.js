@@ -832,6 +832,110 @@ async function checkForUpdate() {
   }
 }
 
+/* ================= הורדה והתקנה אוטומטית של עדכון =================
+   במקום לפתוח את דף ההורדה בדפדפן — "הורד והתקן עכשיו" מוריד את
+   המתקין ישירות לתיקיית Temp, מוודא שהקובץ תקין (EXE בגודל סביר),
+   כותב דגל עצירה (כדי שהשומר-שער לא יקפיץ את התוכנה בחזרה בזמן
+   ההתקנה), מפעיל את המתקין בשקט (/S) וסוגר את התוכנה — והמתקין
+   משלים את ההתקנה לבד ופותח את הגרסה החדשה. */
+
+const GITHUB_REPO = 'Lev-Good/Between-times';
+const GITHUB_REPO_URL = 'https://github.com/' + GITHUB_REPO;
+
+// איתור כתובת ההורדה הישירה של קובץ ההתקנה לגרסה נתונה.
+// קודם דרך GitHub API (השם המדויק של הקובץ), ואם זה נכשל — נופלים
+// לכתובת הקונבנציונלית "/releases/latest/download/Setup.<version>.exe".
+async function resolveInstallerUrl(version) {
+  try {
+    const res = await fetch('https://api.github.com/repos/' + GITHUB_REPO + '/releases/tags/v' + version, {
+      signal: AbortSignal.timeout(10000)
+    });
+    if (res.ok) {
+      const data = await res.json();
+      const asset = (data.assets || []).find((a) => /^(Setup|.*Setup)[^"]*\.exe$/i.test(a.name));
+      if (asset && asset.browser_download_url) return asset.browser_download_url;
+    }
+  } catch { /* נופלים לכתובת הקונבנציונלית */ }
+  return GITHUB_REPO_URL + '/releases/latest/download/Setup.' + version + '.exe';
+}
+
+// הורדת קובץ לנתיב מקומי עם דיווח התקדמות (אחוזים) — סטרימינג מ-fetch.
+// הכתיבה לדיסק היא סינכרונית (fd) כדי שהיא תהיה דטרמיניסטית: בכשלון
+// באמצע ההורדה הקובץ החלקי נמחק מיד ואין דליפת handle או אירועי שגיאה
+// א-סינכרוניים (שגיאות write א-סינכרוניות קשות לעקוב אחריהן ב-Windows).
+async function downloadInstaller(url, dest, onProgress) {
+  const res = await fetch(url, { signal: AbortSignal.timeout(10 * 60 * 1000) });
+  if (!res.ok) throw new Error('ההורדה נכשלה (HTTP ' + res.status + ')');
+  if (!res.body) throw new Error('ההורדה נכשלה (אין תוכן)');
+  const total = Number(res.headers.get('content-length')) || 0;
+  const reader = res.body.getReader();
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  const fd = fs.openSync(dest, 'w');
+  let received = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      fs.writeSync(fd, Buffer.from(value));
+      received += value.length;
+      if (onProgress && total) onProgress(Math.round((received / total) * 100));
+    }
+    fs.closeSync(fd);
+  } catch (err) {
+    try { fs.closeSync(fd); } catch { /* ignore */ }
+    try { fs.unlinkSync(dest); } catch { /* ignore */ } // ניקוי הקובץ החלקי
+    throw err;
+  }
+  return received;
+}
+
+// הורדה + התקנה שקטה של העדכון. נקרא מהממשק (update:download) — עם
+// דיווח התקדמות לכל החלונות, וסגירה נקייה של התוכנה בסוף.
+async function downloadAndInstallUpdate() {
+  if (!updateNote) {
+    const chk = await checkForUpdate();
+    if (!chk.ok || !chk.update) {
+      return { ok: false, error: (chk && chk.error) || 'אין עדכון זמין' };
+    }
+  }
+  const version = updateNote.version;
+  const dest = path.join(app.getPath('temp'), 'BenHazmanim-Setup-' + version + '.exe');
+  const progress = (phase, percent) => {
+    const payload = { phase, version, percent };
+    [win, ...blockWins].forEach((w) => {
+      if (w && !w.isDestroyed()) w.webContents.send('update-progress', payload);
+    });
+  };
+  try {
+    const url = await resolveInstallerUrl(version);
+    // רק מקבצים של המאגר הרשמי שלנו — הגנה מפני כתובות זדוניות
+    if (!/^https:\/\/github\.com\/Lev-Good\/Between-times\//.test(url)) {
+      return { ok: false, error: 'מקור ההורדה אינו תקין' };
+    }
+    progress('download', 0);
+    const size = await downloadInstaller(url, dest, (p) => progress('download', p));
+    // בדיקות תקינות: גודל סביר (המתקין בפועל ~90MB) + חותמת PE (MZ) —
+    // כך לא מריצים קובץ שגוי (דף 404, הורדה קטועה או קובץ שאינו EXE)
+    const mz = fs.readFileSync(dest).subarray(0, 2).toString('ascii');
+    if (size < 1024 * 1024 || mz !== 'MZ') {
+      try { fs.unlinkSync(dest); } catch { /* ignore */ }
+      return { ok: false, error: 'הקובץ שהורד אינו תקין — נסו שוב או הורידו ידנית מהאתר' };
+    }
+    progress('install', 100);
+    // דגל עצירה בכל הנתיבים — השומר-שער לא יקפיץ את התוכנה בזמן ההתקנה.
+    // המתקין החדש (1.2.4+) גם הוא כותב את הדגל ב-preInit וממתין לסגירתנו.
+    writeQuitFlag();
+    const child = spawn(dest, ['/S'], { detached: true, stdio: 'ignore', windowsHide: true });
+    child.on('error', () => { /* ignore */ });
+    child.unref();
+    // סגירה נקייה — המתקין משלים את ההתקנה לבד ופותח את הגרסה החדשה
+    gracefulQuit();
+    return { ok: true, installing: true };
+  } catch (e) {
+    return { ok: false, error: e.message || 'ההורדה נכשלה — בדקו את החיבור לאינטרנט' };
+  }
+}
+
 /* ================= IPC ================= */
 
 function registerIpc() {
@@ -952,6 +1056,8 @@ function registerIpc() {
   ipcMain.handle('recovery:send', () => sendRecovery());
 
   ipcMain.handle('update:check', () => checkForUpdate());
+
+  ipcMain.handle('update:download', () => downloadAndInstallUpdate());
 
   ipcMain.handle('shell:open', (_e, url) => {
     if (typeof url === 'string' && /^https?:\/\//.test(url)) shell.openExternal(url);
