@@ -46,6 +46,7 @@ function makeMock(config) {
     exitCalled: false,
     readyCallbacks: [],
     windowsCreated: 0,
+    windows: [],        // כל חלונות ה-BrowserWindow שנוצרו (לכידת אירועים)
     notifications: []
   };
 
@@ -87,16 +88,23 @@ function makeMock(config) {
   const execSyncImpl = cfg.execSync || defaultExecSync;
 
   class MockBrowserWindow {
-    constructor() {
+    constructor(opts) {
       state.windowsCreated++;
-      this.webContents = { send: () => {} };
+      state.windows.push(this);
+      this.title = (opts && opts.title) || null;
+      this._listeners = {};
+      this.webContents = {
+        sent: [],
+        send: (ch, data) => { this.webContents.sent.push([ch, data]); }
+      };
       this.blockDisplayId = null;
     }
     isDestroyed() { return false; }
-    on() {}
+    on(ev, cb) { (this._listeners[ev] = this._listeners[ev] || []).push(cb); }
+    emit(ev, arg) { (this._listeners[ev] || []).forEach((l) => l(arg)); }
     show() {}
     focus() {}
-    hide() {}
+    hide() { this.emit('hide'); }
     destroy() {}
     setAlwaysOnTop() {}
     setVisibleOnAllWorkspaces() {}
@@ -506,6 +514,81 @@ test('settings:save requires session unlock when pin is set', async () => {
   assert.ok(unlock.unlocked);
   const res2 = await m.ipcHandlers.get('settings:save')({}, { enabled: false });
   assert.ok(res2.ok, 'אחרי כניסה עם סיסמה — שמירה מותרת');
+  m.cleanup();
+});
+
+/* ================= נעילת סשן: חובת סיסמה בכל פתיחה מחדש =================
+   סגירה/מזעור/הסתרה של חלון ההגדרות חייבים לנעול את הסשן ולהודיע לממשק —
+   אחרת פתיחה חוזרת משורת המשימות או מהמגש עוקפת את הסיסמה (חור אבטחה). */
+
+function mainWin(m) {
+  return m.state.windows.find((w) => w.title === 'בין הזמנים — ניהול זמן מחשב');
+}
+
+test('session: closing (hiding) the settings window locks it and notifies the UI', async () => {
+  const settings = S.defaultSchedule();
+  settings.pinHash = S.sha256Hex('1234');
+  const m = loadMain({ settings });
+  await m.ready();
+
+  // כניסה עם סיסמה — שמירה מותרת
+  await m.ipcHandlers.get('session:unlock')({}, '1234');
+  let res = await m.ipcHandlers.get('settings:save')({}, { enabled: false });
+  assert.ok(res.ok, 'אחרי כניסה — שמירה מותרת');
+
+  // סגירת החלון (X) = הסתרה — חייב לנעול את הסשן
+  const w = mainWin(m);
+  assert.ok(w, 'חלון ההגדרות צריך להתקיים');
+  w.emit('close', { preventDefault: () => {} });
+
+  // הממשק קיבל הודעת נעילה + השרת דוחה שוב שינויי הגדרות
+  assert.ok(w.webContents.sent.some(([ch]) => ch === 'session-lock'), 'הממשק צריך לקבל session-lock בהסתרה');
+  const g = await m.ipcHandlers.get('session:get')();
+  assert.equal(g.unlocked, false, 'לאחר הסתרה הסשן נעול');
+  res = await m.ipcHandlers.get('settings:save')({}, { enabled: true });
+  assert.equal(res.ok, false, 'פתיחה מחדש דורשת סיסמה שוב');
+  m.cleanup();
+});
+
+test('session: minimize (hide event) also locks the session', async () => {
+  const settings = S.defaultSchedule();
+  settings.pinHash = S.sha256Hex('1234');
+  const m = loadMain({ settings });
+  await m.ready();
+
+  await m.ipcHandlers.get('session:unlock')({}, '1234');
+  assert.equal((await m.ipcHandlers.get('session:get')()).unlocked, true);
+
+  const w = mainWin(m);
+  w.emit('hide'); // מזעור מפעיל אירוע hide בווינדוס
+  assert.equal((await m.ipcHandlers.get('session:get')()).unlocked, false, 'מזעור חייב לנעול');
+  assert.ok(w.webContents.sent.some(([ch]) => ch === 'session-lock'));
+  m.cleanup();
+});
+
+test('session: app:hide and session:lock IPC lock an unlocked session', async () => {
+  const settings = S.defaultSchedule();
+  settings.pinHash = S.sha256Hex('1234');
+  const m = loadMain({ settings });
+  await m.ready();
+
+  await m.ipcHandlers.get('session:unlock')({}, '1234');
+
+  // session:lock (נקרא מהממשק כשהחלון עבר לרקע) — נועל את השרת
+  await m.ipcHandlers.get('session:lock')();
+  assert.equal((await m.ipcHandlers.get('session:get')()).unlocked, false);
+  let res = await m.ipcHandlers.get('settings:save')({}, { enabled: false });
+  assert.equal(res.ok, false, 'לאחר session:lock אסור לשנות הגדרות');
+
+  // app:hide — חוזרים למצב פתוח ואז מסתירים את החלון
+  await m.ipcHandlers.get('session:unlock')({}, '1234');
+  const h = await m.ipcHandlers.get('app:hide')();
+  assert.ok(h.ok);
+  assert.equal((await m.ipcHandlers.get('session:get')()).unlocked, false, 'app:hide חייב לנעול');
+  const w = mainWin(m);
+  assert.ok(w.webContents.sent.some(([ch]) => ch === 'session-lock'), 'הממשק עודכן שהסשן ננעל');
+  res = await m.ipcHandlers.get('settings:save')({}, { enabled: true });
+  assert.equal(res.ok, false);
   m.cleanup();
 });
 

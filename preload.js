@@ -16,6 +16,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   getSession: () => ipcRenderer.invoke('session:get'),
   unlockSession: (pin) => ipcRenderer.invoke('session:unlock', pin),
+  lockSession: () => ipcRenderer.invoke('session:lock'),
 
   sendRecovery: () => ipcRenderer.invoke('recovery:send'),
   checkUpdate: () => ipcRenderer.invoke('update:check'),
@@ -48,5 +49,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const listener = (_e, p) => cb(p);
     ipcRenderer.on('update-progress', listener);
     return () => ipcRenderer.removeListener('update-progress', listener);
+  },
+  onSessionLock: (cb) => {
+    const listener = () => cb();
+    ipcRenderer.on('session-lock', listener);
+    return () => ipcRenderer.removeListener('session-lock', listener);
   }
 });

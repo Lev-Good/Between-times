@@ -492,6 +492,17 @@ function showMainWindow() {
   win.focus();
 }
 
+// נעילת סשן ההגדרות: כשהחלון מוסתר (סגירה, מזעור או הסתרה) הכניסה להגדרות
+// דורשת סיסמה מחדש. הנעילה מתאפסת את sessionUnlocked ומודיעה לממשק מיד,
+// כך שגם פתיחה חוזרת דרך שורת המשימות, המגש או התראה תציג את מסך הכניסה
+// (הממשק לא נטען מחדש בהסתרה — לכן חייבים להודיע לו במפורש).
+function lockSession() {
+  sessionUnlocked = false;
+  if (win && !win.isDestroyed()) {
+    try { win.webContents.send('session-lock'); } catch { /* ignore */ }
+  }
+}
+
 function createMainWindow() {
   win = new BrowserWindow({
     width: 1080,
@@ -513,10 +524,13 @@ function createMainWindow() {
   win.on('close', (e) => {
     if (!isQuitting) {
       e.preventDefault();
-      sessionUnlocked = false; // כניסה להגדרות דורשת סיסמה בכל פתיחה מחדש
+      lockSession(); // נעילה מיידית — גם אם אירוע ה-hide לא יגיע
       win.hide();
     }
   });
+  // כל הסתרה (סגירה ב-X, מזעור, app:hide) נועלת את הכניסה להגדרות —
+  // הפתיחה מחדש משורת המשימות או מהמגש דורשת סיסמת הורה.
+  win.on('hide', () => lockSession());
 }
 
 /* ================= הפעלה עם Windows (Registry + משימה מתוזמנת) ================= */
@@ -1053,6 +1067,13 @@ function registerIpc() {
     return { ok: true, unlocked: true };
   });
 
+  // נעילה מצד הממשק (למשל כשהחלון עבר לרקע): מחזירה את כל הפעולות
+  // הרגישות (שמירת הגדרות, יציאה, הסרה) למצב הדורש סיסמה.
+  ipcMain.handle('session:lock', () => {
+    sessionUnlocked = false;
+    return { ok: true };
+  });
+
   ipcMain.handle('recovery:send', () => sendRecovery());
 
   ipcMain.handle('update:check', () => checkForUpdate());
@@ -1109,7 +1130,7 @@ function registerIpc() {
   });
   ipcMain.handle('app:version', () => app.getVersion());
   ipcMain.handle('app:hide', () => {
-    if (win && !win.isDestroyed()) win.hide();
+    if (win && !win.isDestroyed()) win.hide(); // ה-hide נועל את הסשן
     return { ok: true };
   });
 

@@ -69,6 +69,16 @@ async function tryLogin(pin) {
   }
 }
 
+// נעילת הכניסה להגדרות — מופעלת כשהחלון מוסתר (מזעור/סגירה) או כשהתהליך
+// הראשי מודיע שנעל את הסשן. כך כל פתיחה מחדש — משורת המשימות, מהמגש או
+// מהתראה — דורשת סיסמת הורה, גם אם הדף לא נטען מחדש.
+function lockLocalSession() {
+  if (!schedule.pinHash) return;
+  sessionUnlocked = false;
+  pinVerifiedAt = 0;
+  applyLoginState();
+}
+
 /* ---------- PIN ---------- */
 function pinRequired() {
   return !!(schedule.pinHash && sessionUnlocked && Date.now() - pinVerifiedAt > PIN_SESSION_MS);
@@ -93,6 +103,9 @@ function promptPin() {
 }
 
 async function verifyPinSession() {
+  // סשן נעול = מודאל הכניסה כבר על המסך — אסור להמשיך בפעולה
+  // (הגנה לעומק; הלחיצות חסומות בכל מקרה ע"י ה-blur)
+  if (schedule.pinHash && !sessionUnlocked) return false;
   if (!pinRequired()) return true;
   const pin = await promptPin();
   if (pin == null) return false;
@@ -113,7 +126,7 @@ async function persist() {
   try {
     if (API) {
       const res = await API.saveSettings(schedule);
-      if (!res || !res.ok) throw new Error('שמירה נכשלה');
+      if (!res || !res.ok) throw new Error((res && res.error) || 'שמירה נכשלה');
       if (res.warning) toast(res.warning);
     } else {
       localStorage.setItem('ben-hazmanim-settings', JSON.stringify(schedule));
@@ -122,6 +135,11 @@ async function persist() {
     return true;
   } catch (e) {
     toast('שגיאה בשמירה: ' + e.message, 'error');
+    // כל כשלון שמירה — לבדוק אם השרת נעל את הסשן ולחזור למצב נעול בממשק
+    // (רשת ביטחון למקרה שהממשק פספס את אירוע הנעילה).
+    if (API) {
+      API.getSession().then((s) => { if (s && !s.unlocked) lockLocalSession(); }).catch(() => {});
+    }
     return false;
   }
 }
@@ -300,6 +318,7 @@ function renderWeek() {
       day.slots.push({ start: T.parseHM('09:00'), end: T.parseHM('14:00'), type: newSlotType });
       renderWeek();
       persist();
+      refreshStatus(); // עדכון מיידי של הספירה לאחור לפי הלוח החדש
     };
     card.appendChild(addBtn);
 
@@ -321,6 +340,7 @@ function renderSlotRow(day, idx, isOverlap) {
     slot.start = T.parseHM(start.value);
     renderWeek();
     persist();
+    refreshStatus(); // עדכון מיידי של הספירה לאחור לפי הלוח החדש
   };
 
   const dash = document.createElement('span');
@@ -336,6 +356,7 @@ function renderSlotRow(day, idx, isOverlap) {
     slot.end = T.parseHM(end.value);
     renderWeek();
     persist();
+    refreshStatus(); // עדכון מיידי של הספירה לאחור לפי הלוח החדש
   };
 
   const typeBtn = document.createElement('button');
@@ -347,6 +368,7 @@ function renderSlotRow(day, idx, isOverlap) {
     slot.type = slot.type === 'blocked' ? 'allowed' : 'blocked';
     renderWeek();
     persist();
+    refreshStatus(); // עדכון מיידי של הספירה לאחור לפי הלוח החדש
   };
 
   const del = document.createElement('button');
@@ -358,6 +380,7 @@ function renderSlotRow(day, idx, isOverlap) {
     day.slots.splice(idx, 1);
     renderWeek();
     persist();
+    refreshStatus(); // עדכון מיידי של הספירה לאחור לפי הלוח החדש
   };
 
   row.append(start, dash, end, typeBtn, del);
@@ -866,10 +889,29 @@ function init() {
       API.onStatus(applyStatus);
       API.onUpdate(showUpdateBanner);
       if (API.onUpdateProgress) API.onUpdateProgress(onUpdateProgress);
+      if (API.onSessionLock) API.onSessionLock(lockLocalSession);
     }
   };
 
   load();
+
+  // נעילה אוטומטית בהסתרה: מזעור/סגירה של החלון נועלים את הכניסה להגדרות,
+  // ובפתיחה מחדש מסנכרנים את מצב הסשן מהתהליך הראשי (רשת ביטחון) — כך
+  // אי אפשר לעקוף את הסיסמה דרך שורת המשימות.
+  document.addEventListener('visibilitychange', async () => {
+    if (document.hidden) {
+      lockLocalSession();
+      if (API) API.lockSession();
+    } else if (API) {
+      try {
+        const s = await API.getSession();
+        if (s && !s.unlocked) {
+          lockLocalSession();
+          setTimeout(() => { const i = $('loginInput'); if (i) i.focus(); }, 60);
+        }
+      } catch { /* ignore */ }
+    }
+  });
 
   /* ---------- כניסה ---------- */
   const doLogin = () => {
