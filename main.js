@@ -1004,6 +1004,7 @@ function registerIpc() {
   ipcMain.handle('app:version', () => app.getVersion());
   ipcMain.handle('app:hide', () => {
     if (win && !win.isDestroyed()) win.hide();
+    return { ok: true };
   });
 
   // פתיחת חלון ההגדרות — ממסך החסימה או מכל מקום אחר
@@ -1095,7 +1096,30 @@ const isWatchdog = process.argv.includes('--watchdog');
 const stateDir = () => app.getPath('userData');
 const mainHbFile = () => path.join(stateDir(), 'main.heartbeat');
 const watchHbFile = () => path.join(stateDir(), 'watchdog.heartbeat');
-const quitFlagFile = () => path.join(stateDir(), 'quit.flag');
+
+// דגל העצירה נבדק/נכתב בכמה נתיבים, כדי שהמתקין והאפליקציה ימצאו תמיד
+// זה את זה גם כששם המוצר משתנה בין package.json לבין build config:
+//   1) userData של האפליקציה (הנתיב הקבוע שלה, לפי productName המלא)
+//   2) %APPDATA%\BenHazmanim — נתיב ASCII יציב שה-NSIS כותב אליו.
+const quitFlagPaths = () => {
+  const paths = [path.join(stateDir(), 'quit.flag')];
+  if (isWin && process.env.APPDATA) paths.push(path.join(process.env.APPDATA, 'BenHazmanim', 'quit.flag'));
+  return paths;
+};
+const quitFlagExists = () => quitFlagPaths().some(fs.existsSync);
+function writeQuitFlag() {
+  for (const p of quitFlagPaths()) {
+    try {
+      fs.mkdirSync(path.dirname(p), { recursive: true });
+      fs.writeFileSync(p, String(Date.now()));
+    } catch { /* ignore */ }
+  }
+}
+function clearQuitFlags() {
+  for (const p of quitFlagPaths()) {
+    try { fs.unlinkSync(p); } catch { /* ignore */ }
+  }
+}
 
 function writeHeartbeat(file) {
   try { fs.writeFileSync(file, JSON.stringify({ pid: process.pid, ts: Date.now() })); } catch { /* ignore */ }
@@ -1152,7 +1176,7 @@ async function runWatchdog() {
   // שומר-שער: ללא חלונות וללא מגש — רק מעקב והקפצה
   writeHeartbeat(watchHbFile());
   const check = () => {
-    if (fs.existsSync(quitFlagFile())) { app.exit(0); return; } // עצירה מוסכמת
+    if (quitFlagExists()) { app.exit(0); return; } // עצירה מוסכמת
     writeHeartbeat(watchHbFile());
     if (heartbeatStale(mainHbFile(), 8000) && Date.now() - lastMainSpawn > 5000) {
       lastMainSpawn = Date.now();
@@ -1176,7 +1200,7 @@ function superviseWatchdog() {
     // דגל עצירה (נכתב ע"י מתקין העדכון לפני ההתקנה) — לצאת בשקט,
     // כדי שההתקנה תצליח גם כשהתוכנה רצה ברקע (ואפילו עם הרשאות מנהל).
     if (isQuitting) return;
-    if (fs.existsSync(quitFlagFile())) { gracefulQuit(); return; }
+    if (quitFlagExists()) { gracefulQuit(); return; }
     if (heartbeatStale(watchHbFile(), 8000) && Date.now() - lastWatchSpawn > 5000) {
       lastWatchSpawn = Date.now();
       ownWatchdogPid = spawnWatchdog();
@@ -1189,7 +1213,7 @@ function superviseWatchdog() {
 function gracefulQuit() {
   isQuitting = true;
   logEvent('app-quit');
-  try { fs.writeFileSync(quitFlagFile(), String(Date.now())); } catch { /* ignore */ }
+  writeQuitFlag(); // בכל הנתיבים — כדי שהמתקין/השומר יראו את דגל העצירה
   // סגירת השומר שלנו כדי שלא יקפיץ מחדש
   if (ownWatchdogPid && isProcessAlive(ownWatchdogPid)) {
     try { process.kill(ownWatchdogPid); } catch { /* ignore */ }
@@ -1263,8 +1287,8 @@ if (isWatchdog) {
         return;
       }
 
-      // ניקוי דגל עצירה מהסשן הקודם (אתחול חדש = רוצים את השומר)
-      try { fs.unlinkSync(quitFlagFile()); } catch { /* ignore */ }
+      // ניקוי דגלי עצירה מהסשן הקודם (אתחול חדש = רוצים את השומר)
+      clearQuitFlags();
 
       createMainWindow();
       tray = new Tray(trayIcon());
