@@ -8,8 +8,6 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  const MIN = 60 * 1000;
-
   /* ---------- עזרי זמן ---------- */
 
   function parseHM(str) {
@@ -155,6 +153,13 @@
     return new Date(date.getFullYear(), date.getMonth(), date.getDate() + offset);
   }
 
+  // שעה ספציפית ביום, לפי שדות לוח שנה (ולא לפי הוספת דקות לחצות) — כך
+  // שעות החלון נכונות גם ביום שבו משתנה שעון הקיץ (DST), שבו היממה אינה
+  // בת 24 שעות בדיוק והוספת דקות לחצות הייתה מזיזה את החלונות בשעה.
+  function dayAt(day, minutes) {
+    return new Date(day.getFullYear(), day.getMonth(), day.getDate(), Math.floor(minutes / 60), minutes % 60);
+  }
+
   // המעבר הבא בין מותר לחסום (בודק את שלושת הימים הקרובים)
   // מדלג על גבולות שאינם משנים בפועל את המצב (למשל שני חלונות זהים סמוכים)
   function nextTransition(schedule, now) {
@@ -163,8 +168,8 @@
     for (let i = 0; i < 3; i++) {
       const day = startOfDay(now, i);
       for (const s of daySlots(schedule, day)) {
-        const start = new Date(day.getTime() + s.start * MIN);
-        let end = new Date(day.getTime() + s.end * MIN);
+        const start = dayAt(day, s.start);
+        let end = dayAt(day, s.end);
         if (s.start >= s.end) end.setDate(end.getDate() + 1);
         ats.push(start);
         ats.push(end);

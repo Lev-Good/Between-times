@@ -116,10 +116,12 @@ let pinFailures = 0;
 let pinLockUntil = 0;
 const pinLockFile = () => path.join(app.getPath('userData'), 'pinlock.json');
 
+// נעילת ה-PIN הזמנית נמדדת בזמן המהימן (trustedNow) — כמו שאר התוכנה —
+// כדי שילד לא יוכל לשנות את שעון המערכת ולעקוף את הנעילה אחרי 5 ניסיונות.
 function loadPinLock() {
   try {
     const data = JSON.parse(fs.readFileSync(pinLockFile(), 'utf8'));
-    if (data && typeof data.until === 'number' && data.until > Date.now()) pinLockUntil = data.until;
+    if (data && typeof data.until === 'number' && data.until > trustedNow()) pinLockUntil = data.until;
   } catch { /* ignore */ }
 }
 function savePinLock() {
@@ -130,14 +132,14 @@ function clearPinLock() {
 }
 
 function checkPinLock() {
-  if (Date.now() < pinLockUntil) return Math.ceil((pinLockUntil - Date.now()) / 1000);
+  if (trustedNow() < pinLockUntil) return Math.ceil((pinLockUntil - trustedNow()) / 1000);
   if (pinLockUntil) { pinLockUntil = 0; clearPinLock(); } // הנעילה פגה — ניקוי
   return 0;
 }
 function pinFail() {
   pinFailures++;
   if (pinFailures >= 5) {
-    pinLockUntil = Date.now() + 60000; // 5 כישלונות -> נעילה של דקה
+    pinLockUntil = trustedNow() + 60000; // 5 כישלונות -> נעילה של דקה (זמן מהימן)
     pinFailures = 0;
     savePinLock();
   }
@@ -630,6 +632,54 @@ function getStartupStatus() {
   });
 }
 
+/* ================= הסרת התוכנה =================
+   ההסרה מתבצעת מהתוכנה עצמה (עם סיסמת הורה) כדי שהמשתמש לא יוכל
+   לעקוף את החסימה על ידי מחיקת התוכנה. התהליך:
+   1) כתיבת דגל עצירה + הרג כלב השמירה — כדי שלא יקפיץ את התוכנה בחזרה.
+   2) הסרת רישומי ההפעלה עם Windows (Registry + משימה מתוזמנת).
+   3) הפעלת ה-Uninstaller של NSIS בשקט (מסיר את קבצי התוכנה והקיצורים).
+   4) סגירה נקייה של התוכנה — וה-Uninstaller ממשיך לבד.
+   מחיקת קבצי ההגדרות נעשית על ידי ה-Uninstaller עצמו (ראה build/installer.nsh
+   וההגדרה deleteAppDataOnUninstall ב-package.json). */
+
+// הסרת רישומי ההפעלה עם Windows — בסדר דרגי כדי לא לאבד רישומים שנמחקו כבר.
+function removeStartupEntries() {
+  return new Promise((resolve) => {
+    if (!isWin) return resolve();
+    execFile('reg', ['delete', RUN_KEY, '/v', RUN_NAME, '/f'], () => {
+      execFile('schtasks', ['/Delete', '/TN', TASK_NAME, '/F'], () => {
+        if (!isElevated()) return resolve();
+        // רישומים ברמת כל המשתמשים — זמינים רק עם הרשאות מנהל
+        execFile('reg', ['delete', RUN_KEY_MACHINE, '/v', RUN_NAME, '/f'], () => {
+          // ביטול מדיניות ההסתרה של דף "חשבונות" (הוגדרה בעת ההתקנה)
+          execFile('reg', ['delete', 'HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\Explorer', '/v', 'SettingsPageVisibility', '/f'], resolve);
+        });
+      });
+    });
+  });
+}
+
+// איתור ה-Uninstaller של NSIS — קודם כקובץ "Uninstall ..." לצד קובץ התוכנה
+// (המיקום שבו electron-builder תמיד מניח אותו, עם נתיב Unicode אמין),
+// ורק אחר כך דרך רישום מרכז התוכניות (פלט reg query הוא ANSI — עלול
+// להשחית תווים עבריים בנתיב, ולכן הוא רק רשת ביטחון נוספת).
+function findUninstaller() {
+  const candidates = [];
+  try {
+    const dir = path.dirname(process.execPath);
+    for (const name of fs.readdirSync(dir)) {
+      if (/^Uninstall .*\.exe$/i.test(name)) candidates.push(path.join(dir, name));
+    }
+  } catch { /* ignore */ }
+  try {
+    const key = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\com.levtov.benhazmanim';
+    const out = execFileSync('reg', ['query', key, '/v', 'UninstallString'], { encoding: 'utf8', windowsHide: true });
+    const m = out.match(/([A-Za-z]:\\(?:[^"\r\n]*\))*[^"\r\n]*?\.exe)/);
+    if (m) candidates.push(m[1]);
+  } catch { /* המפתח אינו קיים */ }
+  return candidates.find((c) => fs.existsSync(c)) || null;
+}
+
 /* ================= שחזור סיסמה למייל (Google Apps Script) ================= */
 
 // כתובת קבועה של אפליקציית השחזור — כל הבקשות נשלחות לשרת זה בלבד.
@@ -707,6 +757,34 @@ function recoveryErrorToHebrew(raw) {
 
 /* ================= בדיקת עדכונים ================= */
 
+// שמירת ההודעה במודול: בלי התייחסות פעילה האובייקט עלול להיאסף לאשפה (GC),
+// ואז אירוע הלחיצה לא מגיע אלינו כשהמשתמש לוחץ על ההודעה — מצב תיעודי בווינדוס.
+let updateNotification = null;
+let lastOpenedUpdateUrl = null;
+let lastOpenedUpdateAt = 0;
+
+// פתיחת דף ההורדה מההודעה: קודם מנסים את הדפדפן; אם זה נכשל — פותחים את
+// חלון התוכנה שבו יש באנר עדכון עם כפתור הורדה (רשת ביטחון).
+function openUpdatePage(note) {
+  const url = (note && note.url && /^https?:\/\//.test(note.url)) ? note.url : null;
+  if (!url) {
+    // אין כתובת (למשל לחיצה על הודעה ישנה אחרי הפעלה מחדש) — לפחות לפתוח את התוכנה
+    if (win && !win.isDestroyed()) showMainWindow();
+    return;
+  }
+  // הגנה מפני פתיחה כפולה (כמה הודעות עדכון באותו URL או אירוע OS כפול)
+  // — לוודא שהדפדפן נפתח פעם אחת בלבד.
+  const now = Date.now();
+  if (url === lastOpenedUpdateUrl && now - lastOpenedUpdateAt < 4000) return;
+  lastOpenedUpdateUrl = url;
+  lastOpenedUpdateAt = now;
+  try {
+    shell.openExternal(url).catch(() => { if (win && !win.isDestroyed()) showMainWindow(); });
+  } catch {
+    if (win && !win.isDestroyed()) showMainWindow();
+  }
+}
+
 function isNewerVersion(remote, current) {
   const r = String(remote).split('.').map(Number);
   const c = String(current).split('.').map(Number);
@@ -723,15 +801,13 @@ function notifyUpdate(note) {
   if (win && !win.isDestroyed()) win.webContents.send('update', note);
   blockWins.forEach((bw) => { if (bw && !bw.isDestroyed()) bw.webContents.send('update', note); });
   try {
-    const n = new Notification({
+    updateNotification = new Notification({
       title: 'עדכון זמין — בין הזמנים',
       body: 'גרסה ' + note.version + ' זמינה להורדה' + (note.url ? ' — לחצו על ההודעה כדי לפתוח את דף ההורדה' : '')
     });
-    // לחיצה על ההודעה פותחת את דף ההורדה בדפדפן — כך שההודעה אכן עובדת
-    if (note.url && /^https?:\/\//.test(note.url)) {
-      n.on('click', () => shell.openExternal(note.url));
-    }
-    n.show();
+    // לחיצה על ההודעה פותחת את דף ההורדה בדפדפן
+    updateNotification.on('click', () => openUpdatePage(note));
+    updateNotification.show();
   } catch { /* ignore */ }
 }
 
@@ -888,6 +964,35 @@ function registerIpc() {
       const v = verifyPinServer(pin);
       if (!v.ok) return { ok: false, error: v.error };
     }
+    gracefulQuit();
+    return { ok: true };
+  });
+
+  ipcMain.handle('app:uninstall', async (_e, pin) => {
+    // הסרת התוכנה דורשת סיסמת הורה — כמו כל פעולה רגישה
+    if (schedule.pinHash) {
+      const v = verifyPinServer(pin);
+      if (!v.ok) return { ok: false, error: v.error };
+    }
+    if (!isWin) return { ok: false, error: 'ההסרה זמינה רק בווינדוס' };
+    // מתקין ההסרה חייב להיות קיים — אחרת לא נמחק כלום
+    const uninstaller = findUninstaller();
+    if (!uninstaller) {
+      return { ok: false, error: 'לא נמצא מתקין ההסרה — הסירו את התוכנה דרך "התקן והסר תוכניות" בלוח הבקרה' };
+    }
+    // 1) הסרת רישומי ההפעלה עם Windows (Registry + משימה מתוזמנת) —
+    //    לפני הפעלת ה-Uninstaller, כדי שלא יישארו רישומים לאחר ההסרה.
+    await removeStartupEntries();
+    // 2) הפעלת ה-Uninstaller בשקט (מסיר קבצים, קיצורים ונתונים) —
+    //    בתהליך נפרד (detached) כך שהוא ממשיך גם אחרי שהתוכנה נסגרת.
+    try {
+      const child = spawn(uninstaller, ['/S'], { detached: true, stdio: 'ignore', windowsHide: true });
+      child.on('error', () => { /* ignore */ });
+      child.unref();
+    } catch { /* ignore */ }
+    // 3) סגירה נקייה: gracefulQuit כותב את דגל העצירה (כך שהשומר-שער לא
+    //    יקפיץ את התוכנה בחזרה בזמן שה-Uninstaller מסיר את הקבצים) והורג
+    //    את השומר — ולאחר מכן התוכנה נסגרת וה-Uninstaller ממשיך לבד.
     gracefulQuit();
     return { ok: true };
   });

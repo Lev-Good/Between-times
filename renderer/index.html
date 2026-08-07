@@ -317,6 +317,18 @@
         </button>
       </div>
 
+      <!-- הסרת התוכנה -->
+      <div class="card-head" style="margin-top:26px">
+        <h2>הסרת התוכנה</h2>
+        <p class="hint">מסירה את התוכנה מהמחשב יחד עם ההגדרות, לוח הזמנים והסיסמה — כולל הסרת ההפעלה עם Windows ועצירת כלבי השמירה. נדרשת סיסמת ההורה.</p>
+      </div>
+      <div class="recovery-actions">
+        <button class="btn btn-danger" id="uninstallBtn">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6M10 11v6M14 11v6"/></svg>
+          הסרת התוכנה מהמחשב
+        </button>
+      </div>
+
       <!-- אודות (בתוך הגדרות) -->
       <div class="card-head" style="margin-top:26px">
         <h2>אודות</h2>
@@ -365,6 +377,19 @@
       <button class="btn btn-primary btn-full" id="loginOk">היכנסו להגדרות</button>
       <button class="btn btn-ghost btn-full" id="loginForgot">שכחתי סיסמה — שלחו למייל</button>
       <div class="login-error hidden" id="loginError">סיסמה שגויה</div>
+    </div>
+  </div>
+
+  <!-- חלונית אישור הסרת התוכנה -->
+  <div class="modal-overlay hidden" id="uninstallModal">
+    <div class="modal">
+      <h3>הסרת התוכנה</h3>
+      <p>התוכנה תוסר מהמחשב — כולל ההגדרות, לוח הזמנים, המייל לשחזור והסיסמה. הפעולה סופית ואין דרך לבטל אותה. כדי להמשיך — הזינו את סיסמת ההורה.</p>
+      <input type="password" id="uninstallInput" placeholder="סיסמת הורה" class="text-input" autofocus />
+      <div class="modal-actions">
+        <button class="btn btn-danger" id="uninstallOk">הסר את התוכנה</button>
+        <button class="btn btn-ghost" id="uninstallCancel">ביטול</button>
+      </div>
     </div>
   </div>
 

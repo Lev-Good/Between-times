@@ -1053,6 +1053,40 @@ function init() {
     }
   };
 
+  /* ---------- הסרת התוכנה ---------- */
+  $('uninstallBtn').onclick = () => {
+    if (!API) { toast('הסרה זמינה רק בגרסת המחשב המלאה'); return; }
+    $('uninstallModal').classList.remove('hidden');
+    $('uninstallInput').value = '';
+    setTimeout(() => $('uninstallInput').focus(), 50);
+  };
+  const doUninstall = async () => {
+    const pin = $('uninstallInput').value;
+    if (schedule.pinHash && !pin) { toast('הזינו את סיסמת ההורה', 'error'); return; }
+    $('uninstallOk').disabled = true;
+    try {
+      const res = await API.uninstallApp(pin);
+      if (res && res.ok) {
+        $('uninstallModal').classList.add('hidden');
+        toast('התוכנה מוסרת מהמחשב…');
+        // התוכנה נסגרת מיד — ה-Uninstaller משלים את ההסרה לבד
+      } else {
+        $('uninstallInput').value = '';
+        toast((res && res.error) || 'ההסרה נכשלה', 'error');
+      }
+    } catch (e) {
+      toast('שגיאה בהסרה: ' + (e && e.message ? e.message : ''), 'error');
+    } finally {
+      $('uninstallOk').disabled = false;
+    }
+  };
+  $('uninstallOk').onclick = doUninstall;
+  $('uninstallCancel').onclick = () => $('uninstallModal').classList.add('hidden');
+  $('uninstallInput').onkeydown = (e) => {
+    if (e.key === 'Enter') doUninstall();
+    if (e.key === 'Escape') $('uninstallModal').classList.add('hidden');
+  };
+
   /* ---------- נעילה / פתיחה ---------- */
   $('lockNowBtn').onclick = () => {
     if (API) {

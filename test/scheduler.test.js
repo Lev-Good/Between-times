@@ -1,3 +1,6 @@
+// אזור זמן קבוע (ישראל) — כדי שבדיקות ה-DST למטה יהיו דטרמיניסטיות בכל מכונה
+process.env.TZ = 'Asia/Jerusalem';
+
 const test = require('node:test');
 const assert = require('node:assert');
 const S = require('../scheduler.js');
@@ -375,5 +378,32 @@ test('warning: default warnMinutes is 5 and normalized', () => {
   assert.equal(S.normalizeSchedule({ warnMinutes: 200 }).warnMinutes, 60); // capped
   assert.equal(S.normalizeSchedule({ warnMinutes: -3 }).warnMinutes, 0);
   assert.equal(S.normalizeSchedule({}).warnMinutes, 5);
+});
+
+test('nextTransition is DST-safe: spring-forward day (23h day)', () => {
+  // שישי 27.3.2026 — יום תחילת שעון הקיץ בישראל (היממה בת 23 שעות):
+  // בניית שעות החלון חייבת להתבצע לפי שדות לוח שנה, לא לפי הוספת דקות לחצות.
+  const s = S.defaultSchedule();
+  s.week[5].slots.push({ start: S.parseHM('08:00'), end: S.parseHM('16:00'), type: 'blocked' });
+  const day = new Date(2026, 2, 27);
+  const dayLen = (new Date(2026, 2, 28) - day) / 3600e3;
+  if (dayLen >= 24) return; // באזורי זמן ללא DST הבדיקה אינה רלוונטית
+  const st = S.getStatus(s, new Date(2026, 2, 26, 20, 0)); // חמישי 20:00
+  assert.equal(st.state, 'allowed');
+  assert.equal(st.nextAt.getDay(), 5);
+  assert.equal(st.nextAt.getHours(), 8, 'חלון 08:00 חייב להתחיל ב-08:00 גם ביום DST');
+});
+
+test('nextTransition is DST-safe: fall-back day (25h day)', () => {
+  // ראשון 25.10.2026 — יום סיום שעון הקיץ בישראל (היממה בת 25 שעות)
+  const s = S.defaultSchedule();
+  s.week[0].slots.push({ start: S.parseHM('08:00'), end: S.parseHM('16:00'), type: 'blocked' });
+  const day = new Date(2026, 9, 25);
+  const dayLen = (new Date(2026, 9, 26) - day) / 3600e3;
+  if (dayLen <= 24) return; // באזורי זמן ללא DST הבדיקה אינה רלוונטית
+  const st = S.getStatus(s, new Date(2026, 9, 24, 20, 0)); // שבת 20:00
+  assert.equal(st.state, 'allowed');
+  assert.equal(st.nextAt.getDay(), 0);
+  assert.equal(st.nextAt.getHours(), 8, 'חלון 08:00 חייב להתחיל ב-08:00 גם ביום DST');
 });
 
