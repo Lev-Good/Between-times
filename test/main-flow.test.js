@@ -726,10 +726,62 @@ test('update:download downloads installer and starts silent install', async () =
     assert.ok(m.state.quitCalled, 'התוכנה צריכה להיסגר כדי לאפשר התקנה');
     assert.ok(fs.existsSync(path.join(m.tmpRoot, 'userData', 'quit.flag')), 'quit.flag ב-userData');
     assert.ok(fs.existsSync(path.join(process.env.APPDATA, 'BenHazmanim', 'quit.flag')), 'quit.flag בנתיב ה-NSIS');
+
+    // דגל "הפעל מחדש" נכתב — כדי שהמתקין יפתח את הגרסה החדשה אחרי ההתקנה
+    // (התקנה שקטה /S לא מריצה את התוכנה מעצמה)
+    assert.ok(fs.existsSync(path.join(m.tmpRoot, 'userData', 'relaunch.flag')), 'relaunch.flag ב-userData');
+    assert.ok(fs.existsSync(path.join(process.env.APPDATA, 'BenHazmanim', 'relaunch.flag')), 'relaunch.flag בנתיב ה-NSIS');
     m.cleanup();
   } finally {
     fetchMock = null;
   }
+});
+
+test('update:download writes relaunch flag so the installer reopens the app', async () => {
+  // אותו מהלך כמו בדיקת ההורדה — אבל בודק במפורש שהדגל נכתב בשני הנתיבים
+  // ש-NSIS בודק ב-customInstall (BenHazmanim + userData)
+  fetchMock = async (url) => {
+    const api = githubApiRelease(url);
+    if (api) return api;
+    if (url.includes('raw.githubusercontent.com')) {
+      return { ok: true, json: async () => ({ version: '9.9.9' }) };
+    }
+    if (url.includes('releases/download/v9.9.9/Setup.9.9.9.exe')) {
+      const bytes = Buffer.alloc(2 * 1024 * 1024, 7);
+      bytes[0] = 0x4d; bytes[1] = 0x5a;
+      return { ok: true, headers: { get: () => String(bytes.length) }, body: fakeStream([bytes]) };
+    }
+    throw new Error('unexpected fetch: ' + url);
+  };
+  try {
+    const m = loadMain({});
+    await m.ready();
+    const res = await m.ipcHandlers.get('update:download')();
+    assert.ok(res.ok);
+    // המתקין מופעל בשקט — והדגל יורה ל-NSIS להריץ את האפליקציה בסוף
+    const spawn = m.state.spawnCalls.find((s) => s.cmd && /BenHazmanim-Setup-9\.9\.9\.exe$/.test(s.cmd));
+    assert.ok(spawn, 'המתקין הופעל');
+    assert.ok(spawn.args.includes('/S'));
+    assert.ok(fs.existsSync(path.join(m.tmpRoot, 'userData', 'relaunch.flag')));
+    assert.ok(fs.existsSync(path.join(process.env.APPDATA, 'BenHazmanim', 'relaunch.flag')));
+    m.cleanup();
+  } finally {
+    fetchMock = null;
+  }
+});
+
+test('startup: stale relaunch flags are cleared on launch', async () => {
+  // אם המתקין לא ניקה דגל ישן (או ההתקנה בוטלה) — אסור שהוא יגרום
+  // להפעלה אוטומטית בהתקנה עתידית; האפליקציה מנקה אותו באתחול.
+  fs.mkdirSync(path.join(process.env.APPDATA, 'BenHazmanim'), { recursive: true });
+  fs.writeFileSync(path.join(process.env.APPDATA, 'BenHazmanim', 'relaunch.flag'), String(Date.now()));
+  const m = loadMain({});
+  // דגל ישן גם בנתיב ה-userData — שני הנתיבים חייבים להתנקות באתחול
+  fs.writeFileSync(path.join(m.tmpRoot, 'userData', 'relaunch.flag'), String(Date.now()));
+  await m.ready();
+  assert.equal(fs.existsSync(path.join(process.env.APPDATA, 'BenHazmanim', 'relaunch.flag')), false, 'דגל הפעלה מחדש מנוקה באתחול');
+  assert.equal(fs.existsSync(path.join(m.tmpRoot, 'userData', 'relaunch.flag')), false, 'דגל ב-userData מנוקה באתחול');
+  m.cleanup();
 });
 
 test('update:download refuses corrupt/tiny downloads (no install, no quit)', async () => {

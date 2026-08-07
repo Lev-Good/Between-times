@@ -88,4 +88,23 @@
   Delete "$APPDATA\BenHazmanim\quit.flag"
   Delete "$APPDATA\בין הזמנים - ניהול זמן מחשב\quit.flag"
   Delete "$APPDATA\${PRODUCT_NAME}\quit.flag"
+  ; clean up any leftover relaunch flags (no app left to clear them)
+  Delete "$APPDATA\BenHazmanim\relaunch.flag"
+  Delete "$APPDATA\בין הזמנים - ניהול זמן מחשב\relaunch.flag"
+  Delete "$APPDATA\${PRODUCT_NAME}\relaunch.flag"
+!macroend
+
+; After a SILENT install (/S) NSIS skips its own "run after finish" step, so
+; the updated app would never reopen on its own. The app writes relaunch.flag
+; (next to quit.flag, in the same stable paths) right before it triggers the
+; update; if we find it here - after the new files are in place - we launch the
+; freshly installed app ourselves and clean the flag up. Runs inside the
+; install section, after installApplicationFiles, so $launchLink is valid.
+!macro customInstall
+  IfFileExists "$APPDATA\BenHazmanim\relaunch.flag" 0 relaunchDone
+    Delete "$APPDATA\BenHazmanim\relaunch.flag"
+    Delete "$APPDATA\בין הזמנים - ניהול זמן מחשב\relaunch.flag"
+    Delete "$APPDATA\${PRODUCT_NAME}\relaunch.flag"
+    ExecShell "" "$launchLink"
+  relaunchDone:
 !macroend

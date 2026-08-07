@@ -939,6 +939,9 @@ async function downloadAndInstallUpdate() {
     // דגל עצירה בכל הנתיבים — השומר-שער לא יקפיץ את התוכנה בזמן ההתקנה.
     // המתקין החדש (1.2.4+) גם הוא כותב את הדגל ב-preInit וממתין לסגירתנו.
     writeQuitFlag();
+    // דגל "הפעל מחדש": ההתקנה השקטה (/S) לא מריצה את התוכנה מעצמה —
+    // המתקין יבדוק את הדגל הזה בסוף ההתקנה ויפתח את הגרסה החדשה.
+    writeRelaunchFlag();
     const child = spawn(dest, ['/S'], { detached: true, stdio: 'ignore', windowsHide: true });
     child.on('error', () => { /* ignore */ });
     child.unref();
@@ -1228,11 +1231,14 @@ const watchHbFile = () => path.join(stateDir(), 'watchdog.heartbeat');
 // זה את זה גם כששם המוצר משתנה בין package.json לבין build config:
 //   1) userData של האפליקציה (הנתיב הקבוע שלה, לפי productName המלא)
 //   2) %APPDATA%\BenHazmanim — נתיב ASCII יציב שה-NSIS כותב אליו.
-const quitFlagPaths = () => {
-  const paths = [path.join(stateDir(), 'quit.flag')];
-  if (isWin && process.env.APPDATA) paths.push(path.join(process.env.APPDATA, 'BenHazmanim', 'quit.flag'));
+// כל הדגלים נכתבים באותם נתיבים (userData + נתיב ASCII יציב ל-NSIS) —
+// הבדל בשם הקובץ בלבד, אז הבנייה מרוכזת בפונקציה אחת.
+const flagPaths = (name) => {
+  const paths = [path.join(stateDir(), name)];
+  if (isWin && process.env.APPDATA) paths.push(path.join(process.env.APPDATA, 'BenHazmanim', name));
   return paths;
 };
+const quitFlagPaths = () => flagPaths('quit.flag');
 const quitFlagExists = () => quitFlagPaths().some(fs.existsSync);
 function writeQuitFlag() {
   for (const p of quitFlagPaths()) {
@@ -1244,6 +1250,25 @@ function writeQuitFlag() {
 }
 function clearQuitFlags() {
   for (const p of quitFlagPaths()) {
+    try { fs.unlinkSync(p); } catch { /* ignore */ }
+  }
+}
+
+// דגל "הפעל מחדש אחרי התקנה": האפליקציה כותבת אותו (באותם נתיבים כמו דגל
+// העצירה) ממש לפני שהיא מפעילה עדכון. הסיבה: בהתקנה שקטה (/S) NSIS מדלגת
+// על שלב "הפעל את התוכנה אחרי ההתקנה" — לכן ה-installer בודק את הדגל הזה
+// בסוף ההתקנה (customInstall) ומפעיל את הגרסה החדשה מעצמו.
+const relaunchFlagPaths = () => flagPaths('relaunch.flag');
+function writeRelaunchFlag() {
+  for (const p of relaunchFlagPaths()) {
+    try {
+      fs.mkdirSync(path.dirname(p), { recursive: true });
+      fs.writeFileSync(p, String(Date.now()));
+    } catch { /* ignore */ }
+  }
+}
+function clearRelaunchFlags() {
+  for (const p of relaunchFlagPaths()) {
     try { fs.unlinkSync(p); } catch { /* ignore */ }
   }
 }
@@ -1416,6 +1441,8 @@ if (isWatchdog) {
 
       // ניקוי דגלי עצירה מהסשן הקודם (אתחול חדש = רוצים את השומר)
       clearQuitFlags();
+      // ניקוי דגלי "הפעל מחדש" שנשארו — המתקין כבר הפעיל את הגרסה החדשה
+      clearRelaunchFlags();
 
       createMainWindow();
       tray = new Tray(trayIcon());
