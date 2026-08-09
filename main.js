@@ -612,12 +612,14 @@ function showQuitPrompt() {
   quitWin = new BrowserWindow({
     width: 420,
     height: 360,
+    frame: false, // ללא מסגרת חלון — נקי; הסגירה מתבצעת דרך "ביטול" או Escape
     resizable: false,
     minimizable: false,
     maximizable: false,
     fullscreenable: false,
     alwaysOnTop: true,
     skipTaskbar: true,
+    center: true,
     title: 'יציאה — בין הזמנים',
     backgroundColor: windowBg(),
     webPreferences: {
@@ -1293,6 +1295,17 @@ function registerIpc() {
 
   ipcMain.handle('quit:cancel', () => {
     if (quitPromptOpen()) quitWin.destroy();
+    return { ok: true };
+  });
+  // התאמת חלון היציאה לתוכן — החלון חסר מסגרת ולכן גודלו נקבע לפי ההודעה,
+  // כך שכל התוכן נראה תמיד, בהתאמה למסך.
+  ipcMain.handle('quit:fit', (_e, w, h) => {
+    if (quitPromptOpen()) {
+      const cw = Math.max(280, Math.min(Math.round(w) || 0, 640));
+      const ch = Math.max(240, Math.min(Math.round(h) || 0, 800));
+      quitWin.setContentSize(cw, ch);
+      quitWin.center();
+    }
     return { ok: true };
   });
   ipcMain.handle('app:version', () => app.getVersion());

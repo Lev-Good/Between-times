@@ -32,6 +32,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   quitApp: (pin) => ipcRenderer.invoke('app:quit', pin),
   uninstallApp: (pin) => ipcRenderer.invoke('app:uninstall', pin),
   quitCancel: () => ipcRenderer.invoke('quit:cancel'),
+  fitQuitWindow: (w, h) => ipcRenderer.invoke('quit:fit', w, h),
   hideWindow: () => ipcRenderer.invoke('app:hide'),
   getVersion: () => ipcRenderer.invoke('app:version'),
   applyTheme: (resolved) => ipcRenderer.invoke('theme:apply', resolved),

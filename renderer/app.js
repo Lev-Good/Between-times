@@ -11,7 +11,8 @@ const ICONS = {
   check: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>',
   alert: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/></svg>',
   download: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12l7 7 7-7"/></svg>',
-  swap: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 16V4m0 0L3 8m4-4 4 4"/><path d="M17 8v12m0 0 4-4m-4 4-4-4"/></svg>'
+  swap: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 16V4m0 0L3 8m4-4 4 4"/><path d="M17 8v12m0 0 4-4m-4 4-4-4"/></svg>',
+  allDays: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>'
 };
 
 /* סוגי חלונות בלוח: מותר / חסום (נעילת מחשב מלאה) / אינטרנט (חסימת רשת בלבד) */
@@ -51,6 +52,7 @@ function applyLoginState() {
   $('loginModal').classList.toggle('hidden', !needsLogin);
   if (needsLogin) {
     $('app').classList.add('blurred');
+    $('loginInput').value = ''; // אף פעם לא להשאיר סיסמה מהפעם הקודמת
     setTimeout(() => $('loginInput').focus(), 80);
   } else {
     $('app').classList.remove('blurred');
@@ -63,6 +65,7 @@ async function tryLogin(pin) {
   if (res && res.ok) {
     sessionUnlocked = true;
     pinVerifiedAt = Date.now();
+    $('loginInput').value = ''; // הסיסמה נמחקת מיד אחרי הכניסה
     $('loginError').classList.add('hidden');
     applyLoginState();
     toast('ברוכים הבאים להגדרות', 'success');
@@ -97,8 +100,10 @@ function promptPin() {
     setTimeout(() => input.focus(), 50);
 
     const done = (ok) => {
+      const val = ok ? input.value : null;
+      input.value = ''; // הסיסמה לא נשארת בשדה אחרי האישור
       modal.classList.add('hidden');
-      resolve(ok ? input.value : null);
+      resolve(val);
     };
     $('pinModalOk').onclick = () => done(true);
     $('pinModalCancel').onclick = () => done(null);
@@ -387,7 +392,29 @@ function renderSlotRow(day, idx, isOverlap) {
     refreshStatus(); // עדכון מיידי של הספירה לאחור לפי הלוח החדש
   };
 
-  row.append(start, dash, end, typeBtn, del);
+  // החלת החלון הזה על כל ימות השבוע — במקום להקליד אותו ידנית בכל יום בנפרד
+  const allDaysBtn = document.createElement('button');
+  allDaysBtn.className = 'all-days-btn';
+  allDaysBtn.innerHTML = ICONS.allDays + '<span>כל הימים</span>';
+  allDaysBtn.title = 'החלת החלון הזה על כל ימות השבוע';
+  allDaysBtn.onclick = async () => {
+    if (!(await verifyPinSession())) { renderWeek(); return; }
+    let added = 0;
+    schedule.week.forEach((d) => {
+      const dup = d.slots.some((x) => x.start === slot.start && x.end === slot.end && x.type === slot.type);
+      if (!dup) {
+        d.slots.push({ start: slot.start, end: slot.end, type: slot.type });
+        added++;
+      }
+    });
+    renderWeek();
+    persist();
+    refreshStatus(); // עדכון מיידי של הספירה לאחור לפי הלוח החדש
+    if (added > 0) toast('החלון הוחל על כל ימות השבוע', 'success');
+    else toast('החלון כבר קיים בכל הימים');
+  };
+
+  row.append(start, dash, end, typeBtn, allDaysBtn, del);
   return row;
 }
 

@@ -658,6 +658,18 @@ button.type-badge:hover {
 }
 button.type-badge:hover .icon { opacity: 0.85; transform: rotate(180deg); }
 button.type-badge:active { transform: scale(0.97); }
+.all-days-btn {
+  display: inline-flex; align-items: center; gap: 4px;
+  background: none; border: 1px solid var(--border-strong);
+  color: var(--muted); cursor: pointer; font-family: inherit;
+  font-size: 11px; font-weight: 700;
+  padding: 4px 8px; border-radius: 999px;
+  transition: color 0.15s var(--ease), border-color 0.15s var(--ease), background 0.15s var(--ease);
+  opacity: 0.85;
+}
+.slot-row:hover .all-days-btn { opacity: 1; }
+.all-days-btn .icon { width: 12px; height: 12px; }
+.all-days-btn:hover { color: var(--accent); border-color: var(--accent); background: rgba(123, 107, 255, 0.12); }
 
 .del-btn {
   background: none; border: none; color: var(--muted);

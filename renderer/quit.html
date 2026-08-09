@@ -14,6 +14,16 @@
       --q-title: linear-gradient(135deg, #fff, #fda4af);
       --q-input-bg: rgba(255, 255, 255, 0.05);
       --q-blob-opacity: 0.5;
+      /* טוקנים גלובליים — מוגדרים כאן כדי שהחלון יהיה עצמאי ולא תלוי ב-styles.css */
+      --text: #f2f3ff;
+      --muted: #9aa0c3;
+      --border: rgba(255, 255, 255, 0.08);
+      --border-strong: rgba(255, 255, 255, 0.16);
+      --accent: #7b6bff;
+      --accent-2: #a78bfa;
+      --red: #fb7185;
+      --red-bg: rgba(251, 113, 133, 0.12);
+      --ease: cubic-bezier(0.4, 0, 0.2, 1);
     }
     :root[data-theme='light'] {
       --q-bg: #eef0f9;
@@ -23,6 +33,15 @@
       --q-title: linear-gradient(135deg, #1b1d33, #e04257);
       --q-input-bg: rgba(255, 255, 255, 0.92);
       --q-blob-opacity: 0.15;
+      --text: #1b1d33;
+      --muted: #62668f;
+      --border: rgba(23, 26, 70, 0.1);
+      --border-strong: rgba(23, 26, 70, 0.18);
+      --accent: #6358f0;
+      --accent-2: #7c5cf0;
+      --red: #e04257;
+      --red-bg: rgba(224, 66, 87, 0.1);
+      --ease: cubic-bezier(0.4, 0, 0.2, 1);
     }
     body {
       min-height: 100vh;
@@ -32,6 +51,9 @@
       overflow: hidden;
       font-family: "Heebo", "Segoe UI", "Arial Hebrew", system-ui, sans-serif;
       transition: background 0.4s ease;
+      padding: 28px;
+      box-sizing: border-box;
+      -webkit-app-region: drag; /* החלון חסר מסגרת — גרירה מהרקע מזיזה אותו */
     }
     .bg-blob {
       position: fixed; border-radius: 50%; filter: blur(90px); opacity: var(--q-blob-opacity);
@@ -46,13 +68,26 @@
       position: relative; z-index: 1;
       text-align: center; width: 100%; max-width: 360px;
       padding: 30px 28px;
+      box-sizing: border-box;
       background: var(--q-panel);
       border: 1px solid var(--q-border);
       border-radius: 26px;
       backdrop-filter: blur(16px) saturate(1.15);
       box-shadow: var(--q-shadow);
       transition: background 0.4s ease, border-color 0.4s ease, box-shadow 0.4s ease;
+      /* הגנה למסכים קטנים במיוחד — אם גודל החלון לא מספיק, גלילה פנימית */
+      max-height: calc(100vh - 56px);
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      scrollbar-width: thin;
+      scrollbar-color: var(--border-strong) transparent;
+      -webkit-app-region: drag;
     }
+    .quit-screen::-webkit-scrollbar { width: 8px; }
+    .quit-screen::-webkit-scrollbar-track { background: transparent; }
+    .quit-screen::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 4px; }
+    /* שדה הקלט והכפתורים ניתנים ללחיצה — לא לגרירה */
+    input, button { -webkit-app-region: no-drag; }
     .quit-icon {
       width: 64px; height: 64px; margin: 0 auto 18px;
       border-radius: 18px;
@@ -174,6 +209,33 @@
       if (e.key === 'Enter') doQuit();
       if (e.key === 'Escape' && API) API.quitCancel();
     };
+
+    // התאמת גודל החלון לתוכן — החלון חסר מסגרת ולכן גודלו נקבע לפי הפאנל,
+    // כך שכל ההודעה נראית תמיד, בהתאמה למסך (גם על מסכים קטנים).
+    function fitWindow() {
+      if (!API || !API.fitQuitWindow) return;
+      const panel = document.querySelector('.quit-screen');
+      if (!panel) return;
+      // מודדים את הגובה הטבעי (בלי הגבלת ה-max-height) כדי שהחלון יקיף את כל התוכן
+      const prevMax = panel.style.maxHeight;
+      panel.style.maxHeight = 'none';
+      const rect = panel.getBoundingClientRect();
+      panel.style.maxHeight = prevMax;
+      const margin = 56; // רווח סביב הפאנל (28px מכל צד — כולל הצל)
+      let w = Math.ceil(rect.width) + margin;
+      let h = Math.ceil(rect.height) + margin;
+      // לא לעבור את גודל המסך הזמין (פחות שורת המשימות)
+      const availW = window.screen.availWidth;
+      const availH = window.screen.availHeight;
+      if (w > availW) w = availW;
+      if (h > availH) h = availH;
+      API.fitQuitWindow(w, h);
+    }
+    // אחרי שהגופנים נטענו (הגובה יכול להשתנות) — ועם גיבוי לכל מקרה
+    if (document.fonts && document.fonts.ready) {
+      document.fonts.ready.then(() => setTimeout(fitWindow, 30));
+    }
+    setTimeout(fitWindow, 120);
 
     // אתחול: ערכת הנושא מהמצב הנוכחי
     if (API) {
