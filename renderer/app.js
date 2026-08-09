@@ -14,6 +14,10 @@ const ICONS = {
   swap: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 16V4m0 0L3 8m4-4 4 4"/><path d="M17 8v12m0 0 4-4m-4 4-4-4"/></svg>'
 };
 
+/* סוגי חלונות בלוח: מותר / חסום (נעילת מחשב מלאה) / אינטרנט (חסימת רשת בלבד) */
+const TYPE_ORDER = ['blocked', 'netblock', 'allowed'];
+const TYPE_LABELS = { blocked: 'חסום', netblock: 'אינטרנט', allowed: 'מותר' };
+
 /* ---------- מצב ---------- */
 let schedule = T.defaultSchedule();
 let status = null;
@@ -361,11 +365,11 @@ function renderSlotRow(day, idx, isOverlap) {
 
   const typeBtn = document.createElement('button');
   typeBtn.className = 'type-badge ' + slot.type;
-  typeBtn.title = 'לחיצה מחליפה בין חסום למותר';
-  typeBtn.innerHTML = '<span>' + (slot.type === 'blocked' ? 'חסום' : 'מותר') + '</span>' + ICONS.swap;
+  typeBtn.title = 'לחיצה מחליפה: חסום (נעילת מחשב מלאה) → אינטרנט (חסימת רשת בלבד) → מותר';
+  typeBtn.innerHTML = '<span>' + (TYPE_LABELS[slot.type] || slot.type) + '</span>' + ICONS.swap;
   typeBtn.onclick = async () => {
     if (!(await verifyPinSession())) { renderWeek(); return; }
-    slot.type = slot.type === 'blocked' ? 'allowed' : 'blocked';
+    slot.type = TYPE_ORDER[(TYPE_ORDER.indexOf(slot.type) + 1) % TYPE_ORDER.length];
     renderWeek();
     persist();
     refreshStatus(); // עדכון מיידי של הספירה לאחור לפי הלוח החדש
@@ -475,10 +479,11 @@ function updateCountdown(st) {
   const el = $('countdownBig');
   if (!el) return;
   const blocked = st.state === 'blocked' || !!st.manualLock;
+  const netblocked = st.state === 'netblock' && !st.manualLock;
   const label = el.closest('.countdown-row').querySelector('.countdown-label');
   if (st.secondsUntilNext != null && st.nextAt) {
     el.textContent = fmtCountdown(st.secondsUntilNext);
-    label.textContent = blocked ? 'עד לפתיחה' : 'עד למעבר הבא';
+    label.textContent = blocked ? 'עד לפתיחה' : netblocked ? 'עד לפתיחת האינטרנט' : 'עד למעבר הבא';
     el.parentElement.classList.remove('hidden');
   } else {
     el.textContent = st.enabled === false ? 'האכיפה מושבתת' : '—';
@@ -491,8 +496,10 @@ function applyStatus(st) {
   status = st;
   const card = $('statusCard');
   const blocked = st.state === 'blocked' || !!st.manualLock;
+  const netblocked = st.state === 'netblock' && !st.manualLock;
   card.classList.toggle('blocked', blocked);
-  card.classList.toggle('allowed', !blocked);
+  card.classList.toggle('netblock', netblocked);
+  card.classList.toggle('allowed', !blocked && !netblocked);
   renderRing(st);
   updateCountdown(st);
 
@@ -502,18 +509,23 @@ function applyStatus(st) {
   const warnOn = !!st.warning && st.pinSet && !blocked && st.warningSeconds != null;
   warnEl.classList.toggle('hidden', !warnOn);
   if (warnOn) {
-    $('warnText').textContent = 'שמרו את הקבצים וסיימו את העבודה — החסימה מתחילה בעוד ' + T.formatDuration(st.warningSeconds);
+    const net = st.next === 'netblock';
+    $('warnText').textContent = net
+      ? 'האינטרנט עומד להיחסם — המחשב יישאר פתוח לשימוש. החסימה מתחילה בעוד ' + T.formatDuration(st.warningSeconds)
+      : 'שמרו את הקבצים וסיימו את העבודה — החסימה מתחילה בעוד ' + T.formatDuration(st.warningSeconds);
     $('warnCount').textContent = fmtCountdown(st.warningSeconds);
   }
 
-  $('statusState').textContent = blocked ? 'חסום' : 'מותר';
+  $('statusState').textContent = blocked ? 'חסום' : netblocked ? 'האינטרנט חסום' : 'מותר';
   // ללא סיסמה — החסימה אינה פעילה (הגנה מפני נעילה בלי מוצא)
   const noPin = !st.pinSet;
   $('statusTitle').textContent = blocked
     ? (st.manualLock ? 'המחשב חסום (נעילה ידנית)' : (noPin ? 'החסימה אינה פעילה — אין סיסמה' : 'המחשב חסום בשעה זו'))
-    : st.enabled === false
-      ? 'האכיפה מושבתת'
-      : 'המחשב פתוח לשימוש';
+    : netblocked
+      ? (noPin ? 'חסימת האינטרנט אינה פעילה — אין סיסמה' : 'המחשב פתוח — האינטרנט חסום')
+      : st.enabled === false
+        ? 'האכיפה מושבתת'
+        : 'המחשב פתוח לשימוש';
 
   const atLabel = st.nextAtLabel || (st.nextAt ? T.formatDate(new Date(st.nextAt)) : '');
   const inLabel = st.secondsUntilLabel || (st.secondsUntilNext != null ? T.formatDuration(st.secondsUntilNext) : '');
@@ -523,15 +535,26 @@ function applyStatus(st) {
       : noPin
         ? 'המחשב לא ננעל בפועל — הגדירו סיסמה כדי שהחסימה תופעל'
         : 'הגישה תיפתח ' + atLabel + ' • בעוד ' + inLabel;
+  } else if (netblocked) {
+    $('statusDetail').textContent = noPin
+      ? 'האינטרנט לא נחסם בפועל — הגדירו סיסמה כדי שחסימת האינטרנט תופעל'
+      : 'האינטרנט ייפתח ' + atLabel + ' • בעוד ' + inLabel;
   } else if (st.nextAt) {
-    const dir = st.next === 'blocked' ? 'המעבר הבא לחסימה' : 'המעבר הבא';
+    const dir = st.next === 'blocked'
+      ? 'המעבר הבא לחסימה'
+      : st.next === 'netblock'
+        ? 'המעבר הבא לחסימת אינטרנט'
+        : 'המעבר הבא';
     $('statusDetail').textContent = dir + ': ' + atLabel + ' • בעוד ' + inLabel;
   } else {
     $('statusDetail').textContent = 'אין שינוי צפוי לפי הלוח הנוכחי';
   }
 
-  // כפתור הפתיחה מוצג רק כשהמחשב חסום — כשהוא פתוח הוא חסר משמעות
-  $('unlockBtn').classList.toggle('hidden', !blocked);
+  // כפתור הפתיחה מוצג כשהמחשב חסום או שהאינטרנט חסום בלבד — כשהוא פתוח
+  // לגמרי הוא חסר משמעות
+  $('unlockBtn').classList.toggle('hidden', !(blocked || netblocked));
+  const unlockLbl = $('unlockBtnLabel');
+  if (unlockLbl) unlockLbl.textContent = netblocked ? 'פתח את האינטרנט (סיסמה)' : 'פתח את המחשב (סיסמה)';
 }
 
 async function refreshStatus() {
@@ -554,6 +577,7 @@ function applySettingsToUI() {
   $('pinStatus').textContent = schedule.pinHash ? 'מוגדרת' : 'לא מוגדרת';
   $('recoveryEmail').value = schedule.recoveryEmail || '';
   $('blockMessage').value = schedule.blockMessage || '';
+  $('netIconToggle').checked = schedule.showNetIcon !== false;
   updateMasterLabel();
   setModeUI();
   applyTheme();
@@ -635,6 +659,9 @@ const EVENT_LABELS = {
   'app-quit': 'סגירת התוכנה',
   'block-start': 'תחילת חסימה',
   'block-end': 'סיום חסימה',
+  'netblock-start': 'תחילת חסימת אינטרנט',
+  'netblock-end': 'סיום חסימת אינטרנט',
+  'netblock-fail': 'כשלון חסימת אינטרנט',
   'warning-start': 'אזהרה לפני חסימה',
   'lock-manual': 'נעילה ידנית',
   'unlock-success': 'פתיחה עם סיסמה',
@@ -784,8 +811,8 @@ function renderOverrides() {
     const dateEl = document.createElement('strong');
     dateEl.textContent = d + '/' + m + '/' + y + ' (' + T.DAY_NAMES_HE[dt.getDay()] + ')';
     const badge = document.createElement('span');
-    badge.className = 'type-badge ' + (ov.type === 'block' ? 'blocked' : 'allowed');
-    badge.textContent = ov.type === 'block' ? 'חסום' : 'מותר';
+    badge.className = 'type-badge ' + (ov.type === 'block' ? 'blocked' : ov.type === 'netblock' ? 'netblock' : 'allowed');
+    badge.textContent = ov.type === 'block' ? 'חסום' : ov.type === 'netblock' ? 'האינטרנט חסום' : 'מותר';
     info.append(dateEl, badge);
     const del = document.createElement('button');
     del.className = 'del-btn';
@@ -815,6 +842,7 @@ async function renderSecurity() {
     { ok: sec.pin, label: 'סיסמה מוגדרת', hint: 'מגנה על ההגדרות ועל מסך החסימה' },
     { ok: sec.enabled, label: 'האכיפה פעילה', hint: 'המתג הראשי דלוק' },
     { ok: sec.elevated, label: 'הרצה עם הרשאות מנהל', hint: 'מאפשרת חסימת כל המשתמשים' },
+    { ok: sec.netElevated, label: 'חסימת אינטרנט בלבד זמינה', hint: 'חוק חומת אש ייעודי — דורש הרצה כמנהל' },
     { ok: sec.shared, label: 'הגדרות משותפות לכל המשתמשים', hint: 'כל חשבון במחשב נחסם לפי אותו לוח' },
     { ok: sec.recovery, label: 'מייל לשחזור סיסמה', hint: 'לשחזור אם שוכחים את הסיסמה' }
   ];
@@ -890,6 +918,7 @@ function init() {
       API.onUpdate(showUpdateBanner);
       if (API.onUpdateProgress) API.onUpdateProgress(onUpdateProgress);
       if (API.onSessionLock) API.onSessionLock(lockLocalSession);
+      if (API.onNetblockError) API.onNetblockError((msg) => toast(msg, 'error'));
     }
   };
 
@@ -978,6 +1007,17 @@ function init() {
       await persist();
     };
   });
+
+  /* ---------- אייקון צף כשאינטרנט חסום ---------- */
+  $('netIconToggle').onchange = async () => {
+    if (!(await verifyPinSession())) {
+      $('netIconToggle').checked = schedule.showNetIcon !== false;
+      return;
+    }
+    schedule.showNetIcon = $('netIconToggle').checked;
+    await persist();
+    refreshStatus(); // התהליך הראשי יפתח/יסגור את האייקון לפי ההגדרה החדשה
+  };
 
   /* ---------- סיסמה ---------- */
   $('pinSaveBtn').onclick = async () => {

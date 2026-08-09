@@ -76,6 +76,36 @@
       box-shadow: var(--b-shadow);
       transition: background 0.4s ease, border-color 0.4s ease, box-shadow 0.4s ease;
     }
+    /* מזעור החלונית — הרקע לבדו במסך מלא */
+    .minimize-btn {
+      position: absolute; top: 10px; inset-inline-start: 10px;
+      width: 32px; height: 32px;
+      display: grid; place-items: center;
+      background: transparent; border: 1px solid var(--border-strong);
+      color: var(--muted); border-radius: 50%;
+      cursor: pointer; font-family: inherit;
+      opacity: 0.55;
+      transition: color 0.2s ease, border-color 0.2s ease, background 0.2s ease, opacity 0.2s ease;
+    }
+    .minimize-btn:hover { opacity: 1; color: var(--text); border-color: var(--accent); background: rgba(123, 107, 255, 0.12); }
+    .minimize-btn .icon { width: 15px; height: 15px; }
+    body.block-minimized .block-screen { display: none; }
+    .restore-fab {
+      position: fixed; top: 18px; inset-inline-start: 18px;
+      z-index: 5;
+      display: inline-flex; align-items: center; gap: 8px;
+      background: var(--b-panel);
+      border: 1px solid var(--b-border);
+      border-radius: 999px;
+      padding: 9px 16px;
+      color: var(--text); font-family: inherit; font-size: 13px; font-weight: 700;
+      cursor: pointer;
+      backdrop-filter: blur(14px) saturate(1.15);
+      box-shadow: var(--b-shadow);
+      transition: background 0.2s ease, border-color 0.2s ease;
+    }
+    .restore-fab:hover { border-color: var(--accent); background: rgba(123, 107, 255, 0.14); }
+    .restore-fab .icon { width: 15px; height: 15px; }
     .block-icon {
       width: 116px; height: 116px; margin: 0 auto 24px;
       border-radius: 30px;
@@ -198,13 +228,80 @@
     }
     .pin-box.locked { opacity: 0.55; pointer-events: none; }
     .lock-count { font-weight: 800; color: #fbbf24; }
+    /* ---------- רקעים למסך החסימה ---------- */
+    .bg-layer { position: fixed; inset: 0; z-index: 0; pointer-events: none; }
+    #fluidCanvas, #particleCanvas { width: 100%; height: 100%; display: none; }
+    body[data-bg='fluid'] #fluidCanvas, body[data-bg='particles'] #particleCanvas { display: block; pointer-events: auto; }
+    body[data-bg='fluid'] .bg-blob, body[data-bg='particles'] .bg-blob, body[data-bg='aurora'] .bg-blob { display: none; }
+    .aurora-layer { display: none; overflow: hidden; }
+    body[data-bg='aurora'] .aurora-layer { display: block; }
+    .aurora-layer::before, .aurora-layer::after {
+      content: ""; position: absolute; border-radius: 50%;
+      filter: blur(90px); opacity: 0.5;
+    }
+    .aurora-layer::before {
+      width: 640px; height: 640px; top: -200px; right: -160px;
+      background: radial-gradient(circle, rgba(123, 107, 255, 0.8), transparent 70%);
+      animation: aurora1 16s ease-in-out infinite alternate;
+    }
+    .aurora-layer::after {
+      width: 560px; height: 560px; bottom: -180px; left: -140px;
+      background: radial-gradient(circle, rgba(52, 211, 153, 0.55), transparent 70%);
+      animation: aurora2 20s ease-in-out infinite alternate;
+    }
+    @keyframes aurora1 { to { transform: translate(-90px, 60px) scale(1.15); } }
+    @keyframes aurora2 { to { transform: translate(70px, -50px) scale(1.2); } }
+    /* כפתור ופאנל בחירת הרקע */
+    .bg-picker-wrap { margin-top: 20px; display: flex; flex-direction: column; align-items: center; gap: 10px; }
+    .bg-btn {
+      display: inline-flex; align-items: center; gap: 7px;
+      background: transparent; border: 1px dashed var(--border-strong);
+      color: var(--muted); border-radius: 999px; padding: 8px 18px;
+      font-size: 13px; font-weight: 600; cursor: pointer; font-family: inherit;
+      transition: color 0.2s ease, border-color 0.2s ease, background 0.2s ease;
+    }
+    .bg-btn:hover { color: var(--text); border-color: var(--accent); background: rgba(123, 107, 255, 0.1); }
+    .bg-btn .icon { width: 15px; height: 15px; }
+    .bg-picker {
+      background: var(--b-panel);
+      border: 1px solid var(--b-border);
+      border-radius: 18px;
+      padding: 14px 14px 12px;
+      box-shadow: var(--b-shadow);
+      backdrop-filter: blur(18px) saturate(1.15);
+      min-width: 260px;
+      animation: bgFade 0.22s var(--ease, ease);
+    }
+    .bg-picker-title { font-size: 12.5px; font-weight: 700; color: var(--muted); margin-bottom: 10px; text-align: center; }
+    .bg-options { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .bg-option {
+      display: flex; align-items: center; gap: 8px;
+      background: var(--b-count-bg); border: 1px solid var(--border);
+      color: var(--text); border-radius: 12px; padding: 8px 10px;
+      font-size: 12.5px; font-weight: 600; cursor: pointer; font-family: inherit;
+      transition: border-color 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
+    }
+    .bg-option:hover { border-color: var(--accent); transform: scale(1.03); }
+    .bg-option.active { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(123, 107, 255, 0.25); }
+    .bg-option .chip { width: 26px; height: 18px; border-radius: 6px; flex-shrink: 0; border: 1px solid rgba(255, 255, 255, 0.14); }
+    .chip-blobs { background: radial-gradient(circle at 30% 30%, #fb7185, #7b6bff); }
+    .chip-fluid { background: linear-gradient(135deg, #34d399, #7b6bff, #fb7185); }
+    .chip-particles { background: radial-gradient(circle, #f2f3ff 1px, transparent 2px) 0 0/10px 10px, #141428; }
+    .chip-aurora { background: linear-gradient(135deg, #7b6bff, #34d399); }
+    @keyframes bgFade { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
   </style>
 </head>
-<body>
+<body data-bg="blobs">
   <div class="bg-blob blob-1"></div>
   <div class="bg-blob blob-2"></div>
+  <canvas id="fluidCanvas" class="bg-layer"></canvas>
+  <canvas id="particleCanvas" class="bg-layer"></canvas>
+  <div class="bg-layer aurora-layer"></div>
 
-  <div class="block-screen">
+  <div class="block-screen" id="blockScreen">
+    <button class="minimize-btn" id="minimizeBtn" type="button" title="מזעור — רק הרקע במסך מלא">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 15l-6-6-6 6"/></svg>
+    </button>
     <div class="block-icon">
       <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
     </div>
@@ -256,9 +353,33 @@
       <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
       פתיחה בסיסמת ההורה מיועדת למקרי חירום בלבד
     </div>
+
+    <!-- בחירת רקע למסך החסימה -->
+    <div class="bg-picker-wrap">
+      <button class="bg-btn" id="bgToggle" type="button">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="13.5" cy="6.5" r="1.5"/><circle cx="17.5" cy="10.5" r="1.5"/><circle cx="8.5" cy="7.5" r="1.5"/><circle cx="6.5" cy="12.5" r="1.5"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.93 0 1.7-.77 1.7-1.7 0-.45-.18-.87-.46-1.18-.28-.31-.46-.73-.46-1.18a1.7 1.7 0 0 1 1.7-1.7H16a6 6 0 0 0 6-6c0-4.42-4.48-8-10-8z"/></svg>
+        רקע
+      </button>
+      <div class="bg-picker hidden" id="bgPicker">
+        <div class="bg-picker-title">רקע למסך החסימה</div>
+        <div class="bg-options">
+          <button class="bg-option" data-bg="blobs" type="button"><span class="chip chip-blobs"></span>כתמים</button>
+          <button class="bg-option" data-bg="fluid" type="button"><span class="chip chip-fluid"></span>נוזל</button>
+          <button class="bg-option" data-bg="particles" type="button"><span class="chip chip-particles"></span>חלקיקים</button>
+          <button class="bg-option" data-bg="aurora" type="button"><span class="chip chip-aurora"></span>זוהר</button>
+        </div>
+      </div>
+    </div>
   </div>
 
+  <!-- כפתור צף קטן — מופיע כשהחלונית ממוזערת, כדי לחזור אליה בלי להפריע לרקע -->
+  <button class="restore-fab hidden" id="restoreFab" type="button" title="הצגת חלונית החסימה">
+    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+    <span>המחשב חסום</span>
+  </button>
+
   <script src="../scheduler.js"></script>
+  <script src="vendor/webgl-fluid-simulation.js"></script>
   <script>
     const T = window.TimeScheduler;
     const API = window.electronAPI;
@@ -379,9 +500,160 @@
       setTimeout(() => pinInput.focus(), 40);
     });
 
+    /* ---------- רקעים למסך החסימה ----------
+       ארבעה רקעים לבחירה (כפתור "רקע"):
+       - blobs     — הכתמים המונפשים המוכרים (ברירת המחדל)
+       - fluid     — סימולציית נוזלי WebGL (PavelDoGreat, MIT) — מגיבה לעכבר
+       - particles — שדה חלקיקים על קנבס קל — מגיב לעכבר
+       - aurora    — זוהר צבעוני מונפש (CSS בלבד — קל במיוחד לריבוי מסכים) */
+    const fluidCanvas = document.getElementById('fluidCanvas');
+    const particleCanvas = document.getElementById('particleCanvas');
+    let activeBg = null;
+    let stopParticles = null;
+
+    function stopCurrentBg() {
+      if (window.stopWebGLFluidSimulation) window.stopWebGLFluidSimulation();
+      if (stopParticles) { stopParticles(); stopParticles = null; }
+    }
+
+    // שדה חלקיקים קל: כוכבים שנמשכים לעכבר ומתחברים בקווים לקרובים
+    function startParticlesBg(canvas) {
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return null;
+      let w = 0, h = 0, raf = null;
+      let stars = [];
+      const mouse = { x: -9999, y: -9999 };
+      const COUNT = Math.max(50, Math.min(140, Math.round((window.innerWidth * window.innerHeight) / 26000)));
+      function resize() {
+        const dpr = window.devicePixelRatio || 1;
+        w = canvas.clientWidth; h = canvas.clientHeight;
+        canvas.width = Math.max(1, Math.round(w * dpr));
+        canvas.height = Math.max(1, Math.round(h * dpr));
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      }
+      function initStars() {
+        stars = Array.from({ length: COUNT }, () => ({
+          x: Math.random() * w, y: Math.random() * h,
+          vx: (Math.random() - 0.5) * 0.3, vy: (Math.random() - 0.5) * 0.3,
+          r: Math.random() * 1.8 + 0.6,
+          c: 'hsla(' + (210 + Math.random() * 150) + ', 85%, 72%, 0.9)'
+        }));
+      }
+      function step() {
+        ctx.clearRect(0, 0, w, h);
+        for (const s of stars) {
+          const dx = mouse.x - s.x, dy = mouse.y - s.y;
+          const d2 = dx * dx + dy * dy;
+          if (d2 < 90000 && d2 > 1) {
+            const d = Math.sqrt(d2);
+            s.vx += (dx / d) * 0.14;
+            s.vy += (dy / d) * 0.14;
+          }
+          s.vx *= 0.985; s.vy *= 0.985;
+          s.x += s.vx; s.y += s.vy;
+          if (s.x < -10) s.x = w + 10; else if (s.x > w + 10) s.x = -10;
+          if (s.y < -10) s.y = h + 10; else if (s.y > h + 10) s.y = -10;
+          ctx.beginPath();
+          ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+          ctx.fillStyle = s.c;
+          ctx.fill();
+        }
+        ctx.lineWidth = 0.6;
+        for (let i = 0; i < stars.length; i++) {
+          for (let j = i + 1; j < stars.length; j++) {
+            const a = stars[i], b = stars[j];
+            const dx = a.x - b.x, dy = a.y - b.y;
+            if (dx * dx + dy * dy < 12100) {
+              ctx.strokeStyle = 'rgba(123, 107, 255, 0.22)';
+              ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+            }
+          }
+        }
+        raf = requestAnimationFrame(step);
+      }
+      const onMove = (e) => { mouse.x = e.clientX; mouse.y = e.clientY; };
+      canvas.addEventListener('mousemove', onMove);
+      resize(); initStars(); step();
+      return () => {
+        if (raf) cancelAnimationFrame(raf);
+        canvas.removeEventListener('mousemove', onMove);
+        ctx.clearRect(0, 0, w, h);
+      };
+    }
+
+    function applyBg(bg) {
+      if (!bg || bg === activeBg) return;
+      stopCurrentBg();
+      activeBg = bg;
+      document.body.dataset.bg = bg;
+      document.querySelectorAll('.bg-option').forEach((o) => o.classList.toggle('active', o.dataset.bg === bg));
+      if (bg === 'fluid' && window.initWebGLFluidSimulation) {
+        // הגדרות קלות יותר לריבוי מסכים; שקוף כדי שערכת הנושא תראה דרכו
+        window.initWebGLFluidSimulation(fluidCanvas, {
+          DYE_RESOLUTION: 512,
+          SIM_RESOLUTION: 96,
+          TRANSPARENT: true,
+          BLOOM: true,
+          SUNRAYS: true,
+          SPLAT_RADIUS: 0.4,
+          SPLAT_FORCE: 5000,
+          CURL: 25,
+          COLOR_UPDATE_SPEED: 8
+        });
+      } else if (bg === 'particles') {
+        stopParticles = startParticlesBg(particleCanvas);
+      }
+    }
+
+    // בורר הרקעים — בחירה נשמרת בהגדרות (block:set-bg) ומוחלת בכל המסכים
+    const bgToggle = document.getElementById('bgToggle');
+    const bgPicker = document.getElementById('bgPicker');
+    bgToggle.addEventListener('click', () => {
+      bgPicker.classList.toggle('hidden');
+    });
+    document.querySelectorAll('.bg-option').forEach((o) => {
+      o.addEventListener('click', async () => {
+        const bg = o.dataset.bg;
+        bgPicker.classList.add('hidden');
+        applyBg(bg);
+        if (API && API.setBlockBg) API.setBlockBg(bg);
+      });
+    });
+    // סגירת הבורר בלחיצה מחוצה לו
+    document.addEventListener('click', (e) => {
+      if (!bgPicker.classList.contains('hidden') &&
+          !bgPicker.contains(e.target) && !bgToggle.contains(e.target)) {
+        bgPicker.classList.add('hidden');
+      }
+    });
+
+    /* ---------- מזעור החלונית ----------
+       כפתור קטן בפינת הכרטיס מסתיר את כל החלונית (הכותרת, השעונים והכניסה
+       בסיסמה) כך שהרקע לבדו תופס את כל המסך — למשל כדי לשחק עם הרקעים
+       האינטראקטיביים. כפתור צף קטן בפינה חוזר לחלונית המלאה. */
+    const blockScreen = document.getElementById('blockScreen');
+    const restoreFab = document.getElementById('restoreFab');
+    const minimizeBtn = document.getElementById('minimizeBtn');
+    function setMinimized(min) {
+      document.body.classList.toggle('block-minimized', min);
+      restoreFab.classList.toggle('hidden', !min);
+    }
+    minimizeBtn.addEventListener('click', () => {
+      setMinimized(true);
+      if (bgPicker && !bgPicker.classList.contains('hidden')) bgPicker.classList.add('hidden');
+    });
+    restoreFab.addEventListener('click', () => setMinimized(false));
+    // השחזור עובד גם עם Escape
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && document.body.classList.contains('block-minimized')) {
+        setMinimized(false);
+      }
+    });
+
     function render(status) {
       if (!status) return;
       applyBlockTheme(status.theme);
+      applyBg(status.blockBg);
       // ללא סיסמה מוגדרת — מסך החסימה מציע דרך החוצה במקום שדה סיסמה
       if (status.pinSet === false) {
         pinBox.style.display = 'none';
@@ -518,7 +790,8 @@
         manualLock: false,
         pinSet: true,
         theme: 'dark',
-        blockMessage: ''
+        blockMessage: '',
+        blockBg: 'blobs'
       });
     }
   </script>

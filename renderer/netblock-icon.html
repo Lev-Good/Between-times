@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <title>האינטרנט חסום — בין הזמנים</title>
+  <style>
+    /* חלון שקוף קטן — רק האייקון עצמו נראה על המסך.
+       ערכת נושא (בהיר/כהה) נקבעת לפי data-theme שמגיע מהסטטוס. */
+    :root {
+      --ni-ring: rgba(251, 113, 133, 0.4);
+      --ni-bg: linear-gradient(135deg, #1a1a2e, #2a1a3a);
+      --ni-border: rgba(255, 255, 255, 0.14);
+      --ni-icon: #fb7185;
+      --ni-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+      --ni-tip: #f2f3ff;
+    }
+    :root[data-theme='light'] {
+      --ni-ring: rgba(224, 66, 87, 0.35);
+      --ni-bg: linear-gradient(135deg, #ffffff, #fdeef1);
+      --ni-border: rgba(160, 30, 50, 0.25);
+      --ni-icon: #e04257;
+      --ni-shadow: 0 10px 30px rgba(120, 30, 50, 0.3);
+      --ni-tip: #4a1a26;
+    }
+    html, body {
+      margin: 0; padding: 0;
+      background: transparent;
+      overflow: hidden;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    body { width: 100vw; height: 100vh; }
+    .net-badge {
+      position: fixed; inset: 0;
+      display: grid; place-items: center;
+      cursor: pointer;
+    }
+    .net-badge .ring {
+      position: absolute;
+      width: 62px; height: 62px;
+      border-radius: 50%;
+      border: 2px solid var(--ni-ring);
+      animation: niPulse 2.4s ease-out infinite;
+    }
+    .net-badge .core {
+      width: 54px; height: 54px;
+      border-radius: 50%;
+      background: var(--ni-bg);
+      border: 1.5px solid var(--ni-border);
+      box-shadow: var(--ni-shadow);
+      display: grid; place-items: center;
+      transition: transform 0.15s ease;
+    }
+    .net-badge:hover .core { transform: scale(1.08); }
+    .net-badge .core svg {
+      width: 28px; height: 28px;
+      color: var(--ni-icon);
+    }
+    /* טקסט קצר שמופיע מתחת לאייקון בריחוף */
+    .net-badge .tip {
+      position: absolute;
+      top: calc(50% + 38px);
+      white-space: nowrap;
+      font: 600 11px/1.4 "Heebo", "Segoe UI", "Arial Hebrew", system-ui, sans-serif;
+      color: var(--ni-tip);
+      opacity: 0;
+      transition: opacity 0.2s ease;
+      pointer-events: none;
+    }
+    .net-badge:hover .tip { opacity: 1; }
+    @keyframes niPulse {
+      0% { transform: scale(0.82); opacity: 0.9; }
+      70% { transform: scale(1.25); opacity: 0; }
+      100% { transform: scale(1.25); opacity: 0; }
+    }
+  </style>
+</head>
+<body>
+  <div class="net-badge" id="netBadge" role="img" aria-label="האינטרנט חסום — בין הזמנים">
+    <div class="ring"></div>
+    <div class="core">
+      <!-- אייקון wifi מנותק (feather wifi-off) -->
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <line x1="1" y1="1" x2="23" y2="23"/>
+        <path d="M16.72 11.06A10.94 10.94 0 0 1 19 12.55"/>
+        <path d="M5 12.55a10.94 10.94 0 0 1 5.17-2.39"/>
+        <path d="M10.71 5.05A16 16 0 0 1 22.58 9"/>
+        <path d="M1.42 9a15.91 15.91 0 0 1 4.7-2.88"/>
+        <path d="M8.53 16.11a6 6 0 0 1 6.95 0"/>
+        <line x1="12" y1="20" x2="12.01" y2="20"/>
+      </svg>
+    </div>
+    <div class="tip">האינטרנט חסום — לחצו לפתיחת ההגדרות</div>
+  </div>
+
+  <script src="../scheduler.js"></script>
+  <script>
+    const API = window.electronAPI;
+    const badge = document.getElementById('netBadge');
+
+    badge.addEventListener('click', () => {
+      if (API) API.openSettings();
+    });
+
+    function applyTheme(theme) {
+      if (theme) document.documentElement.dataset.theme = theme;
+    }
+    if (API) {
+      API.getStatus().then((st) => applyTheme(st && st.theme)).catch(() => {});
+      API.onStatus((st) => applyTheme(st && st.theme));
+    } else {
+      document.documentElement.dataset.theme = 'dark';
+    }
+  </script>
+</body>
+</html>

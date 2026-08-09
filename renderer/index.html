@@ -99,7 +99,7 @@
             </button>
             <button class="btn btn-ghost hidden" id="unlockBtn">
               <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>
-              פתח את המחשב (סיסמה)
+              <span id="unlockBtnLabel">פתח את המחשב (סיסמה)</span>
             </button>
           </div>
         </div>
@@ -155,7 +155,7 @@
 
       <div class="card-head" style="margin-top:22px">
         <h2>לוח זמנים שבועי</h2>
-        <p class="hint">לחצו על יום כדי להוסיף חלון זמן. חלון שסופו לפני תחילתו — למשל 22:00 עד 06:00 — חוצה חצות וממשיך למחרת בבוקר. השעון שלצד כל יום מראה את כל שעות היממה.<br/><strong>טיפ:</strong> לחיצה על התגית <em>חסום</em>/<em>מותר</em> של כל חלון מחליפה את סוג החלון.</p>
+        <p class="hint">לחצו על יום כדי להוסיף חלון זמן. חלון שסופו לפני תחילתו — למשל 22:00 עד 06:00 — חוצה חצות וממשיך למחרת בבוקר. השעון שלצד כל יום מראה את כל שעות היממה.<br/><strong>טיפ:</strong> לחיצה על התגית של כל חלון מחליפה את סוגו: <em>חסום</em> (נעילת מחשב מלאה) → <em>אינטרנט</em> (חסימת רשת בלבד — המחשב נשאר פתוח) → <em>מותר</em>.</p>
       </div>
       <div class="week-grid" id="weekGrid"></div>
     </section>
@@ -225,6 +225,17 @@
 
         <div class="setting">
           <div class="setting-text">
+            <strong>אייקון צף כשאינטרנט חסום</strong>
+            <span>מציג אייקון קטן בפינת המסך כשהמחשב פתוח והאינטרנט חסום (לחיצה עליו פותחת את ההגדרות). חסימת האינטרנט מתבצעת עם חוק חומת אש ייעודי של בין הזמנים — הסינונים הקיימים במחשב נשארים ללא שינוי וחוזרים לפעול כשהחסימה מסתיימת.</span>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="netIconToggle" checked />
+            <span class="slider"></span>
+          </label>
+        </div>
+
+        <div class="setting">
+          <div class="setting-text">
             <strong>אזהרה לפני החסימה</strong>
             <span>כמה דקות לפני שהמחשב נחסם — להציג הודעה שמזהירה לשמור קבצים ולסיים את העבודה (0 = ללא אזהרה; ברירת מחדל: 5 דקות)</span>
           </div>
@@ -268,7 +279,8 @@
         <input type="date" id="overrideDate" class="date-input" />
         <select id="overrideType" class="select-input">
           <option value="allow">אפשר כל היום</option>
-          <option value="block">חסום כל היום</option>
+          <option value="block">חסום כל היום (נעילת מחשב)</option>
+          <option value="netblock">חסום אינטרנט כל היום (המחשב פתוח)</option>
         </select>
         <button class="btn btn-primary btn-sm" id="addOverrideBtn">הוסף</button>
         <button class="btn btn-ghost btn-sm" id="allowTomorrowBtn">אפשר מחר</button>

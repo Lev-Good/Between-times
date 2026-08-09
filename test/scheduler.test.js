@@ -407,3 +407,64 @@ test('nextTransition is DST-safe: fall-back day (25h day)', () => {
   assert.equal(st.nextAt.getHours(), 8, 'חלון 08:00 חייב להתחיל ב-08:00 גם ביום DST');
 });
 
+/* ================= חסימת אינטרנט בלבד (netblock) ================= */
+
+test('netblock slot survives normalize and yields the netblock state', () => {
+  const s = S.normalizeSchedule({ week: [
+    { day: 0, slots: [{ start: '08:00', end: '16:00', type: 'netblock' }] }
+  ] });
+  assert.equal(s.week[0].slots[0].type, 'netblock');
+  // בתוך החלון — מצב netblock (מחשב פתוח, אינטרנט חסום)
+  assert.equal(S.getStatus(s, new Date(2026, 0, 4, 10, 0)).state, 'netblock');
+  // מחוץ לחלון — ברירת המחדל (blocklist = מותר)
+  assert.equal(S.getStatus(s, new Date(2026, 0, 4, 20, 0)).state, 'allowed');
+});
+
+test('netblock ends at the boundary and produces the right transition', () => {
+  const s = S.defaultSchedule();
+  s.week[0].slots.push({ start: S.parseHM('08:00'), end: S.parseHM('16:00'), type: 'netblock' });
+  const st = S.getStatus(s, new Date(2026, 0, 4, 10, 0));
+  assert.equal(st.state, 'netblock');
+  assert.equal(st.next, 'allowed');
+  assert.equal(st.nextAt.getHours(), 16);
+  // בדיוק בשעת הסיום — כבר מותר
+  assert.equal(S.getStatus(s, new Date(2026, 0, 4, 16, 0)).state, 'allowed');
+});
+
+test('warning fires before an upcoming netblock window', () => {
+  const s = S.defaultSchedule();
+  s.warnMinutes = 5;
+  s.week[0].slots.push({ start: S.parseHM('08:00'), end: S.parseHM('16:00'), type: 'netblock' });
+  const near = S.getStatus(s, new Date(2026, 0, 4, 7, 57));
+  assert.equal(near.state, 'allowed');
+  assert.equal(near.next, 'netblock');
+  assert.equal(near.warning, true);
+  assert.ok(near.warningSeconds > 0 && near.warningSeconds <= 180);
+});
+
+test('one-off netblock override blocks only the internet for the day', () => {
+  const s = S.defaultSchedule();
+  const day = new Date(2026, 0, 4);
+  s.overrides = [{ date: S.dateKey(day), type: 'netblock' }];
+  assert.equal(S.getStatus(s, new Date(2026, 0, 4, 9, 0)).state, 'netblock');
+  assert.equal(S.getStatus(s, new Date(2026, 0, 4, 23, 0)).state, 'netblock');
+  assert.equal(S.getStatus(s, new Date(2026, 0, 5, 9, 0)).state, 'allowed');
+});
+
+test('netblock and blocked slots mix on the same day', () => {
+  const s = S.defaultSchedule();
+  s.week[0].slots.push(
+    { start: S.parseHM('08:00'), end: S.parseHM('12:00'), type: 'blocked' },
+    { start: S.parseHM('14:00'), end: S.parseHM('18:00'), type: 'netblock' }
+  );
+  assert.equal(S.getStatus(s, new Date(2026, 0, 4, 10, 0)).state, 'blocked');
+  assert.equal(S.getStatus(s, new Date(2026, 0, 4, 15, 0)).state, 'netblock');
+  assert.equal(S.getStatus(s, new Date(2026, 0, 4, 20, 0)).state, 'allowed');
+});
+
+test('showNetIcon defaults to true and survives normalize', () => {
+  assert.equal(S.defaultSchedule().showNetIcon, true);
+  assert.equal(S.normalizeSchedule({}).showNetIcon, true);
+  assert.equal(S.normalizeSchedule({ showNetIcon: false }).showNetIcon, false);
+});
+

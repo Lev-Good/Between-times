@@ -267,6 +267,7 @@ body::after {
 }
 .status-card.allowed::after { background: radial-gradient(circle, rgba(52, 211, 153, 0.14), transparent 70%); }
 .status-card.blocked::after { background: radial-gradient(circle, rgba(251, 113, 133, 0.16), transparent 70%); }
+.status-card.netblock::after { background: radial-gradient(circle, rgba(251, 191, 36, 0.14), transparent 70%); }
 
 /* טבעת מצב */
 .status-ring {
@@ -287,6 +288,10 @@ body::after {
   stroke: var(--red);
   filter: drop-shadow(0 0 6px rgba(251, 113, 133, 0.5));
 }
+.status-card.netblock .ring-progress {
+  stroke: var(--yellow);
+  filter: drop-shadow(0 0 6px rgba(251, 191, 36, 0.5));
+}
 .status-inner {
   width: 82px; height: 82px;
   border-radius: 50%;
@@ -301,8 +306,10 @@ body::after {
   box-shadow: 0 0 12px var(--green);
 }
 .status-card.blocked .status-dot { background: var(--red); box-shadow: 0 0 12px var(--red); }
+.status-card.netblock .status-dot { background: var(--yellow); box-shadow: 0 0 12px var(--yellow); }
 .status-state { font-size: 19px; font-weight: 800; color: var(--green); font-variant-numeric: tabular-nums; }
 .status-card.blocked .status-state { color: var(--red); }
+.status-card.netblock .status-state { color: var(--yellow); }
 
 .status-info { position: relative; z-index: 1; min-width: 0; }
 .status-title { font-size: 23px; font-weight: 800; letter-spacing: -0.2px; }
@@ -326,6 +333,7 @@ body::after {
 }
 .status-card.allowed .countdown-time { color: var(--green); }
 .status-card.blocked .countdown-time { color: var(--red); }
+.status-card.netblock .countdown-time { color: var(--yellow); }
 
 .status-actions { display: flex; gap: 10px; margin-top: 16px; flex-wrap: wrap; }
 
@@ -556,6 +564,7 @@ body::after {
 .clock-tick.big { stroke: var(--tick-big); stroke-width: 1.5; }
 .clock-seg { fill: none; stroke-width: 7.5; stroke-linecap: round; }
 .clock-seg.blocked { stroke: var(--red); filter: drop-shadow(0 0 4px rgba(251, 113, 133, 0.4)); }
+.clock-seg.netblock { stroke: var(--yellow); filter: drop-shadow(0 0 4px rgba(251, 191, 36, 0.4)); }
 .clock-seg.allowed { stroke: var(--green); filter: drop-shadow(0 0 4px rgba(52, 211, 153, 0.4)); }
 .clock-now { stroke: var(--now-hand); stroke-width: 1.6; stroke-linecap: round; filter: drop-shadow(0 0 4px var(--now-hand)); }
 .clock-now-dot { fill: var(--now-hand); }
@@ -579,12 +588,14 @@ body::after {
 
 .slot-row {
   display: flex; align-items: center; gap: 7px;
+  flex-wrap: wrap;
   background: var(--slot-bg);
   border-radius: 11px; padding: 7px 10px;
   border: 1px solid var(--border);
   transition: border-color 0.16s var(--ease), background 0.16s var(--ease);
 }
 .slot-row.blocked { border-color: rgba(251, 113, 133, 0.35); }
+.slot-row.netblock { border-color: rgba(251, 191, 36, 0.4); }
 .slot-row.allowed { border-color: rgba(52, 211, 153, 0.35); }
 .slot-row.overlap { background: rgba(251, 113, 133, 0.06); border-color: rgba(251, 113, 133, 0.6); }
 .slot-row.overlap .type-badge { outline: 1px solid rgba(251, 113, 133, 0.5); }
@@ -637,6 +648,7 @@ span.type-badge { cursor: default; }
   transition: opacity 0.15s var(--ease), transform 0.25s var(--ease);
 }
 .type-badge.blocked { background: var(--red-bg); color: var(--red); }
+.type-badge.netblock { background: var(--yellow-bg); color: var(--yellow); }
 .type-badge.allowed { background: var(--green-bg); color: var(--green); }
 button.type-badge:hover {
   filter: brightness(1.25);

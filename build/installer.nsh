@@ -82,6 +82,9 @@
   DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "BenHazmanim"
   DeleteRegValue HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "BenHazmanim"
   nsExec::Exec 'schtasks /Delete /TN BenHazmanim /F'
+  ; remove the internet-block firewall rule created by the app (if any),
+  ; so uninstalling never leaves the machine with no internet
+  nsExec::Exec 'netsh advfirewall firewall delete rule name=BenHazmanimNetBlock'
   ; undo the "hide accounts page" policy applied at runtime when elevated
   DeleteRegValue HKLM "SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer" "SettingsPageVisibility"
   ; clean up the quit flags we wrote (and any stale ones)

@@ -76,6 +76,11 @@ let manualLock = false;      // נעילה ידנית (נעל עכשיו) — מ
 let shortcutsRegistered = false;
 let lastBlockedState = false; // מעקב מצבי לזיהוי תחילת/סיום חסימה ביומן
 let lastWarningActive = false; // מעקב מצבי לזיהוי כניסה/יציאה מחלון האזהרה לפני חסימה
+let netBlockApplied = false;  // חוק חסימת האינטרנט פעיל בפועל בחומת האש
+let netBlockFailed = false;   // ניסיון הפעלה נכשל (חומת אש לא זמינה/מנוהלת ע"י תוכנה אחרת)
+let netBlockWarned = false;   // הודעת השגיאה נשלחה פעם אחת (לא לשלוח כל 5 שניות)
+let lastNetActive = false;    // מעקב מצבי לזיהוי תחילת/סיום חסימת אינטרנט ביומן
+let netIconWin = null;        // חלון האייקון הצף (מחשב פתוח + אינטרנט חסום)
 
 /* ================= יומן פעילות (activity.log) =================
    תיעוד אירועים: התחלת/סיום חסימה, נעילות ידניות, פתיחות,
@@ -232,6 +237,12 @@ function isBlockedNow() {
   return !!(manualLock || (schedule.enabled && S.getStatus(schedule, trustedDate()).state === 'blocked'));
 }
 
+// מצב "נעול" לפי הלוח — חסימת מחשב מלאה או חסימת אינטרנט בלבד
+// (בשני המקרים הפתיחה המוקדמת מתבצעת עם סיסמת ההורה)
+function isLockedState(st) {
+  return st.state === 'blocked' || st.state === 'netblock';
+}
+
 function createBlockWindow(display) {
   const bw = new BrowserWindow({
     x: display.bounds.x,
@@ -334,6 +345,99 @@ function unregisterBlockShortcuts() {
   shortcutsRegistered = false;
 }
 
+/* ================= חסימת אינטרנט בלבד (חוק חומת אש) =================
+   חלון מסוג "netblock" חוסם רק את הרשת — המחשב עצמו נשאר פתוח לשימוש.
+   החסימה מתבצעת עם חוק חומת אש אחד ייעודי משלנו (dir=out) בשם ייחודי,
+   כך שאין כל התנגשות עם סינונים/חוקים קיימים של המשתמש — בזמן החסימה
+   כל היציאה חסומה ממילא, ולאחר הסרת החוק הסינונים הקיימים חוזרים לפעול
+   בדיוק כפי שהיו. החוק דורש הרשאת מנהל (המשימה המתוזמנת מריצה את התוכנה
+   מוגבהת בכניסה) — בהרצה רגילה החסימה מדווחת ככשלה במקום להיכשל בשקט. */
+const NET_RULE = 'BenHazmanimNetBlock';
+
+// האם קיים חוק חסימה בשם שלנו? (נקרא בעלייה כדי לסנכרן עם מצב קיים
+// אחרי קריסה/סגירה — חוקי חומת אש נשארים גם אחרי שהתוכנה נסגרת)
+function netRuleExists() {
+  return new Promise((resolve) => {
+    if (!isWin) return resolve(false);
+    execFile('netsh', ['advfirewall', 'firewall', 'show', 'rule', 'name=' + NET_RULE], (err) => resolve(!err));
+  });
+}
+
+// הפעלה/כיבוי של חוק החסימה. נשען על קודי השגיאה של netsh (אמינים גם
+// כשהפלט מקומי, למשל בעברית) ולא על ניתוח טקסט.
+function netBlockSet(enable) {
+  return new Promise((resolve) => {
+    if (!isWin) return resolve({ ok: false, error: 'זמין רק בווינדוס' });
+    if (!isElevated()) {
+      return resolve({ ok: false, error: 'חסימת אינטרנט דורשת הרצה כמנהל — הפעילו את התוכנה כמנהל פעם אחת כדי ליצור את המשימה המתוזמנת המוגבהת' });
+    }
+    const done = (err, msg) => resolve(err ? { ok: false, error: msg || err.message } : { ok: true });
+    if (enable) {
+      execFile('netsh', ['advfirewall', 'firewall', 'add', 'rule', 'name=' + NET_RULE, 'dir=out', 'action=block', 'enable=yes', 'profile=any'], (err) => {
+        if (!err) return done(null);
+        // החוק כבר קיים (למשל מסשן קודם) — להפעיל אותו
+        execFile('netsh', ['advfirewall', 'firewall', 'set', 'rule', 'name=' + NET_RULE, 'new', 'enable=yes'], (err2) => {
+          done(err2, 'חומת האש אינה זמינה או מנוהלת על ידי תוכנה אחרת — לא ניתן לחסום את האינטרנט');
+        });
+      });
+    } else {
+      execFile('netsh', ['advfirewall', 'firewall', 'delete', 'rule', 'name=' + NET_RULE], (err) => {
+        if (!err) return done(null);
+        // אין חוק כזה = הרשת כבר פתוחה — זה בסדר (אלא אם החוק דווקא קיים)
+        netRuleExists().then((exists) => done(exists ? err : null));
+      });
+    }
+  });
+}
+
+// סנכרון בעלייה: לדעת אם חוק החסימה נשאר פעיל מסשן קודם (חוקי חומת האש
+// לא נמחקים מעצמם), כדי שהאכיפה תסיר/תפעיל אותו לפי הלוח הנוכחי.
+async function reconcileNetBlock() {
+  if (!isWin) return;
+  netBlockApplied = await netRuleExists();
+}
+
+// האייקון הצף הקטן שמודיע שהמחשב פתוח אבל האינטרנט חסום.
+// מוצג בפינת המסך הראשי, לא גונב מיקוד (focusable:false), ולחיצה עליו
+// פותחת את חלון ההגדרות. ניתן לכבות אותו מההגדרות (showNetIcon).
+function showNetIcon(show) {
+  if (!show || schedule.showNetIcon === false) {
+    if (netIconWin && !netIconWin.isDestroyed()) { netIconWin.destroy(); netIconWin = null; }
+    return;
+  }
+  if (netIconWin && !netIconWin.isDestroyed()) return;
+  try {
+    const wa = screen.getPrimaryDisplay().workArea;
+    const size = 76;
+    netIconWin = new BrowserWindow({
+      x: wa.x + wa.width - size - 16,
+      y: wa.y + 16,
+      width: size,
+      height: size,
+      frame: false,
+      transparent: true,
+      alwaysOnTop: true,
+      skipTaskbar: true,
+      resizable: false,
+      movable: false,
+      minimizable: false,
+      maximizable: false,
+      fullscreenable: false,
+      focusable: false,
+      hasShadow: false,
+      backgroundColor: '#00000000',
+      webPreferences: {
+        preload: path.join(__dirname, 'preload.js'),
+        contextIsolation: true,
+        nodeIntegration: false
+      }
+    });
+    netIconWin.setAlwaysOnTop(true, 'screen-saver');
+    netIconWin.loadFile(path.join(__dirname, 'renderer', 'netblock-icon.html'));
+    netIconWin.on('closed', () => { netIconWin = null; });
+  } catch { /* האייקון הוא קוסמטי — כשלון אינו קריטי */ }
+}
+
 /* ================= לולאת האכיפה ================= */
 
 function buildStatus() {
@@ -344,11 +448,13 @@ function buildStatus() {
     manualLock: manualLock,
     theme: resolvedTheme(),
     blockMessage: schedule.blockMessage,
-    stateLabel: st.state === 'blocked' ? 'חסום' : 'מותר',
-    nextLabel: st.next === 'blocked' ? 'חסום' : st.next === 'allowed' ? 'מותר' : null,
+    stateLabel: st.state === 'blocked' ? 'חסום' : st.state === 'netblock' ? 'האינטרנט חסום' : 'מותר',
+    nextLabel: st.next === 'blocked' ? 'חסום' : st.next === 'netblock' ? 'האינטרנט ייחסם' : st.next === 'allowed' ? 'מותר' : null,
     nextAtLabel: st.nextAt ? S.formatDate(st.nextAt) : null,
     secondsUntilLabel: st.secondsUntilNext != null ? S.formatDuration(st.secondsUntilNext) : null,
-    pinSet: !!schedule.pinHash
+    pinSet: !!schedule.pinHash,
+    netBlockFailed: netBlockFailed,
+    blockBg: schedule.blockBg
   };
 }
 
@@ -358,9 +464,12 @@ function showWarningNotification(status) {
   try {
     const sec = status.warningSeconds != null ? status.warningSeconds : 0;
     const dur = S.formatDuration(sec);
+    const net = status.next === 'netblock';
     const n = new Notification({
-      title: 'המחשב עומד להיחסם',
-      body: 'בעוד ' + dur + ' המחשב ייחסם — שמרו את הקבצים וסיימו את העבודה.'
+      title: net ? 'האינטרנט עומד להיחסם' : 'המחשב עומד להיחסם',
+      body: net
+        ? 'בעוד ' + dur + ' האינטרנט ייחסם — המחשב עצמו יישאר פתוח לשימוש כללי.'
+        : 'בעוד ' + dur + ' המחשב ייחסם — שמרו את הקבצים וסיימו את העבודה.'
     });
     n.show();
   } catch { /* ignore */ }
@@ -370,6 +479,8 @@ function enforce() {
   const status = buildStatus();
   // נעילה ידנית חלה תמיד — גם אם האכיפה לפי הלוח מושבתת
   const blocked = !!(manualLock || (schedule.enabled && status.state === 'blocked'));
+  // חסימת אינטרנט בלבד — מחשב פתוח, רשת חסומה (לא במקביל לנעילה ידנית)
+  const netblocked = !!(schedule.enabled && status.state === 'netblock' && !manualLock);
 
   // אזהרה לפני חסימה — פעם אחת בכניסה לחלון האזהרה, ולא בזמן נעילה ידנית.
   // ללא סיסמה החסימה אינה פעילה כלל (activeBlock = blocked && pinSet) —
@@ -385,11 +496,46 @@ function enforce() {
   // לא יהיה מצב של חסימה בלי דרך החוצה. המשתמש מתבקש להגדיר סיסמה תחילה.
   const pinSet = !!schedule.pinHash;
   const activeBlock = blocked && pinSet;
+  const activeNet = netblocked && pinSet;
 
-  // תיעוד מעברים ביומן הפעילות
+  // תיעוד מעברים ביומן הפעילות (חסימת מחשב וחסימת אינטרנט בנפרד)
   if (blocked !== lastBlockedState) {
     logEvent(blocked ? 'block-start' : 'block-end');
     lastBlockedState = blocked;
+  }
+  if (netblocked !== lastNetActive) {
+    logEvent(netblocked ? 'netblock-start' : 'netblock-end');
+    lastNetActive = netblocked;
+  }
+
+  // חסימת האינטרנט — הפעלה/כיבוי של חוק חומת האש רק בשינוי מצב (לא כל 5
+  // שניות), עם דיווח שגיאה חד-פעמי אם חומת האש אינה זמינה.
+  if (activeNet && !netBlockApplied && !netBlockFailed) {
+    netBlockSet(true).then((res) => {
+      if (res.ok) {
+        netBlockApplied = true;
+      } else {
+        netBlockFailed = true;
+        if (!netBlockWarned) {
+          netBlockWarned = true;
+          logEvent('netblock-fail');
+          if (win && !win.isDestroyed()) {
+            win.webContents.send('netblock-error', res.error);
+          }
+        }
+      }
+      showNetIcon(activeNet && netBlockApplied);
+    });
+  } else if (!activeNet && netBlockApplied) {
+    netBlockSet(false).then((res) => { if (res.ok) netBlockApplied = false; });
+    showNetIcon(false);
+  } else if (!activeNet) {
+    // יציאה ממצב חסימה — מאפסים כדי שהחלון הבא ינסה מחדש
+    netBlockFailed = false;
+    netBlockWarned = false;
+    showNetIcon(false);
+  } else {
+    showNetIcon(activeNet && netBlockApplied);
   }
 
   // עדכון מגש + חלון הגדרות
@@ -418,8 +564,10 @@ function trayIcon() {
 }
 
 function updateTray(status) {
-  const color = (status.state === 'blocked' || status.manualLock) ? 'חסום' : 'מותר';
-  const warnTxt = status.warning ? ' • ייחסם בקרוב' : '';
+  const color = (status.state === 'blocked' || status.manualLock) ? 'חסום' : status.state === 'netblock' ? 'האינטרנט חסום' : 'מותר';
+  const warnTxt = status.warning
+    ? (status.next === 'netblock' ? ' • האינטרנט ייחסם בקרוב' : ' • ייחסם בקרוב')
+    : '';
   tray.setToolTip('בין הזמנים — מצב נוכחי: ' + color + warnTxt);
   const menu = Menu.buildFromTemplate([
     { label: 'בין הזמנים — ניהול זמן מחשב', enabled: false },
@@ -986,6 +1134,19 @@ function registerIpc() {
 
   ipcMain.handle('status:get', () => buildStatus());
 
+  // שינוי רקע מסך החסימה — מתוך מסך החסימה עצמו (כפתור "רקע").
+  // שינוי קוסמטי בלבד — אינו דורש סיסמה, והמשתמש יכול לבחור את הרקע
+  // שמעניין אותו בזמן החסימה. השמירה מתבצעת בהגדרות המשותפות.
+  ipcMain.handle('block:set-bg', (_e, bg) => {
+    const valid = ['blobs', 'fluid', 'particles', 'aurora'];
+    const b = String(bg || '');
+    if (!valid.includes(b)) return { ok: false, error: 'רקע לא ידוע' };
+    schedule.blockBg = b;
+    saveSettings();
+    enforce(); // מפיץ את הסטטוס החדש (עם blockBg) לכל חלונות החסימה
+    return { ok: true };
+  });
+
   ipcMain.handle('lock:now', () => {
     // נעילה ידנית: מפעילה את מסך החסימה המלא של בין הזמנים על כל המסכים
     // (ולא רק את נעילת Windows הרגילה). הפתיחה מתבצעת עם סיסמה.
@@ -1004,7 +1165,7 @@ function registerIpc() {
     if (!schedule.pinHash) {
       manualLock = false;
       const st = S.getStatus(schedule, trustedDate());
-      schedule.manualUnlockUntil = st.state === 'blocked'
+      schedule.manualUnlockUntil = isLockedState(st)
         ? (st.nextAt ? st.nextAt.getTime() : trustedNow() + 3600 * 1000)
         : null;
       saveSettings();
@@ -1019,8 +1180,9 @@ function registerIpc() {
     logEvent('unlock-success');
     manualLock = false; // סיום נעילה ידנית
     const st = S.getStatus(schedule, trustedDate());
-    // "פתוח עד המעבר הבא" נשמר רק כשהמצב לפי הלוח הוא חסום — אחרת אין צורך
-    schedule.manualUnlockUntil = st.state === 'blocked'
+    // "פתוח עד המעבר הבא" נשמר רק כשהמצב לפי הלוח הוא חסום (מחשב או
+    // אינטרנט) — אחרת אין צורך.
+    schedule.manualUnlockUntil = isLockedState(st)
       ? (st.nextAt ? st.nextAt.getTime() : trustedNow() + 3600 * 1000)
       : null;
     saveSettings();
@@ -1113,6 +1275,8 @@ function registerIpc() {
     // 1) הסרת רישומי ההפעלה עם Windows (Registry + משימה מתוזמנת) —
     //    לפני הפעלת ה-Uninstaller, כדי שלא יישארו רישומים לאחר ההסרה.
     await removeStartupEntries();
+    // הסרת חוק חסימת האינטרנט (אם פעיל) — לא להשאיר את הרשת חסומה אחרי ההסרה
+    if (netBlockApplied) await netBlockSet(false);
     // 2) הפעלת ה-Uninstaller בשקט (מסיר קבצים, קיצורים ונתונים) —
     //    בתהליך נפרד (detached) כך שהוא ממשיך גם אחרי שהתוכנה נסגרת.
     try {
@@ -1157,7 +1321,9 @@ function registerIpc() {
     enabled: schedule.enabled !== false,
     elevated: isElevated(),
     shared: isWin && fs.existsSync(machineSettingsFile()),
-    recovery: !!schedule.recoveryEmail
+    recovery: !!schedule.recoveryEmail,
+    netElevated: isElevated(),
+    netActive: netBlockApplied
   }));
 
   ipcMain.handle('backup:export', async () => {
@@ -1370,6 +1536,9 @@ function gracefulQuit() {
   if (ownWatchdogPid && isProcessAlive(ownWatchdogPid)) {
     try { process.kill(ownWatchdogPid); } catch { /* ignore */ }
   }
+  // ניקוי חוק חסימת האינטרנט בסגירה לגיטימית — "התוכנה לא תחסום עד להפעלה
+  // הבאה". (התהליך של netsh ממשיך לפעול גם אחרי שהאפליקציה נסגרת.)
+  if (netBlockApplied) { try { netBlockSet(false); } catch { /* ignore */ } }
   app.quit();
 }
 
@@ -1400,6 +1569,9 @@ if (isWatchdog) {
       loadSettings();
       loadPinLock(); // טעינת נעילה זמנית קיימת (אינה מתאפסת בהרצה מחדש)
       registerIpc();
+      // סנכרון עם חוק חומת האש הקיים (אם נשאר מסשן קודם) — כך שהאכיפה
+      // תפעיל/תסיר אותו לפי הלוח הנוכחי כבר מהבדיקה הראשונה.
+      await reconcileNetBlock();
       logEvent('app-start');
 
       // חסימת יצירת חשבונות חדשים במחשב (כשהתוכנה רצה עם הרשאות מנהל)

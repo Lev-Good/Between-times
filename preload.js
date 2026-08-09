@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   lockNow: () => ipcRenderer.invoke('lock:now'),
   unlockNow: (pin) => ipcRenderer.invoke('unlock:now', pin),
   openSettings: () => ipcRenderer.invoke('settings:open'),
+  setBlockBg: (bg) => ipcRenderer.invoke('block:set-bg', bg),
 
   setPin: (pin, oldPin) => ipcRenderer.invoke('pin:set', pin, oldPin),
   clearPin: (oldPin) => ipcRenderer.invoke('pin:clear', oldPin),
@@ -54,5 +55,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const listener = () => cb();
     ipcRenderer.on('session-lock', listener);
     return () => ipcRenderer.removeListener('session-lock', listener);
+  },
+  onNetblockError: (cb) => {
+    const listener = (_e, msg) => cb(msg);
+    ipcRenderer.on('netblock-error', listener);
+    return () => ipcRenderer.removeListener('netblock-error', listener);
   }
 });

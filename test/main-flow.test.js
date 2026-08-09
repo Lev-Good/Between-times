@@ -52,10 +52,15 @@ function makeMock(config) {
 
   const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'bhz-flow-'));
   fs.mkdirSync(path.join(tmpRoot, 'userData'), { recursive: true });
-  // מניעת כתיבה ל-APPDATA האמיתי של המשתמש במהלך הבדיקה
+  // מניעת כתיבה לנתיבים האמיתיים של המשתמש במהלך הבדיקה:
+  // APPDATA (הגדרות משתמש) וגם PROGRAMDATA (הקובץ המשותף "לכל המשתמשים"
+  // — בלי בידוד שלו, בדיקות מוגבהות היו כותבות לקובץ האמיתי של המחשב!)
   const origAppData = process.env.APPDATA;
+  const origProgramData = process.env.PROGRAMDATA;
   process.env.APPDATA = path.join(tmpRoot, 'appdata');
+  process.env.PROGRAMDATA = path.join(tmpRoot, 'programdata');
   fs.mkdirSync(process.env.APPDATA, { recursive: true });
+  fs.mkdirSync(process.env.PROGRAMDATA, { recursive: true });
 
   // הרצאת קובץ הגדרות ראשוני (אם ביקשו)
   if (cfg.settings) {
@@ -70,6 +75,9 @@ function makeMock(config) {
   function defaultExec(cmd, args) {
     if (cmd === 'schtasks' && args.includes('/Create')) return { err: new Error('access denied'), stdout: '', stderr: '' };
     if (cmd === 'schtasks' && args.includes('/Query')) return { err: new Error('not found'), stdout: '', stderr: '' };
+    // חוק חסימת האינטרנט לא קיים כברירת מחדל — כדי שהרצת בדיקות לא
+    // תפעיל ניקוי netsh מיותר בכל בדיקה (האכיפה תסיר רק אם באמת יש חוק)
+    if (cmd === 'netsh' && args.includes('show')) return { err: new Error('no such rule'), stdout: '', stderr: '' };
     return { err: null, stdout: '', stderr: '' };
   }
   const execImpl = cfg.exec || defaultExec;
@@ -135,7 +143,11 @@ function makeMock(config) {
       getAllDisplays: () => [
         { id: 1, bounds: { x: 0, y: 0, width: 1920, height: 1080 } },
         { id: 2, bounds: { x: 1920, y: 0, width: 1280, height: 1024 } }
-      ]
+      ],
+      getPrimaryDisplay: () => ({
+        bounds: { x: 0, y: 0, width: 1920, height: 1080 },
+        workArea: { x: 0, y: 0, width: 1920, height: 1040 }
+      })
     },
     globalShortcut: { register: () => true, unregisterAll: () => {} },
     Notification: class {
@@ -177,12 +189,13 @@ function makeMock(config) {
   };
 
   const m = {
-    tmpRoot, origAppData, ipcHandlers, state,
+    tmpRoot, origAppData, origProgramData, ipcHandlers, state,
     electron, childProcess,
     cleanup() {
       Module._load = origLoad;
       delete require.cache[require.resolve('../main.js')];
       process.env.APPDATA = this.origAppData;
+      process.env.PROGRAMDATA = this.origProgramData;
       try { fs.rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* ignore */ }
     },
     async ready() {
@@ -1224,5 +1237,83 @@ test('activity:get returns an array even when empty', async () => {
   await m.ready();
   const act = await m.ipcHandlers.get('activity:get')();
   assert.ok(Array.isArray(act), 'יומן פעילות תמיד מערך');
+  m.cleanup();
+});
+
+/* ================= חסימת אינטרנט בלבד (netblock) ================= */
+
+test('netblock: enforce applies the firewall rule and shows the floating icon (no block windows)', async () => {
+  // לוח: היום כולו — חסימת אינטרנט בלבד (מחשב פתוח)
+  const now = new Date();
+  const settings = S.defaultSchedule();
+  settings.pinHash = S.sha256Hex('1234');
+  settings.week[now.getDay()].slots = [{ start: 0, end: 1440, type: 'netblock' }];
+  const m = loadMain({ settings, elevate: true });
+  await m.ready();
+
+  // חוק חומת האש — netsh add עם dir=out / action=block
+  const netshCalls = m.state.execCalls.filter((c) => c.cmd === 'netsh');
+  const add = netshCalls.find((c) => c.args.includes('add'));
+  assert.ok(add, 'צריכה להיות קריאת netsh add לחוק חסימת אינטרנט');
+  assert.ok(add.args.includes('dir=out'), 'החוק צריך לחסום יציאה');
+  assert.ok(add.args.includes('action=block'), 'החוק צריך לחסום');
+
+  // אין חלונות חסימה (המחשב פתוח) — אבל יש חלון אייקון צף קטן
+  const blockWins = m.state.windows.filter((w) => w.blockDisplayId);
+  assert.equal(blockWins.length, 0, 'בחסימת אינטרנט אין חלונות חסימה');
+  const iconWins = m.state.windows.filter((w) => !w.blockDisplayId && !w.title);
+  assert.equal(iconWins.length, 1, 'נוצר חלון אייקון צף אחד');
+
+  // המצב המוצג: אינטרנט חסום
+  const st = await m.ipcHandlers.get('status:get')();
+  assert.equal(st.state, 'netblock');
+  assert.equal(st.stateLabel, 'האינטרנט חסום');
+  assert.equal(st.manualLock, false);
+  m.cleanup();
+});
+
+test('netblock: full lock takes precedence and removes the internet rule', async () => {
+  const now = new Date();
+  const settings = S.defaultSchedule();
+  settings.pinHash = S.sha256Hex('1234');
+  settings.week[now.getDay()].slots = [{ start: 0, end: 1440, type: 'netblock' }];
+  const m = loadMain({ settings, elevate: true });
+  await m.ready();
+
+  // בתחילה חסימת האינטרנט פעילה — חוק חומת האש נוסף
+  const add = m.state.execCalls.find((c) => c.cmd === 'netsh' && c.args.includes('add'));
+  assert.ok(add, 'חסימת האינטרנט פעילה בתחילה');
+
+  // נעילה ידנית — מסך החסימה המלא גובר ומסיר את חוק הרשת
+  await m.ipcHandlers.get('lock:now')();
+  const st = await m.ipcHandlers.get('status:get')();
+  assert.equal(st.manualLock, true);
+  const blockWins = m.state.windows.filter((w) => w.blockDisplayId);
+  assert.ok(blockWins.length >= 1, 'נעילה ידנית מציגה חלונות חסימה');
+  const del = m.state.execCalls.find((c) => c.cmd === 'netsh' && c.args.includes('delete'));
+  assert.ok(del, 'הנעילה המלאה מסירה את חוק חסימת האינטרנט');
+  m.cleanup();
+});
+
+test('netblock: unlock with password releases the internet until the next transition', async () => {
+  const now = new Date();
+  const settings = S.defaultSchedule();
+  settings.pinHash = S.sha256Hex('1234');
+  settings.week[now.getDay()].slots = [{ start: 0, end: 1440, type: 'netblock' }];
+  const m = loadMain({ settings, elevate: true });
+  await m.ready();
+
+  // הפעלת החסימה קודם
+  let st = await m.ipcHandlers.get('status:get')();
+  assert.equal(st.state, 'netblock');
+
+  // פתיחה עם סיסמה — "פתוח עד המעבר הבא" (הארגומנט הראשון הוא ה-event של IPC)
+  const res = await m.ipcHandlers.get('unlock:now')({}, '1234');
+  assert.equal(res.ok, true);
+  st = await m.ipcHandlers.get('status:get')();
+  assert.equal(st.state, 'allowed', 'לאחר פתיחה — הרשת פתוחה');
+  // חוק הרשת הוסר
+  const del = m.state.execCalls.find((c) => c.cmd === 'netsh' && c.args.includes('delete'));
+  assert.ok(del, 'פתיחת האינטרנט מסירה את חוק חומת האש');
   m.cleanup();
 });

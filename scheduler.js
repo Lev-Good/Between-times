@@ -56,10 +56,12 @@
       pinHash: null,
       theme: 'system',          // ערכת נושא: system = לפי המערכת | light | dark
       blockMessage: '',         // הודעה אישית שמוצגת במסך החסימה
-      overrides: [],            // חריגים חד-פעמיים: [{date:'YYYY-MM-DD', type:'allow'|'block'}]
+      overrides: [],            // חריגים חד-פעמיים: [{date:'YYYY-MM-DD', type:'allow'|'block'|'netblock'}]
       startWithWindows: true,  // אפליקציית הורים — עולה אוטומטית עם Windows
       runAsAdmin: false,        // הרצה עם הרשאות מנהל (UAC) — מונעת סגירה מחשבון רגיל
       manualUnlockUntil: null,
+      showNetIcon: true,        // אייקון צף קטן כשהמחשב פתוח והאינטרנט חסום
+      blockBg: 'blobs',         // רקע מסך החסימה: blobs | fluid | particles | aurora
       week
     };
   }
@@ -86,6 +88,8 @@
       recoveryEmail: String(s.recoveryEmail || '').trim(),
       recoverySecret: String(s.recoverySecret || '').trim(),
       updateUrl: String(s.updateUrl || '').trim(),
+      showNetIcon: s.showNetIcon !== false,
+      blockBg: ['blobs', 'fluid', 'particles', 'aurora'].includes(s.blockBg) ? s.blockBg : 'blobs',
       week: []
     };
     for (let d = 0; d < 7; d++) {
@@ -95,7 +99,8 @@
         .map((x) => ({
           start: parseHM(x.start),
           end: parseHM(x.end),
-          type: x.type === 'allowed' ? 'allowed' : 'blocked'
+          // שלושה סוגי חלונות: מותר, חסום (נעילת מחשב מלאה) או חסימת אינטרנט בלבד
+          type: x.type === 'allowed' ? 'allowed' : x.type === 'netblock' ? 'netblock' : 'blocked'
         }))
         .filter((x) => x.start !== x.end);
       out.week.push({ day: d, slots });
@@ -112,7 +117,10 @@
       if (!o || typeof o !== 'object') return;
       const date = String(o.date || '');
       if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return;
-      map.set(date, { date, type: o.type === 'block' ? 'block' : 'allow' });
+      map.set(date, {
+        date,
+        type: o.type === 'block' ? 'block' : o.type === 'netblock' ? 'netblock' : 'allow'
+      });
     });
     return [...map.values()].sort((a, b) => (a.date < b.date ? -1 : 1));
   }
@@ -122,7 +130,12 @@
     const slots = (entry.slots || []).slice();
     const key = dateKey(date);
     const ov = (schedule.overrides || []).find((o) => o.date === key);
-    if (ov) slots.unshift({ start: 0, end: 1440, type: ov.type === 'allow' ? 'allowed' : 'blocked' });
+    if (ov) {
+      slots.unshift({
+        start: 0, end: 1440,
+        type: ov.type === 'allow' ? 'allowed' : ov.type === 'netblock' ? 'netblock' : 'blocked'
+      });
+    }
     return slots;
   }
 
@@ -203,12 +216,13 @@
 
     // חלון אזהרה לפני חסימה: כשהמחשב עדיין פתוח אבל עומד להיחסם בתוך
     // warnMinutes — מסמנים warning עם ספירה לאחור עד תחילת החסימה.
-    // (ההתראה היא רק כשהמעבר הבא הוא לחסימה, ולא בזמן נעילה ידנית/הסרת חסימה.)
+    // (ההתראה היא רק כשהמעבר הבא הוא לחסימה — מחשב או אינטרנט — ולא בזמן
+    // נעילה ידנית/הסרת חסימה.)
     const warnSec = (s.warnMinutes || 0) * 60;
     const warning = !!(
       s.enabled &&
       state === 'allowed' &&
-      t.to === 'blocked' &&
+      (t.to === 'blocked' || t.to === 'netblock') &&
       t.at &&
       warnSec > 0 &&
       secondsUntilNext != null &&
