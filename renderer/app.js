@@ -1025,6 +1025,38 @@ function init() {
     persist();
   };
 
+  /* ---------- מחק הכל: ניקוי כל חלונות הזמן של כל הימים ----------
+     מי שרוצה להתחיל להגדיר מחדש בלי למחוק כל חלון בנפרד. כדי למנוע
+     מחיקה בטעות — לחיצה ראשונה מזינה את הכפתור ("בטוח?"), ולחיצה
+     שנייה בתוך 4 שניות מבצעת את המחיקה. */
+  let clearAllArmed = false;
+  let clearAllTimer = null;
+  const disarmClearAll = () => {
+    clearAllArmed = false;
+    if (clearAllTimer) { clearTimeout(clearAllTimer); clearAllTimer = null; }
+    const b = $('clearAllBtn');
+    if (b) { b.textContent = 'מחק הכל'; b.classList.remove('armed'); }
+  };
+  $('clearAllBtn').onclick = async () => {
+    if (!(await verifyPinSession())) return;
+    const btn = $('clearAllBtn');
+    const hasSlots = schedule.week.some((d) => d.slots.length > 0);
+    if (!hasSlots) { toast('אין חלונות זמן למחוק'); return; }
+    if (!clearAllArmed) {
+      clearAllArmed = true;
+      btn.textContent = 'בטוח? לחצו שוב לאישור';
+      btn.classList.add('armed');
+      clearAllTimer = setTimeout(disarmClearAll, 4000);
+      return;
+    }
+    disarmClearAll();
+    schedule.week.forEach((d) => { d.slots = []; });
+    renderWeek();
+    persist();
+    refreshStatus(); // עדכון מיידי של הספירה לאחור לפי הלוח החדש
+    toast('כל חלונות הזמן נמחקו — אפשר להתחיל להגדיר מחדש', 'success');
+  };
+
   /* ---------- ערכת נושא ---------- */
   document.querySelectorAll('.theme-btn').forEach((btn) => {
     btn.onclick = async () => {

@@ -376,6 +376,21 @@ body::after {
 .btn-ghost:hover { color: var(--text); border-color: var(--accent); background: rgba(123, 107, 255, 0.1); }
 .btn-sm { padding: 8px 15px; font-size: 13px; border-radius: 11px; }
 
+/* שורת הכותרת של לוח הזמנים השבועי — עם כפתור "מחק הכל" */
+.week-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; flex-wrap: wrap;
+}
+/* מצב אישור שני של "מחק הכל" — מהבהב באדום עד לאישור */
+#clearAllBtn.armed {
+  background: linear-gradient(135deg, #e11d48, #be123c);
+  animation: pulseDanger 1s ease-in-out infinite;
+}
+@keyframes pulseDanger {
+  0%, 100% { box-shadow: 0 6px 20px rgba(251, 113, 133, 0.4); }
+  50% { box-shadow: 0 6px 28px rgba(251, 113, 133, 0.8); }
+}
+
 /* ---------- כרטיסים ---------- */
 .card {
   position: relative;
