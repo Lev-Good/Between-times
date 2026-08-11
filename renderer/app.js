@@ -1039,6 +1039,88 @@ function addAllowedApp(res) {
   toast('התוכנה נוספה — ' + (res.mode === 'publisher' ? 'החתימה אומתה' : 'טביעת הקובץ נשמרה'), 'success');
 }
 
+/* ---------- סריקה אוטומטית של תוכנות תורניות מותקנות ----------
+   הסריקה מוצאת תוכנות מוכרות (וורד, אוצריא, זית, אוצר החכמה, בר אילן)
+   לפי רישום המערכת, קיצורי הדרך ונתיבי התקנה אופייניים — וההורה מוסיף
+   אותן לרשימה בלחיצה אחת. ההוספה עוברת את אותו אימות מלא (חותם/טביעת
+   קובץ) כמו הבחירה הידנית. */
+let detectRan = false;
+
+function isAppInAllowedList(p) {
+  const path = String(p || '').toLowerCase();
+  return (schedule.allowedApps || []).some((a) =>
+    String(a.exe).toLowerCase() === path ||
+    (a.companions || []).some((c) => String(c.exe).toLowerCase() === path));
+}
+
+async function scanKnownApps() {
+  const list = $('detectedAppsList');
+  const btn = $('detectAppsBtn');
+  if (!list || !btn || !API) return;
+  const prev = btn.innerHTML;
+  btn.disabled = true;
+  btn.textContent = 'סורק…';
+  try {
+    const res = await API.detectAllowedApps();
+    renderDetectedApps(res && res.ok ? (res.apps || []) : []);
+  } catch {
+    renderDetectedApps([]);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = prev;
+  }
+}
+
+function renderDetectedApps(apps) {
+  const list = $('detectedAppsList');
+  if (!list) return;
+  list.classList.remove('hidden');
+  list.innerHTML = '';
+  if (!apps.length) {
+    const empty = document.createElement('div');
+    empty.className = 'override-empty';
+    empty.textContent = 'לא נמצאו תוכנות תורניות מותקנות — ניתן להוסיף ידנית באמצעות "בחירת תוכנה מהמחשב…"';
+    list.appendChild(empty);
+    return;
+  }
+  apps.forEach((app) => {
+    const row = document.createElement('div');
+    row.className = 'override-row allowed-app-row';
+    const info = document.createElement('div');
+    info.className = 'override-info';
+    const name = document.createElement('strong');
+    name.textContent = app.name;
+    const exe = document.createElement('span');
+    exe.className = 'app-exe';
+    exe.textContent = app.path;
+    info.append(name, exe);
+    const added = isAppInAllowedList(app.path);
+    if (added) {
+      const ok = document.createElement('span');
+      ok.className = 'app-badge secure';
+      ok.textContent = 'כבר ברשימה';
+      info.append(ok);
+    }
+    const btn = document.createElement('button');
+    btn.className = 'btn btn-primary btn-sm';
+    btn.disabled = added;
+    if (added) {
+      btn.textContent = '✓';
+    } else {
+      btn.textContent = 'הוסף';
+      btn.onclick = async () => {
+        if (!(await verifyPinSession())) { scanKnownApps(); return; }
+        const res = await API.inspectAllowedAppPath(app.path);
+        if (!res || !res.path) { toast((res && res.error) || 'הוספת התוכנה נכשלה', 'error'); return; }
+        addAllowedApp(res);
+        scanKnownApps(); // רענון — התוכנה מסומנת "כבר ברשימה"
+      };
+    }
+    row.append(info, btn);
+    list.appendChild(row);
+  });
+}
+
 /* ---------- מצב ההגנה ---------- */
 async function renderSecurity() {
   const list = $('securityList');
@@ -1098,7 +1180,11 @@ async function renderSecurity() {
     });
     panels.forEach((p) => p.classList.toggle('hidden', p.dataset.panel !== name));
     if (name === 'stats') renderStats();
-    if (name === 'settings') { renderSecurity(); renderOverrides(); }
+    if (name === 'settings') {
+      renderSecurity(); renderOverrides();
+      // סריקה אוטומטית חד-פעמית של תוכנות תורניות מותקנות (קריאה בלבד)
+      if (!detectRan && API) { detectRan = true; scanKnownApps(); }
+    }
   };
   buttons.forEach((b) => b.addEventListener('click', () => activate(b.dataset.tab)));
   activate('schedule');
@@ -1296,6 +1382,13 @@ function init() {
     if (!res.path) { toast((res && res.error) || 'הבחירה נכשלה', 'error'); return; }
     addAllowedApp(res);
   };
+
+  // סריקה אוטומטית של תוכנות תורניות מותקנות (קריאה בלבד — ללא סיסמה),
+  // ההוספה עצמה תבקש את הסיסמה.
+  const scanBtn = $('detectAppsBtn');
+  if (scanBtn) {
+    scanBtn.onclick = () => { if (API) scanKnownApps(); };
+  }
 
   /* ---------- סיסמה ---------- */
   $('pinSaveBtn').onclick = async () => {

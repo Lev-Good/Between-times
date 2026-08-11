@@ -940,6 +940,9 @@ test('update:download writes relaunch flag so the installer reopens the app', as
     assert.ok(spawn.args.includes('/S'));
     assert.ok(fs.existsSync(path.join(m.tmpRoot, 'userData', 'relaunch.flag')));
     assert.ok(fs.existsSync(path.join(process.env.APPDATA, 'BenHazmanim', 'relaunch.flag')));
+    // נתיב משותף לכל המשתמשים — רשת ביטחון להבדלי סביבה בין האפליקציה למתקין
+    assert.ok(fs.existsSync(path.join(process.env.PROGRAMDATA, 'BenHazmanim', 'relaunch.flag')),
+      'relaunch.flag בנתיב המשותף (PROGRAMDATA)');
     m.cleanup();
   } finally {
     fetchMock = null;
@@ -957,6 +960,7 @@ test('startup: stale relaunch flags are cleared on launch', async () => {
   await m.ready();
   assert.equal(fs.existsSync(path.join(process.env.APPDATA, 'BenHazmanim', 'relaunch.flag')), false, 'דגל הפעלה מחדש מנוקה באתחול');
   assert.equal(fs.existsSync(path.join(m.tmpRoot, 'userData', 'relaunch.flag')), false, 'דגל ב-userData מנוקה באתחול');
+  assert.equal(fs.existsSync(path.join(process.env.PROGRAMDATA, 'BenHazmanim', 'relaunch.flag')), false, 'דגל בנתיב המשותף מנוקה באתחול');
   m.cleanup();
 });
 
@@ -1611,5 +1615,224 @@ test('netblock: unlock with password releases the internet until the next transi
   // חוק הרשת הוסר
   const del = m.state.execCalls.find((c) => c.cmd === 'netsh' && c.args.includes('delete'));
   assert.ok(del, 'פתיחת האינטרנט מסירה את חוק חומת האש');
+  m.cleanup();
+});
+
+/* ================= סריקת תוכנות תורניות מותקנות ================= */
+
+test('allowed-apps:detect — מוצא תוכנות מוכרות מהסריקה (App Paths, רישום התקנה, קיצורי דרך) עם דה-דופליקציה', async () => {
+  // בידוד מנתיבי ההתקנה האמיתיים של המחשב — כדי שהבדיקה תהיה דטרמיניסטית
+  const pf = process.env.ProgramFiles, pfx = process.env['ProgramFiles(x86)'], la = process.env.LOCALAPPDATA;
+  process.env.ProgramFiles = 'C:\\__bhz_test_progfiles';
+  process.env['ProgramFiles(x86)'] = 'C:\\__bhz_test_progfiles_x86';
+  process.env.LOCALAPPDATA = 'C:\\__bhz_test_localappdata';
+  const m = loadMain({
+    exec: (cmd, args) => {
+      const joined = String(args.join(' '));
+      if (cmd === 'powershell.exe' && joined.includes('ConvertTo-Json')) {
+        const dir = path.join(m.tmpRoot, 'detect');
+        fs.mkdirSync(dir, { recursive: true });
+        const word = path.join(dir, 'WINWORD.EXE');
+        const otz = path.join(dir, 'otzaria.exe');
+        const zay = path.join(dir, 'Zayit.exe');
+        const excel = path.join(dir, 'EXCEL.EXE'); // תוכנת Office אחרת — לא וורד
+        fs.writeFileSync(word, 'MZ');
+        fs.writeFileSync(otz, 'MZ');
+        fs.writeFileSync(zay, 'MZ');
+        fs.writeFileSync(excel, 'MZ');
+        return {
+          err: null,
+          stdout: JSON.stringify({
+            appPaths: [word, excel],
+            uninstall: [
+              { name: 'אוצריא', location: dir, icon: '' },
+              { name: 'Otzaria', location: dir, icon: '' },
+              { name: 'Zayit', location: '', icon: '"' + zay + '",0' },
+              // שם תואם אבל מיקום הוא קובץ של תוכנת Office אחרת — לא וורד
+              { name: 'Microsoft Office', location: excel, icon: '' },
+              { name: 'תוכנה אחרת', location: 'C:\Program Files\Other', icon: '' }
+            ],
+            shortcuts: [zay, excel, 'C:\Program Files\launcher.exe']
+          }),
+          stderr: ''
+        };
+      }
+      return { err: null, stdout: '', stderr: '' };
+    }
+  });
+  await m.ready();
+  const res = await m.ipcHandlers.get('allowed-apps:detect')();
+  assert.equal(res.ok, true);
+  assert.equal(res.apps.length, 3, 'שלוש תוכנות מוכרות נמצאו (word, otzaria, zayit)');
+  const apps = res.apps.map((a) => a.id + '|' + a.path.toLowerCase());
+  assert.ok(apps.some((s) => s.startsWith('word|')), 'וורד נמצאה דרך App Paths');
+  assert.equal(apps.filter((s) => s.startsWith('otzaria|')).length, 1, 'אוצריא מופיעה פעם אחת בלבד (דה-דופליקציה)');
+  assert.ok(apps.some((s) => s.startsWith('zayit|')), 'זית נמצאה דרך האייקון/קיצור הדרך');
+  process.env.ProgramFiles = pf; process.env['ProgramFiles(x86)'] = pfx; process.env.LOCALAPPDATA = la;
+  m.cleanup();
+});
+
+test('allowed-apps:detect — ללא תוכנות מותקנות מחזיר רשימה ריקה', async () => {
+  const pf = process.env.ProgramFiles, pfx = process.env['ProgramFiles(x86)'], la = process.env.LOCALAPPDATA;
+  process.env.ProgramFiles = 'C:\\__bhz_test_progfiles';
+  process.env['ProgramFiles(x86)'] = 'C:\\__bhz_test_progfiles_x86';
+  process.env.LOCALAPPDATA = 'C:\\__bhz_test_localappdata';
+  const m = loadMain({
+    exec: (cmd, args) => {
+      if (cmd === 'powershell.exe' && String(args.join(' ')).includes('ConvertTo-Json')) {
+        return { err: null, stdout: JSON.stringify({ appPaths: [], uninstall: [], shortcuts: [] }), stderr: '' };
+      }
+      return { err: null, stdout: '', stderr: '' };
+    }
+  });
+  await m.ready();
+  const res = await m.ipcHandlers.get('allowed-apps:detect')();
+  assert.equal(res.ok, true);
+  assert.deepEqual(res.apps, []);
+  process.env.ProgramFiles = pf; process.env['ProgramFiles(x86)'] = pfx; process.env.LOCALAPPDATA = la;
+  m.cleanup();
+});
+
+test('allowed-apps:inspect-path — מחזיר רשומת אימות מלאה לתוכנה חתומה', async () => {
+  const hash = 'a'.repeat(64);
+  const m = loadMain({
+    exec: (cmd, args) => {
+      const joined = String(args.join(' '));
+      if (cmd === 'powershell.exe' && joined.includes('Get-AuthenticodeSignature')) {
+        return {
+          err: null,
+          stdout: 'Microsoft Office|Valid|CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US|' + hash.toUpperCase() + '\r\n',
+          stderr: ''
+        };
+      }
+      return { err: null, stdout: '', stderr: '' };
+    }
+  });
+  const p = path.join(m.tmpRoot, 'detect2', 'WINWORD.EXE');
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, 'MZ');
+  await m.ready();
+  const res = await m.ipcHandlers.get('allowed-apps:inspect-path')(null, p);
+  assert.equal(res.canceled, false);
+  assert.equal(res.mode, 'publisher');
+  assert.equal(res.publisher, 'Microsoft Corporation');
+  assert.equal(res.product, 'Microsoft Office');
+  assert.equal(res.hash, hash);
+  assert.equal(res.name, 'WINWORD');
+  m.cleanup();
+});
+
+test('allowed-apps:inspect-path — קובץ לא קיים מחזיר שגיאה', async () => {
+  const m = loadMain({});
+  await m.ready();
+  const res = await m.ipcHandlers.get('allowed-apps:inspect-path')(null, 'C:\no\such\file.exe');
+  assert.equal(res.ok, false);
+  m.cleanup();
+});
+
+/* ================= עדכניות ההגדרות: פיצול קבצים + שאריות "פתוח עד המעבר הבא" =================
+   שתי בעיות שדווחו: (1) "המעבר הבא" פנטום למרות שאין חלונות מוגדרים — שארית
+   מ-manualUnlockUntil ישן של לוח שנמחק; (2) מסך נעילה מיידי באתחול למרות לוח
+   ריק — שמירה שנפלה לקובץ המשתמש (חוסר הרשאת כתיבה למשותף) בעוד האכיפה
+   קוראת את הקובץ המשותף הישן. */
+
+test('loadSettings: קובץ משתמש עדכני יותר (שמירה שנפלה אליו) גובר על הקובץ המשותף הישן', async () => {
+  // קובץ המשתמש (לוח ריק) נכתב עכשיו על ידי loadMain
+  const m = loadMain({ settings: S.defaultSchedule() });
+  const machineDir = path.join(process.env.PROGRAMDATA, 'BenHazmanim');
+  fs.mkdirSync(machineDir, { recursive: true });
+  // הקובץ המשותף הישן עדיין מכיל חלון חסימה שנמחק כבר בלוח החדש
+  const stale = S.defaultSchedule();
+  stale.week[2].slots.push({ start: S.parseHM('23:50'), end: S.parseHM('24:00'), type: 'blocked' });
+  fs.writeFileSync(path.join(machineDir, 'settings.json'), JSON.stringify(stale), 'utf8');
+  fs.utimesSync(path.join(machineDir, 'settings.json'), new Date('2020-01-01'), new Date('2020-01-01'));
+
+  await m.ready();
+  const back = await m.ipcHandlers.get('settings:get')();
+  assert.equal(back.week[2].slots.length, 0, 'לוח ריק מהקובץ העדכני — החלון הישן לא חוזר');
+  const st = await m.ipcHandlers.get('status:get')();
+  assert.equal(st.state, 'allowed', 'אכיפה לפי הלוח העדכני — אין חסימה');
+  assert.equal(st.nextAt, null, 'אין "המעבר הבא" פנטום');
+  m.cleanup();
+});
+
+test('loadSettings: קובץ משותף עדכני יותר גובר על קובץ משתמש ישן', async () => {
+  const cfgSettings = S.defaultSchedule();
+  cfgSettings.week[2].slots.push({ start: S.parseHM('23:50'), end: S.parseHM('24:00'), type: 'blocked' });
+  const m = loadMain({ settings: cfgSettings });
+  const machineDir = path.join(process.env.PROGRAMDATA, 'BenHazmanim');
+  fs.mkdirSync(machineDir, { recursive: true });
+  // הקובץ המשותף נכתב אחרון — הוא העדכני והמנצח
+  const fresh = S.defaultSchedule();
+  fs.writeFileSync(path.join(machineDir, 'settings.json'), JSON.stringify(fresh), 'utf8');
+  fs.utimesSync(path.join(machineDir, 'settings.json'), new Date('2099-01-01'), new Date('2099-01-01'));
+  fs.utimesSync(path.join(m.tmpRoot, 'userData', 'settings.json'), new Date('2020-01-01'), new Date('2020-01-01'));
+
+  await m.ready();
+  const back = await m.ipcHandlers.get('settings:get')();
+  assert.equal(back.week[2].slots.length, 0, 'הקובץ המשותף העדכני (ריק) נבחר');
+  m.cleanup();
+});
+
+test('loadSettings: שארית "פתוח עד המעבר הבא" מנוקה כשהלוח כבר לא חוסם', async () => {
+  const settings = S.defaultSchedule();
+  settings.manualUnlockUntil = new Date(2099, 0, 1).getTime(); // שארית מלוח שנמחק
+  const m = loadMain({ settings });
+  await m.ready();
+  const back = await m.ipcHandlers.get('settings:get')();
+  assert.equal(back.manualUnlockUntil, null, 'שארית הפתיחה מנוקה — אין לוח שחסום');
+  const st = await m.ipcHandlers.get('status:get')();
+  assert.equal(st.nextAt, null, 'אין "המעבר הבא" פנטום');
+  m.cleanup();
+});
+
+// לוח חסום סביב הרגע הנוכחי (עם טיפול בחצות) — לבדיקות תלויות זמן
+function blockNowSchedule() {
+  const s = S.defaultSchedule();
+  const now = new Date();
+  const mins = now.getHours() * 60 + now.getMinutes();
+  s.week[now.getDay()].slots.push({
+    start: (mins + 1380) % 1440, // שעה לפני עכשיו
+    end: (mins + 60) % 1440,     // שעה אחרי עכשיו
+    type: 'blocked'
+  });
+  return s;
+}
+
+test('settings:save: פתיחה "עד המעבר הבא" לא מתבטלת בשמירה קוסמטית ומתעדכנת לפי לוח חדש', async () => {
+  const settings = blockNowSchedule(); // חסום כרגע
+  settings.pinHash = S.sha256Hex('1234');
+  const m = loadMain({ settings });
+  await m.ready();
+
+  // פתיחה "עד המעבר הבא" מתוך מסך החסימה (unlock:now) + כניסה להגדרות
+  const ul = await m.ipcHandlers.get('unlock:now')({}, '1234');
+  assert.ok(ul.ok);
+  await m.ipcHandlers.get('session:unlock')({}, '1234');
+
+  const st1 = await m.ipcHandlers.get('status:get')();
+  assert.equal(st1.state, 'allowed', 'פתוח עד המעבר הבא');
+  assert.ok(st1.secondsUntilNext > 0);
+  const unlockUntil = st1.nextAt.getTime();
+
+  // שינוי קוסמטי (ערכת נושא) — בלי שינוי לוח: הפתיחה לא מתבטלת
+  const data = await m.ipcHandlers.get('settings:get')();
+  data.theme = 'dark';
+  const res = await m.ipcHandlers.get('settings:save')({}, data);
+  assert.ok(res.ok);
+  const st2 = await m.ipcHandlers.get('status:get')();
+  assert.equal(st2.nextAt.getTime(), unlockUntil, 'שמירה בלי שינוי לוח שומרת על הפתיחה');
+
+  // מחיקת כל החלונות — הפתיחה מתבטלת: אין יותר לוח שחסום,
+  // ומונעים "המעבר הבא" פנטום
+  const data2 = await m.ipcHandlers.get('settings:get')();
+  data2.week.forEach((d) => { d.slots = []; });
+  const res2 = await m.ipcHandlers.get('settings:save')({}, data2);
+  assert.ok(res2.ok);
+  const back = await m.ipcHandlers.get('settings:get')();
+  assert.equal(back.manualUnlockUntil, null, 'מחיקת החלונות מסירה את הפתיחה');
+  const st3 = await m.ipcHandlers.get('status:get')();
+  assert.equal(st3.state, 'allowed');
+  assert.equal(st3.nextAt, null, 'אין "המעבר הבא" פנטום אחרי מחיקת החלונות');
   m.cleanup();
 });

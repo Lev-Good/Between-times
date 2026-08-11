@@ -117,6 +117,7 @@
   Delete "$APPDATA\BenHazmanim\relaunch.flag"
   Delete "$APPDATA\בין הזמנים - ניהול זמן מחשב\relaunch.flag"
   Delete "$APPDATA\${PRODUCT_NAME}\relaunch.flag"
+  Delete "$R0\BenHazmanim\relaunch.flag"
 !macroend
 
 ; After a SILENT install (/S) NSIS skips its own "run after finish" step, so
@@ -125,11 +126,34 @@
 ; update; if we find it here - after the new files are in place - we launch the
 ; freshly installed app ourselves and clean the flag up. Runs inside the
 ; install section, after installApplicationFiles, so $launchLink is valid.
+;
+; The flag is checked in BOTH the user profile (%APPDATA%) and the shared
+; per-machine dir (%PROGRAMDATA%\BenHazmanim), because the app may have run
+; elevated (scheduled task) while the installer runs in another context - and
+; in that case $APPDATA alone would miss the flag and the app would stay closed.
 !macro customInstall
-  IfFileExists "$APPDATA\BenHazmanim\relaunch.flag" 0 relaunchDone
-    Delete "$APPDATA\BenHazmanim\relaunch.flag"
-    Delete "$APPDATA\בין הזמנים - ניהול זמן מחשב\relaunch.flag"
-    Delete "$APPDATA\${PRODUCT_NAME}\relaunch.flag"
+  StrCpy $R0 "0"
+  IfFileExists "$APPDATA\BenHazmanim\relaunch.flag" 0 RelaunchCheckMachine
+    StrCpy $R0 "1"
+  RelaunchCheckMachine:
+  ReadEnvStr $R1 "PROGRAMDATA"
+  IfFileExists "$R1\BenHazmanim\relaunch.flag" 0 RelaunchCheckDone
+    StrCpy $R0 "1"
+  RelaunchCheckDone:
+  ${If} $R0 == "0"
+    Goto relaunchDone
+  ${EndIf}
+  ; clean up all the relaunch flags we know about
+  Delete "$APPDATA\BenHazmanim\relaunch.flag"
+  Delete "$APPDATA\בין הזמנים - ניהול זמן מחשב\relaunch.flag"
+  Delete "$APPDATA\${PRODUCT_NAME}\relaunch.flag"
+  Delete "$R1\BenHazmanim\relaunch.flag"
+  ; launch the freshly installed app (fallback: the exe directly if the
+  ; Start-menu shortcut is missing for any reason)
+  ${If} ${FileExists} "$launchLink"
     ExecShell "" "$launchLink"
+  ${Else}
+    ExecShell "" "$INSTDIR\${APP_EXECUTABLE_FILENAME}"
+  ${EndIf}
   relaunchDone:
 !macroend

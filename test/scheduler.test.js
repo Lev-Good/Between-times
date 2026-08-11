@@ -104,6 +104,32 @@ test('manual unlock overrides until next transition', () => {
   assert.equal(st.nextAt.getTime(), unlockUntil);
 });
 
+// "פתוח עד המעבר הבא" שנשאר מלוח קודם (אחרי שמחקו את כל החלונות) אסור
+// ליצור "המעבר הבא" פנטום בממשק — הערך תקף רק כשהלוח עצמו חוסם כרגע.
+test('stale manualUnlockUntil is ignored when no windows remain', () => {
+  const s = S.defaultSchedule();
+  s.manualUnlockUntil = new Date(2026, 0, 4, 23, 50).getTime(); // שארית מלוח שנמחק
+  const at = new Date(2026, 0, 4, 22, 51);
+  const st = S.getStatus(s, at);
+  assert.equal(st.state, 'allowed');
+  assert.equal(st.next, null);
+  assert.equal(st.nextAt, null);
+  assert.equal(st.secondsUntilNext, null);
+});
+
+test('stale manualUnlockUntil is ignored when the schedule no longer covers now', () => {
+  const s = S.defaultSchedule();
+  // החלון היחיד הוא מחר — כרגע הלוח לא חוסם
+  s.week[1].slots.push({ start: S.parseHM('08:00'), end: S.parseHM('16:00'), type: 'blocked' });
+  s.manualUnlockUntil = new Date(2026, 0, 5, 23, 50).getTime(); // שארית ישנה
+  const at = new Date(2026, 0, 4, 22, 51);
+  const st = S.getStatus(s, at);
+  assert.equal(st.state, 'allowed');
+  // המעבר הבא הוא החלון של מחר (08:00) — לא הערך הישן של הפתיחה
+  assert.equal(st.nextAt.getHours(), 8);
+  assert.equal(st.next, 'blocked');
+});
+
 test('formatDuration in Hebrew', () => {
   assert.equal(S.formatDuration(0), 'עכשיו');
   assert.equal(S.formatDuration(60), 'דקה');

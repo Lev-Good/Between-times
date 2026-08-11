@@ -265,8 +265,15 @@
       return { state: 'allowed', next: null, nextAt: null, secondsUntilNext: null, enabled: false };
     }
 
-    const override = s.manualUnlockUntil && d.getTime() < s.manualUnlockUntil;
-    const state = override ? 'allowed' : stateAt(s, d);
+    // "פתוח עד המעבר הבא" (manualUnlockUntil) תקף רק כשהלוח עצמו חוסם כרגע.
+    // אם החלונות נמחקו או שונו כך שהלוח כבר לא חוסם — ערך ישן שנשאר מהגדרות
+    // קודמות אסור להשפיע: אחרת הממשק מציג "המעבר הבא" פנטום (למשל "23:50
+    // בג׳ • בעוד 59 דקות") למרות שאין שום חלון מוגדר, והמחשב עלול להישאר
+    // פתוח מעבר לחלון החדש שההורה הגדיר.
+    const raw = stateAt(s, d);
+    const lockedNow = raw === 'blocked' || raw === 'netblock';
+    const override = s.manualUnlockUntil && d.getTime() < s.manualUnlockUntil && lockedNow;
+    const state = override ? 'allowed' : raw;
     const t = nextTransition(s, d);
     const nextAt = override ? new Date(s.manualUnlockUntil) : t.at;
 

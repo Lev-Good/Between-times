@@ -231,35 +231,81 @@ function decryptPassword(store) {
 }
 
 function loadSettings() {
-  try {
-    const raw = fs.readFileSync(settingsFile(), 'utf8');
-    schedule = S.normalizeSchedule(JSON.parse(raw));
-  } catch {
+  // מקור האמת של ההגדרות: הקובץ המשותף (לכל המשתמשים) + קובץ המשתמש.
+  // שני הקבצים יכולים להתקיים במקביל כששמירה אחרונה נפלה לקובץ המשתמש
+  // (חוסר הרשאת כתיבה למשותף בהרצה לא-מוגבהת) — ואז הקובץ המשותף מחזיק
+  // נתונים ישנים, והאכיפה רצה לפי לוח ישן: מחיקת חלונות "לא נתפסת",
+  // מסך החסימה מופיע באתחול למרות לוח ריק, ומוצג "המעבר הבא" פנטום.
+  // לכן בוחרים תמיד את הקובץ העדכני ביותר (לפי שעת שינוי), ומעלים אותו
+  // למקור המשותף כשההרשאות מאפשרות — כך הכל נשאר מעודכן באמת.
+  const tryRead = (file) => {
+    try {
+      if (!file || !fs.existsSync(file)) return null;
+      return S.normalizeSchedule(JSON.parse(fs.readFileSync(file, 'utf8')));
+    } catch { return null; }
+  };
+  const userFile = path.join(app.getPath('userData'), 'settings.json');
+  const machineFile = machineSettingsFile();
+  let source = null;
+
+  const machineS = tryRead(machineFile);
+  const userS = tryRead(userFile);
+  if (machineS && userS) {
+    let m = 0, u = 0;
+    try { m = fs.statSync(machineFile).mtimeMs; } catch { /* ignore */ }
+    try { u = fs.statSync(userFile).mtimeMs; } catch { /* ignore */ }
+    schedule = u > m ? userS : machineS;
+    source = u > m ? 'user' : 'machine';
+  } else if (machineS) {
+    schedule = machineS;
+    source = 'machine';
+  } else if (userS) {
+    schedule = userS;
+    source = 'user';
+  } else {
+    // אף קובץ תקין — מתחילים בברירת מחדל, ומשחזרים גיבוי מוגן אם קיים
+    // (כך שמחיקת settings.json אינה מאפסת את הלוח לפני שהשומר פועל).
     schedule = S.defaultSchedule();
-    // קודם לשחזר גיבוי מוגן של ההגדרות, אם קיים. אחרת לבצע הגירה
-    // מקובץ המשתמש הישן. כך מחיקת settings.json אינה מאפסת את הלוח
-    // לפני שהשומר המערכתי מספיק לפעול.
     if (isWin && isElevated()) {
-      try {
-        const backup = fs.readFileSync(protectedSettingsFile(), 'utf8');
-        schedule = S.normalizeSchedule(JSON.parse(backup));
-        saveSettings();
-      } catch {
-        try {
-          const old = fs.readFileSync(path.join(app.getPath('userData'), 'settings.json'), 'utf8');
-          schedule = S.normalizeSchedule(JSON.parse(old));
-          saveSettings();
-        } catch { /* אין קובץ ישן — מתחילים בהגדרות ברירת מחדל */ }
-      }
+      const backup = tryRead(protectedSettingsFile());
+      if (backup) { schedule = backup; source = 'backup'; }
     }
   }
+
+  // ניקוי "פתוח עד המעבר הבא" שנשאר מלוח קודם. הפתיחה נקבעת רק ע"י ההורה
+  // (הזנת סיסמה במסך החסימה) — כאן רק מטפלים בערך הקיים:
+  // - אם הלוח כבר לא חוסם — הערך חסר משמעות ויוצר "המעבר הבא" פנטום בממשק
+  //   (שאריות של לוח שנמחק) → מנקים.
+  // - אם הלוח חוסם וקיימת פתיחה — מסנכרנים אותה עם המעבר הבא האמיתי של
+  //   הלוח הנוכחי, כך שפתיחה לא מחזיקה את המחשב פתוח מעבר לחלון החדש.
+  const now = trustedDate();
+  const rawState = S.stateAt(schedule, now);
+  let dirty = false;
+  if (rawState === 'blocked' || rawState === 'netblock') {
+    if (schedule.manualUnlockUntil) {
+      const t = S.nextTransition(schedule, now);
+      if (t.at && t.at.getTime() !== schedule.manualUnlockUntil) {
+        schedule.manualUnlockUntil = t.at.getTime();
+        dirty = true;
+      }
+    }
+  } else if (schedule.manualUnlockUntil) {
+    schedule.manualUnlockUntil = null;
+    dirty = true;
+  }
+
+  // העלאת הקובץ העדכני למקור המשותף — כדי שהבחירה הבאה לפי שעת השינוי
+  // תישאר עקבית, והתיקונים (מחיקת חלונות וכדומה) יישארו קבועים לכל המשתמשים.
+  // בהרצה מוגבהת חייב להיווצר קובץ משותף גם בהתקנה חדשה עם לוח ריק —
+  // השומר המערכתי משתמש בקיומו כסמן שהתוכנה הותקנה.
+  if (isWin && isElevated() && (dirty || source === 'user' || source === 'backup' || !fs.existsSync(machineFile))) {
+    saveSettings();
+  }
+
   // ההפעלה עם Windows תמיד פעילה (ללא אפשרות לכיבוי), והרצה עם הרשאות
   // מנהל הוסרה מהממשק — כך שגם הגדרות ישנות לא יגרמו להרמה מוגבהת.
   schedule.startWithWindows = true;
   schedule.runAsAdmin = false;
-  // בהרצה מוגבהת חייב להיווצר קובץ משותף גם בהתקנה חדשה עם לוח ריק;
-  // השומר המערכתי משתמש בקיומו כסמן שהתוכנה הותקנה ולא כסמן שניתן למחוקו.
-  if (isWin && isElevated() && !fs.existsSync(machineSettingsFile())) saveSettings();
 }
 
 function writeProtectedSettingsBackup() {
@@ -705,6 +751,158 @@ function launchAllowedApp(app) {
       if (err) return resolve({ ok: false, error: 'לא ניתן להפעיל את התוכנה — בדקו שהיא מותקנת במקום הנכון' });
       if (!manualLock) enterRelaxed();
       resolve({ ok: true });
+    });
+  });
+}
+
+/* ---------- סריקה אוטומטית של תוכנות תורניות מוכרות ----------
+   כדי שההורה לא יצטרך לחפש את קבצי ההתקנה, הסריקה מאתרת תוכנות
+   תורניות מותקנות לפי שלושה מקורות (בסריקה גנרית אחת ב-PowerShell):
+   1) רישום App Paths — תוכנות שרושמות שם את קובץ ההרצה שלהן (למשל וורד);
+   2) רישום הסרת ההתקנה — שם התצוגה + מיקום ההתקנה + אייקון;  3) קיצורי
+   דרך בתפריט התחל (כל המשתמשים + המשתמש הנוכחי). ההתאמה לתוכנה מוכרת
+   מתבצעת בצד JS לפי הטבלה שלמטה — כך אפשר להוסיף תוכנות בלי לגעת בסקריפט. */
+
+const KNOWN_APPS = [
+  {
+    id: 'word',
+    name: 'Microsoft Word',
+    exeNames: ['WINWORD.EXE'],
+    displayPatterns: [/microsoft\s*(365|office)/i, /\bword\b/i],
+    // וורד מזוהה לפי שם הקובץ (App Paths, קיצור דרך, רישום התקנה) — בלי
+    // התאמת תיקיות, אחרת כל תוכנות Office (אקסל, אאוטלוק...) ייחשבו לוורד.
+    folderPatterns: [],
+    candidates: [
+      (process.env.ProgramFiles || '') + '\\Microsoft Office\\root\\Office16\\WINWORD.EXE',
+      (process.env['ProgramFiles(x86)'] || '') + '\\Microsoft Office\\root\\Office16\\WINWORD.EXE',
+      (process.env.ProgramFiles || '') + '\\Microsoft Office\\root\\Office15\\WINWORD.EXE',
+      (process.env['ProgramFiles(x86)'] || '') + '\\Microsoft Office\\root\\Office15\\WINWORD.EXE',
+      (process.env.ProgramFiles || '') + '\\Microsoft Office\\Office16\\WINWORD.EXE',
+      (process.env['ProgramFiles(x86)'] || '') + '\\Microsoft Office\\Office16\\WINWORD.EXE'
+    ]
+  },
+  {
+    id: 'otzaria',
+    name: 'אוצריא',
+    exeNames: ['otzaria.exe'],
+    displayPatterns: [/otzaria/i, /אוצריא/],
+    folderPatterns: [/otzaria/i, /אוצריא/],
+    candidates: [
+      (process.env.LOCALAPPDATA || '') + '\\Programs\\otzaria\\otzaria.exe',
+      (process.env.LOCALAPPDATA || '') + '\\Programs\\Otzaria\\otzaria.exe',
+      (process.env.ProgramFiles || '') + '\\Otzaria\\otzaria.exe',
+      (process.env['ProgramFiles(x86)'] || '') + '\\Otzaria\\otzaria.exe',
+      'C:\\Otzaria\\otzaria.exe'
+    ]
+  },
+  {
+    id: 'zayit',
+    name: 'זית',
+    exeNames: ['Zayit.exe'],
+    displayPatterns: [/zayit/i, /זית/],
+    folderPatterns: [/zayit/i],
+    candidates: [
+      (process.env.LOCALAPPDATA || '') + '\\Programs\\zayit\\Zayit.exe',
+      (process.env.LOCALAPPDATA || '') + '\\Programs\\Zayit\\Zayit.exe',
+      (process.env.ProgramFiles || '') + '\\Zayit\\Zayit.exe',
+      (process.env['ProgramFiles(x86)'] || '') + '\\Zayit\\Zayit.exe'
+    ]
+  },
+  {
+    id: 'barilan',
+    name: 'שו"ת בר אילן',
+    exeNames: ['Responsea.exe', 'Responsa.exe', 'BarIlan.exe', 'Barilan.exe'],
+    displayPatterns: [/בר[ -]?אילן/u, /responsa/i, /bar[ -]?ilan/i],
+    folderPatterns: [/bar[ -]?ilan/i, /responsa/i, /בר אילן/u],
+    candidates: []
+  },
+  {
+    id: 'otzar',
+    name: 'אוצר החכמה',
+    exeNames: ['Otzar.exe', 'OtzarHC.exe', 'OtzarHaChochma.exe'],
+    displayPatterns: [/אוצר החכמה/u, /otzar/i],
+    folderPatterns: [/otzar/i, /אוצר החכמה/u],
+    candidates: [
+      (process.env.ProgramFiles || '') + '\\Otzar\\Otzar.exe',
+      (process.env['ProgramFiles(x86)'] || '') + '\\Otzar\\Otzar.exe',
+      (process.env.ProgramFiles || '') + '\\Otzar HaChochma\\Otzar.exe',
+      (process.env['ProgramFiles(x86)'] || '') + '\\Otzar HaChochma\\Otzar.exe'
+    ]
+  }
+];
+
+// סריקה גנרית אחת: מחזירה JSON עם כל רשומות App Paths, רשומות ההתקנה
+// וקיצורי הדרך — בלי שום ידע על התוכנות. ההתאמה נעשית ב-JS (KNOWN_APPS).
+const DETECT_PS_SCRIPT =
+  "$ErrorActionPreference='SilentlyContinue'; " +
+  '$out=[ordered]@{appPaths=@();uninstall=@();shortcuts=@()}; ' +
+  "@('HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths','HKCU:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths','HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\App Paths') | ForEach-Object { Get-ChildItem $_ | ForEach-Object { $p=(Get-ItemProperty $_.PSPath).'(default)'; if ($p) { $out.appPaths += [string]$p } } }; " +
+  "@('HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall','HKCU:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall','HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall') | ForEach-Object { Get-ChildItem $_ | ForEach-Object { $k=Get-ItemProperty $_.PSPath; if ($k.DisplayName) { $out.uninstall += [ordered]@{name=[string]$k.DisplayName;location=[string]$k.InstallLocation;icon=[string]$k.DisplayIcon} } } }; " +
+  "$sh=New-Object -ComObject WScript.Shell; " +
+  "@(\"$env:ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\",\"$env:APPDATA\\Microsoft\\Windows\\Start Menu\\Programs\") | ForEach-Object { Get-ChildItem $_ -Recurse -Filter *.lnk | ForEach-Object { try { $t=$sh.CreateShortcut($_.FullName).TargetPath; if ($t) { $out.shortcuts += [string]$t } } catch {} } }; " +
+  'ConvertTo-Json -InputObject $out -Compress -Depth 4';
+
+// איתור התוכנות התורניות המותקנות: מריצה את הסריקה, מתאימה לתוכנות
+// המוכרות (לפי שם קובץ, שם תצוגה, קיצור דרך או נתיב אופייני), מסירה
+// כפילויות ומחזירה רשימה של { id, name, path }.
+function detectKnownApps() {
+  return new Promise((resolve) => {
+    if (!isWin) return resolve([]);
+    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', DETECT_PS_SCRIPT], { windowsHide: true, timeout: 25000 }, (err, stdout) => {
+      let data = null;
+      try { data = JSON.parse(String(stdout || '')); } catch { /* פלט לא תקין */ }
+      const lists = {
+        appPaths: Array.isArray(data && data.appPaths) ? data.appPaths : [],
+        uninstall: Array.isArray(data && data.uninstall) ? data.uninstall : [],
+        shortcuts: Array.isArray(data && data.shortcuts) ? data.shortcuts : []
+      };
+      const norm = (p) => String(p || '').trim().replace(/^"+|"+$/g, '').replace(/,\d+$/, '');
+      const found = [];
+      const seen = new Set();
+      for (const app of KNOWN_APPS) {
+        const paths = new Set();
+        const collect = (p) => {
+          const n = norm(p);
+          if (!n || !/\.exe$/i.test(n) || !fs.existsSync(n)) return;
+          paths.add(n);
+        };
+        // 1) App Paths — לפי שם קובץ ההרצה
+        for (const p of lists.appPaths) {
+          if (app.exeNames.some((n) => n.toLowerCase() === path.basename(String(p)).toLowerCase())) collect(p);
+        }
+        // 2) רשומות התקנה — לפי שם התצוגה; הקובץ במיקום ההתקנה או לפי האייקון
+        for (const u of lists.uninstall) {
+          if (!app.displayPatterns.some((re) => re.test(String(u.name || '')))) continue;
+          const loc = norm(u.location);
+          // מיקום ההתקנה יכול להיות תיקייה או קובץ הרצה — אבל הקובץ חייב
+          // להתאים לשמות של התוכנה (אחרת למשל כל תוכנות Office ייחשבו לוורד)
+          if (loc && /\.exe$/i.test(loc)) {
+            if (app.exeNames.some((n) => n.toLowerCase() === path.basename(loc).toLowerCase())) collect(loc);
+          } else if (loc) {
+            for (const n of app.exeNames) {
+              if (fs.existsSync(path.join(loc, n))) collect(path.join(loc, n));
+            }
+          }
+          const icon = norm(u.icon).split(',')[0];
+          if (icon && /\.exe$/i.test(icon) &&
+              app.exeNames.some((n) => n.toLowerCase() === path.basename(icon).toLowerCase())) collect(icon);
+        }
+        // 3) קיצורי דרך — לפי שם קובץ או לפי תיקיית ההתקנה האופיינית
+        for (const p of lists.shortcuts) {
+          const b = path.basename(String(p)).toLowerCase();
+          if (app.exeNames.some((n) => n.toLowerCase() === b)) collect(p);
+          else if (app.folderPatterns.some((re) => re.test(String(p)))) collect(p);
+        }
+        // 4) נתיבי התקנה אופייניים ידועים
+        for (const c of app.candidates) collect(c);
+        for (const p of paths) {
+          const lp = p.toLowerCase();
+          if (seen.has(lp)) continue;
+          seen.add(lp);
+          found.push({ id: app.id, name: app.name, path: p });
+        }
+      }
+      resolve(found);
     });
   });
 }
@@ -1615,6 +1813,23 @@ function registerIpc() {
       data.runAsAdmin = schedule.runAsAdmin;
     }
     schedule = S.normalizeSchedule(data);
+    // "פתוח עד המעבר הבא" (manualUnlockUntil) שייך ללוח שקבע אותו. אחרי כל
+    // שמירת הגדרות מסנכרנים אותו עם הלוח החדש — רק אם כבר קיימת פתיחה
+    // (הפתיחה נקבעת אך ורק ע"י הזנת סיסמה במסך החסימה, לא אוטומטית):
+    // אם הלוח כבר לא חוסם — מנקים (מניעת "המעבר הבא" פנטום אחרי מחיקת
+    // חלונות); אם הוא חוסם — מעדכנים למעבר הבא האמיתי של הלוח הנוכחי (כך
+    // פתיחה "עד המעבר הבא" לא מחזיקה את המחשב פתוח מעבר לחלון החדש).
+    const now = trustedDate();
+    const raw = S.stateAt(schedule, now);
+    if (raw === 'blocked' || raw === 'netblock') {
+      if (schedule.manualUnlockUntil) {
+        const t = S.nextTransition(schedule, now);
+        if (t.at) schedule.manualUnlockUntil = t.at.getTime();
+        // לוח נעול בלי מעבר מוגדר (למשל "התר" ריק) — שומרים את הערך הקיים
+      }
+    } else if (schedule.manualUnlockUntil) {
+      schedule.manualUnlockUntil = null;
+    }
     const res = saveSettings();
     logEvent('settings');
     enforce();
@@ -1636,21 +1851,11 @@ function registerIpc() {
     return { ok: true };
   });
 
-  // בחירת תוכנת לימוד מהמחשב — בורר קבצים (.exe). מיד בוחרים את הקובץ נבדק:
-  // חותם דיגיטלי (מצב + מוציא לאור), שם מוצר וטביעת SHA-256 — כדי לקבוע את
-  // מצב האימות (publisher לתוכנה חתומה, path+hash לתוכנה לא חתומה).
-  ipcMain.handle('allowed-apps:pick', async () => {
-    if (!isWin) return { ok: false, error: 'זמין רק בווינדוס' };
-    const opts = {
-      title: 'בחירת תוכנת לימוד תורנית',
-      filters: [{ name: 'תוכניות', extensions: ['exe'] }],
-      properties: ['openFile']
-    };
-    const res = (win && !win.isDestroyed())
-      ? await dialog.showOpenDialog(win, opts)
-      : await dialog.showOpenDialog(opts);
-    if (res.canceled || !res.filePaths || !res.filePaths[0]) return { canceled: true };
-    const p = res.filePaths[0];
+  // בדיקת קובץ תוכנה ובניית רשומת האימות — משותפת לבחירה מהמחשב (בורר
+  // הקבצים) ולסריקה האוטומטית (נתיב שנמצא). חותם דיגיטלי (מצב + מוציא לאור),
+  // שם מוצר וטביעת SHA-256 — כדי לקבוע את מצב האימות (publisher לתוכנה
+  // חתומה, path+hash לתוכנה לא חתומה).
+  async function inspectPickPath(p) {
     const name = path.basename(p).replace(/\.exe$/i, '');
     const info = await inspectAppFile(p);
     const publisher = (info && info.status === 'Valid' && cnOf(info.subject)) ? cnOf(info.subject) : '';
@@ -1664,6 +1869,36 @@ function registerIpc() {
       product,
       hash: (info && info.hash) || ''
     };
+  }
+
+  // בחירת תוכנת לימוד מהמחשב — בורר קבצים (.exe). מיד בוחרים את הקובץ נבדק:
+  ipcMain.handle('allowed-apps:pick', async () => {
+    if (!isWin) return { ok: false, error: 'זמין רק בווינדוס' };
+    const opts = {
+      title: 'בחירת תוכנת לימוד תורנית',
+      filters: [{ name: 'תוכניות', extensions: ['exe'] }],
+      properties: ['openFile']
+    };
+    const res = (win && !win.isDestroyed())
+      ? await dialog.showOpenDialog(win, opts)
+      : await dialog.showOpenDialog(opts);
+    if (res.canceled || !res.filePaths || !res.filePaths[0]) return { canceled: true };
+    return await inspectPickPath(res.filePaths[0]);
+  });
+
+  // סריקה אוטומטית — איתור תוכנות תורניות מוכרות המותקנות במחשב
+  ipcMain.handle('allowed-apps:detect', async () => {
+    if (!isWin) return { ok: false, error: 'זמין רק בווינדוס' };
+    const apps = await detectKnownApps();
+    return { ok: true, apps };
+  });
+
+  // בדיקת נתיב שנמצא בסריקה — מחזיר את אותה רשומת אימות כמו הבחירה ידנית
+  ipcMain.handle('allowed-apps:inspect-path', async (_e, p) => {
+    if (!isWin) return { ok: false, error: 'זמין רק בווינדוס' };
+    const pp = String(p || '').trim();
+    if (!pp || !fs.existsSync(pp)) return { ok: false, error: 'הקובץ לא נמצא — בחרו מחדש' };
+    return await inspectPickPath(pp);
   });
 
   // פתיחת תוכנת לימוד מותרת מתוך מסך החסימה: אם היא כבר רצה — החלון שלה
@@ -1702,12 +1937,17 @@ function registerIpc() {
     }
     logEvent('unlock-success');
     manualLock = false; // סיום נעילה ידנית
-    const st = S.getStatus(schedule, trustedDate());
+    const now = trustedDate();
+    const raw = S.stateAt(schedule, now);
     // "פתוח עד המעבר הבא" נשמר רק כשהמצב לפי הלוח הוא חסום (מחשב או
-    // אינטרנט) — אחרת אין צורך.
-    schedule.manualUnlockUntil = isLockedState(st)
-      ? (st.nextAt ? st.nextAt.getTime() : trustedNow() + 3600 * 1000)
-      : null;
+    // אינטרנט) — אחרת אין צורך. בדיקה לפי מצב הלוח הגולמי (ולא לפי הסטטוס
+    // שכבר "פתוח"): פתיחה חוזרת בזמן שפתיחה קיימת לא מבטלת אותה.
+    if (raw === 'blocked' || raw === 'netblock') {
+      const t = S.nextTransition(schedule, now);
+      schedule.manualUnlockUntil = t.at ? t.at.getTime() : (schedule.manualUnlockUntil || trustedNow() + 3600 * 1000);
+    } else {
+      schedule.manualUnlockUntil = null;
+    }
     saveSettings();
     enforce();
     return { ok: true };
@@ -1952,15 +2192,19 @@ const stateDir = () => app.getPath('userData');
 const mainHbFile = () => path.join(stateDir(), 'main.heartbeat');
 const watchHbFile = () => path.join(stateDir(), 'watchdog.heartbeat');
 
-// דגל העצירה נבדק/נכתב בכמה נתיבים, כדי שהמתקין והאפליקציה ימצאו תמיד
-// זה את זה גם כששם המוצר משתנה בין package.json לבין build config:
+// דגלי העצירה וההפעלה מחדש נכתבים/נבדקים בכמה נתיבים, כדי שהמתקין והאפליקציה
+// ימצאו תמיד זה את זה גם כששם המוצר משתנה בין package.json לבין build config,
+// וגם כשסביבת המשתמש של האפליקציה ושל המתקין שונה (למשל הרצה מוגבהת):
 //   1) userData של האפליקציה (הנתיב הקבוע שלה, לפי productName המלא)
 //   2) %APPDATA%\BenHazmanim — נתיב ASCII יציב שה-NSIS כותב אליו.
-// כל הדגלים נכתבים באותם נתיבים (userData + נתיב ASCII יציב ל-NSIS) —
-// הבדל בשם הקובץ בלבד, אז הבנייה מרוכזת בפונקציה אחת.
+//   3) %PROGRAMDATA%\BenHazmanim — נתיב משותף לכל המשתמשים; אותו נתיב שבו
+//      כבר נשמר quit.flag עבור שומר-השער המערכתי. כך גם אם $APPDATA של
+//      המתקין שונה משל האפליקציה (הרמה מוגבהת / סביבות שונות) — דגל ההפעלה
+//      מחדש נמצא ונפתח, וההתקנה לא "משאירה" את התוכנה סגורה.
 const flagPaths = (name) => {
   const paths = [path.join(stateDir(), name)];
   if (isWin && process.env.APPDATA) paths.push(path.join(process.env.APPDATA, 'BenHazmanim', name));
+  if (isWin) paths.push(path.join(machineDir(), name));
   return paths;
 };
 const quitFlagPaths = () => flagPaths('quit.flag');

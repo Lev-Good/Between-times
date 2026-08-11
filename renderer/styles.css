@@ -1240,6 +1240,27 @@ button.type-badge:active { transform: scale(0.97); }
   margin-inline-start: 26px;
 }
 .add-companion .icon { width: 14px; height: 14px; }
+/* סריקת תוכנות תורניות מותקנות */
+.known-apps {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.detect-btn { align-self: flex-start; }
+.detect-btn .icon { width: 15px; height: 15px; }
+.known-apps-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.known-apps-list .allowed-app-row {
+  padding: 10px 12px;
+}
+.known-apps-list .allowed-app-row .btn {
+  flex-shrink: 0;
+  min-width: 70px;
+}
+.known-apps .hint { margin: 0; }
 @media (max-width: 760px) {
   .allowed-apps-add { align-items: stretch; }
 }

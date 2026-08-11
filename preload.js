@@ -30,6 +30,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   importBackup: () => ipcRenderer.invoke('backup:import'),
 
   pickAllowedApp: () => ipcRenderer.invoke('allowed-apps:pick'),
+  detectAllowedApps: () => ipcRenderer.invoke('allowed-apps:detect'),
+  inspectAllowedAppPath: (p) => ipcRenderer.invoke('allowed-apps:inspect-path', p),
   launchAllowedApp: (app) => ipcRenderer.invoke('allowed-apps:launch', app),
 
   quitApp: (pin) => ipcRenderer.invoke('app:quit', pin),
