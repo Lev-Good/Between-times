@@ -11,6 +11,28 @@ const S = require('./scheduler.js');
 
 const isWin = process.platform === 'win32';
 
+/* ================= מגן קריסה =================
+   רשת ביטחון נגד "לולאת אתחול": שגיאה בלתי צפויה (למשל בתוך לולאת האכיפה
+   שרצה כל 5 שניות, או בזמן יצירת חלון) אסור שתפיל את התהליך הראשי — אחרת
+   שומר-השער היה מקפיץ אותו מחדש שוב ושוב, ונראה כאילו התוכנה "קורסת" עם
+   חלון שחור שצץ כל כמה שניות. השגיאה מתועדת והתוכנה ממשיכה לפעול. */
+// בעת בדיקות/טעינה מחדש של המודול לא להוסיף מאזינים כפולים ל-process.
+// הלוג נכתב ישירות כדי שהמטפל לא יהיה תלוי בסדר האתחול של logEvent.
+if (!process.__benHazmanimCrashHandlers) {
+  const writeCrash = (kind, value) => {
+    try {
+      const msg = String((value && value.message) || value);
+      console.error(kind, value && (value.stack || value.message) || value);
+      const file = path.join(app.getPath('userData'), 'activity.log');
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.appendFileSync(file, JSON.stringify({ ts: Date.now(), type: 'crash', details: { msg } }) + '\n', 'utf8');
+    } catch { /* ignore */ }
+  };
+  process.on('uncaughtException', (err) => writeCrash('uncaughtException', err));
+  process.on('unhandledRejection', (reason) => writeCrash('unhandledRejection', reason));
+  process.__benHazmanimCrashHandlers = true;
+}
+
 /* ================= ערכת נושא (בהיר / כהה / מערכת) ================= */
 
 // הערכת הנושא בפועל — 'light' או 'dark' — לפי ההגדרה השמורה והמערכת
@@ -56,7 +78,12 @@ function trustedDate() { return new Date(trustedNow()); }
 // קובץ ההגדרות: כשהתוכנה רצה עם הרשאות מנהל (למשל דרך המשימה המתוזמנת) —
 // ההגדרות נשמרות במיקום משותף לכל המשתמשים (%ProgramData%), כך שכל חשבון
 // במחשב נחסם לפי אותו לוח זמנים. אחרת — בתיקיית הנתונים של המשתמש הנוכחי.
-const machineSettingsFile = () => path.join(process.env.PROGRAMDATA || 'C:\\ProgramData', 'BenHazmanim', 'settings.json');
+const machineDir = () => path.join(process.env.PROGRAMDATA || 'C:\\ProgramData', 'BenHazmanim');
+const machineSettingsFile = () => path.join(machineDir(), 'settings.json');
+// עותק מוגן של קבצי התוכנה — נשמר אצל "כל המשתמשים" כדי שמחיקת תיקיית
+// ההתקנה המקורית (שנמצאת בפרופיל המשתמש וניתנת למחיקה) לא תשבית את האכיפה.
+const protectedAppDir = () => path.join(machineDir(), 'app');
+const protectedSettingsFile = () => path.join(protectedAppDir(), 'settings.backup.json');
 const settingsFile = () => {
   if (!isWin) return path.join(app.getPath('userData'), 'settings.json');
   // כשקיים קובץ משותף (נוצר ע"י הרצה מוגבהת) — תמיד לקרוא ממנו, כדי שכל
@@ -176,7 +203,9 @@ function encryptPassword(pw) {
       return 'enc:' + safeStorage.encryptString(String(pw)).toString('base64');
     }
   } catch { /* ignore */ }
-  return 'plain:' + String(pw);
+  // אין fallback לטקסט גלוי: אם DPAPI אינה זמינה, שחזור למייל יישאר
+  // מושבת עד שהאפליקציה תרוץ בסביבה נתמכת.
+  return null;
 }
 function decryptPassword(store) {
   if (!store) return '';
@@ -194,19 +223,37 @@ function loadSettings() {
     schedule = S.normalizeSchedule(JSON.parse(raw));
   } catch {
     schedule = S.defaultSchedule();
-    // הגירה מקובץ המשתמש הישן לקובץ המשותף (כשהתוכנה רצה מוגבהת)
+    // קודם לשחזר גיבוי מוגן של ההגדרות, אם קיים. אחרת לבצע הגירה
+    // מקובץ המשתמש הישן. כך מחיקת settings.json אינה מאפסת את הלוח
+    // לפני שהשומר המערכתי מספיק לפעול.
     if (isWin && isElevated()) {
       try {
-        const old = fs.readFileSync(path.join(app.getPath('userData'), 'settings.json'), 'utf8');
-        schedule = S.normalizeSchedule(JSON.parse(old));
+        const backup = fs.readFileSync(protectedSettingsFile(), 'utf8');
+        schedule = S.normalizeSchedule(JSON.parse(backup));
         saveSettings();
-      } catch { /* אין קובץ ישן — מתחילים בהגדרות ברירת מחדל */ }
+      } catch {
+        try {
+          const old = fs.readFileSync(path.join(app.getPath('userData'), 'settings.json'), 'utf8');
+          schedule = S.normalizeSchedule(JSON.parse(old));
+          saveSettings();
+        } catch { /* אין קובץ ישן — מתחילים בהגדרות ברירת מחדל */ }
+      }
     }
   }
   // ההפעלה עם Windows תמיד פעילה (ללא אפשרות לכיבוי), והרצה עם הרשאות
   // מנהל הוסרה מהממשק — כך שגם הגדרות ישנות לא יגרמו להרמה מוגבהת.
   schedule.startWithWindows = true;
   schedule.runAsAdmin = false;
+  // בהרצה מוגבהת חייב להיווצר קובץ משותף גם בהתקנה חדשה עם לוח ריק;
+  // השומר המערכתי משתמש בקיומו כסמן שהתוכנה הותקנה ולא כסמן שניתן למחוקו.
+  if (isWin && isElevated() && !fs.existsSync(machineSettingsFile())) saveSettings();
+}
+
+function writeProtectedSettingsBackup() {
+  if (!isWin || !isElevated() || !fs.existsSync(protectedAppDir())) return;
+  try {
+    fs.copyFileSync(machineSettingsFile(), protectedSettingsFile());
+  } catch { /* העותק המוגן עדיין לא נוצר או אינו נגיש */ }
 }
 
 function saveSettings() {
@@ -216,6 +263,7 @@ function saveSettings() {
   };
   try {
     write(settingsFile());
+    writeProtectedSettingsBackup();
     return { ok: true, warning: null };
   } catch (err) {
     // אין הרשאת כתיבה לקובץ המשותף (הרצה לא-מוגבהת) — נופלים לקובץ המשתמש
@@ -689,6 +737,8 @@ const RUN_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run';
 const RUN_KEY_MACHINE = 'HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Run'; // לכל המשתמשים
 const RUN_NAME = 'BenHazmanim';
 const TASK_NAME = 'BenHazmanim';
+// משימה של שומר-השער המערכתי — רצה כ-SYSTEM מתוך העותק המוגן.
+const GUARD_TASK_NAME = 'BenHazmanimGuard';
 
 function startupValue() {
   const exe = process.execPath;
@@ -717,7 +767,7 @@ function setTask(enabled, highest) {
     if (!isWin) return resolve({ ok: false, error: 'זמין רק בווינדוס' });
     if (enabled) {
       execFile('schtasks',
-        ['/Create', '/TN', TASK_NAME, '/TR', startupValue(), '/SC', 'ONLOGON', '/RL', highest ? 'HIGHEST' : 'LIMITED', '/F'],
+        ['/Create', '/TN', TASK_NAME, '/TR', taskCommand(), '/SC', 'ONLOGON', '/RL', highest ? 'HIGHEST' : 'LIMITED', '/F'],
         (err) => resolve(err ? { ok: false, error: err.message } : { ok: true }));
     } else {
       execFile('schtasks', ['/Delete', '/TN', TASK_NAME, '/F'], () => resolve({ ok: true }));
@@ -729,11 +779,156 @@ function setTask(enabled, highest) {
 // שנוצר במחשב יריץ את התוכנה בכניסה וייחסם לפי אותו לוח זמנים.
 function setRegistryMachine() {
   return new Promise((resolve) => {
-    if (!isWin || !isElevated()) return resolve({ ok: false, error: 'נדרשות הרשאות מנהל' });
+    if (!isWin || !isElevated()) return resolve({ ok: false, error: 'נדרשת הרשאת מנהל' });
     execFile('reg', ['add', RUN_KEY_MACHINE, '/v', RUN_NAME, '/t', 'REG_SZ', '/d', startupValue(), '/f'], (err) => {
       resolve(err ? { ok: false, error: err.message } : { ok: true });
     });
   });
+}
+
+/* ================= עותק מוגן (הגנה מפני מחיקת קבצי התוכנה) =================
+   תיקיית ההתקנה המקורית נמצאת בפרופיל המשתמש (%LOCALAPPDATA%) — כך שמשתמש
+   רגיל יכול למחוק אותה (למשל דרך Safe Mode). לכן, בהרצה עם הרשאות מנהל,
+   התוכנה יוצרת עותק מלא של עצמה ב-%ProgramData%\BenHazmanim\app — מקום
+   שמשתמש רגיל אינו יכול למחוק או לשנות (הרשאות NTFS נאכפות גם ב-Safe Mode).
+   המשימה המתוזמנת (מנגנון ההפעלה המחייב) מצביעה על העותק המוגן, כך שגם אם
+   מוחקים את תיקיית ההתקנה המקורית — האכיפה ממשיכה לעבוד בכניסה הבאה. */
+
+// פקודת ההפעלה של המשימה המתוזמנת: העותק המוגן אם קיים, אחרת ההתקנה המקורית.
+// (מקש ה-Run של המשתמש נשאר על ההתקנה המקורית — הוא נוחות בלבד; האכיפה
+// המחייבת היא המשימה, והיא תמיד מצביעה על מקום שלא ניתן למחוק.)
+function launchAppPath(dir) {
+  const asar = path.join(dir, 'resources', 'app.asar');
+  if (fs.existsSync(asar)) return asar;
+  const unpacked = path.join(dir, 'resources', 'app');
+  if (fs.existsSync(unpacked)) return unpacked;
+  return dir;
+}
+function taskCommand() {
+  const exe = path.join(protectedAppDir(), path.basename(process.execPath));
+  if (isWin && fs.existsSync(exe)) return `"${exe}" "${launchAppPath(protectedAppDir())}"`;
+  return startupValue();
+}
+
+// בגרסה ארוזה של Electron app.getAppPath() נמצא בתוך resources\\app.asar,
+// אבל קובץ ההרצה נמצא בתיקיית האב של resources. העותק המוגן חייב לכלול את
+// שני הדברים, אחרת מתקבלת תיקייה עם JavaScript בלבד ומשימה שאי אפשר להפעיל.
+function installSourceDir() {
+  const appPath = app.getAppPath();
+  const execName = path.basename(process.execPath);
+  if (fs.existsSync(path.join(appPath, execName))) return appPath; // סביבת בדיקה/פריסה לא-ארוזה
+  const parent = path.dirname(appPath);
+  if (path.basename(parent).toLowerCase() === 'resources') return path.dirname(parent);
+  return appPath;
+}
+function packageJsonPath(dir) {
+  const candidates = [
+    path.join(dir, 'package.json'),
+    path.join(dir, 'resources', 'app.asar', 'package.json'),
+    path.join(dir, 'resources', 'app', 'package.json')
+  ];
+  return candidates.find((p) => fs.existsSync(p)) || candidates[0];
+}
+function sourceExecutable(dir) {
+  return path.join(dir, path.basename(process.execPath));
+}
+function isProtectedRuntime() {
+  try { return path.resolve(installSourceDir()) === path.resolve(protectedAppDir()); } catch { return false; }
+}
+function appVersion() {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(app.getAppPath(), 'package.json'), 'utf8')).version || '';
+  } catch { return ''; }
+}
+function protectedVersion() {
+  try {
+    return JSON.parse(fs.readFileSync(packageJsonPath(protectedAppDir()), 'utf8')).version || '';
+  } catch { return ''; }
+}
+
+// הרשאות העותק המוגן: בעלות של Administrators, קריאה/הרצה בלבד למשתמשים
+// רגילים (ללא מחיקה וללא כתיבה). משתמשים ב-ALLOW בלבד (ולא DENY) כדי
+// שהמתקין המוגבה יוכל להחליף קבצים בעדכון, והבעלות מועברת למנהלים כדי
+// שמשתמש רגיל לא יוכל להחזיר לעצמו שליטה על התיקייה.
+function runAclCommand(cmd, args) {
+  return new Promise((resolve) => {
+    try { execFile(cmd, args, () => resolve()); } catch { resolve(); }
+  });
+}
+async function hardenMachineDir() {
+  if (!isWin || !isElevated()) return;
+  const dir = machineDir();
+  const steps = [
+    ['takeown', ['/f', dir, '/a']],
+    ['icacls', [dir, '/inheritance:r', '/grant:r', '*S-1-5-32-545:(OI)(CI)RX', '/grant:r', '*S-1-5-32-544:(OI)(CI)F', '/grant:r', '*S-1-5-18:(OI)(CI)F', '/T', '/C']]
+  ];
+  for (const [cmd, args] of steps) await runAclCommand(cmd, args);
+}
+
+async function hardenProtectedCopy() {
+  if (!isWin || !isElevated()) return;
+  const dir = protectedAppDir();
+  const steps = [
+    ['takeown', ['/f', dir, '/a', '/r', '/d', 'y']],
+    ['icacls', [dir, '/inheritance:r', '/grant:r', '*S-1-5-32-545:(OI)(CI)RX', '/grant:r', '*S-1-5-32-544:(OI)(CI)F', '/grant:r', '*S-1-5-18:(OI)(CI)F', '/T', '/C']]
+  ];
+  for (const [cmd, args] of steps) await runAclCommand(cmd, args);
+}
+
+// יצירה/רענון של העותק המוגן — רק בהרצה מוגבהת ורק כשהגרסה השתנתה.
+async function ensureProtectedCopy() {
+  if (!isWin || !isElevated()) return false;
+  const dst = protectedAppDir();
+  const src = installSourceDir();
+  try {
+    // כשהמשימה כבר מריצה את העותק המוגן — אסור להעתיק אותו לעצמו או
+    // לדרוס את install.json עם הנתיב המוגן במקום הנתיב המקורי.
+    if (isProtectedRuntime()) return fs.existsSync(sourceExecutable(dst));
+    if (!fs.existsSync(sourceExecutable(src))) return false;
+    if (fs.existsSync(sourceExecutable(dst)) && appVersion() && appVersion() === protectedVersion()) {
+      await hardenMachineDir();
+      await hardenProtectedCopy();
+      writeProtectedSettingsBackup();
+      saveInstallInfo();
+      return true; // העותק עדכני — אין צורך להעתיק שוב
+    }
+    fs.rmSync(dst, { recursive: true, force: true });
+    fs.mkdirSync(dst, { recursive: true });
+    // מעתיקים את כל שורש ההתקנה, כולל exe + resources\\app.asar.
+    fs.cpSync(src, dst, { recursive: true });
+    if (!fs.existsSync(sourceExecutable(dst))) throw new Error('קובץ ההרצה לא הועתק');
+    await hardenMachineDir();
+    await hardenProtectedCopy();
+    writeProtectedSettingsBackup();
+    saveInstallInfo();
+    return true;
+  } catch (err) {
+    console.error('יצירת העותק המוגן נכשלה', err);
+    return false;
+  }
+}
+
+// מיקום תיקיית ההתקנה המקורית נשמר בקובץ קטן אצל "כל המשתמשים" — כך
+// ששומר-השער המערכתי יודע לאן לשחזר קבצים שנמחקו, גם כשהוא רץ כ-SYSTEM.
+function saveInstallInfo() {
+  try {
+    // תהליך שהופעל מהעותק המוגן חייב לשמור על נתיב ההתקנה המקורי.
+    if (isProtectedRuntime()) {
+      const existing = installInfo();
+      if (existing && existing.dir && path.resolve(existing.dir) !== path.resolve(protectedAppDir())) return;
+      return;
+    }
+    const dir = installSourceDir();
+    fs.mkdirSync(machineDir(), { recursive: true });
+    fs.writeFileSync(
+      path.join(machineDir(), 'install.json'),
+      JSON.stringify({ exe: sourceExecutable(dir), dir }),
+      'utf8'
+    );
+  } catch { /* ignore */ }
+}
+function installInfo() {
+  try { return JSON.parse(fs.readFileSync(path.join(machineDir(), 'install.json'), 'utf8')); } catch { return null; }
 }
 
 async function setStartup(enabled) {
@@ -753,9 +948,23 @@ function taskExists() {
   });
 }
 
+const taskXmlFile = () => path.join(machineDir(), 'main-task.xml');
+function snapshotMainTask() {
+  if (!isWin || !isElevated()) return;
+  execFile('schtasks', ['/Query', '/TN', TASK_NAME, '/XML'], (err, stdout) => {
+    if (err || !stdout) return;
+    try {
+      fs.mkdirSync(machineDir(), { recursive: true });
+      fs.writeFileSync(taskXmlFile(), String(stdout), 'utf8');
+    } catch { /* ignore */ }
+  });
+}
+
 async function syncStartup() {
   // ההפעלה עם Windows תמיד פעילה: Registry (למשתמש הנוכחי) + משימה מתוזמנת
   // בעלת הרשאות גבוהות כדי שהתוכנה תעלה מוקדם בכניסה, + רישום לכל המשתמשים.
+  // בהרצה מוגבהת — גם יצירת/רענון העותק המוגן, שהמשימה מצביעה עליו.
+  await ensureProtectedCopy();
   const a = await setRegistry(true);
   if (!a.ok) return { ok: false, error: a.error };
   const warnings = [];
@@ -768,10 +977,18 @@ async function syncStartup() {
     if (!exists) b = await setTask(true, false);
   }
   if (!b.ok) warnings.push(b.error || 'המשימה המתוזמנת נכשלה (ה-Registry פעיל)');
+  if (isElevated()) snapshotMainTask();
   // רישום לכל המשתמשים — כך שכל חשבון במחשב מוגן
   if (isElevated()) {
     const m = await setRegistryMachine();
     if (!m.ok) warnings.push('רישום לכל המשתמשים נכשל: ' + m.error);
+  }
+  // שומר-שער מערכתי — משימה בעת אתחול (כ-SYSTEM, מתוך העותק המוגן).
+  // הקפצה מיידית שלו אחרי עדכון/התקנה, כדי שיחזור לפעול מיד ולא רק באתחול.
+  if (isElevated() && fs.existsSync(sourceExecutable(protectedAppDir()))) {
+    const g = await setGuardTask(true);
+    if (!g.ok) warnings.push('משימת שומר-השער המערכתי נכשלה: ' + g.error);
+    else execFile('schtasks', ['/Run', '/TN', GUARD_TASK_NAME], () => { /* ignore */ });
   }
   return { ok: true, warning: warnings.length ? warnings.join(' | ') : null };
 }
@@ -812,11 +1029,13 @@ function removeStartupEntries() {
     if (!isWin) return resolve();
     execFile('reg', ['delete', RUN_KEY, '/v', RUN_NAME, '/f'], () => {
       execFile('schtasks', ['/Delete', '/TN', TASK_NAME, '/F'], () => {
-        if (!isElevated()) return resolve();
-        // רישומים ברמת כל המשתמשים — זמינים רק עם הרשאות מנהל
-        execFile('reg', ['delete', RUN_KEY_MACHINE, '/v', RUN_NAME, '/f'], () => {
-          // ביטול מדיניות ההסתרה של דף "חשבונות" (הוגדרה בעת ההתקנה)
-          execFile('reg', ['delete', 'HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\Explorer', '/v', 'SettingsPageVisibility', '/f'], resolve);
+        execFile('schtasks', ['/Delete', '/TN', GUARD_TASK_NAME, '/F'], () => {
+          if (!isElevated()) return resolve();
+          // רישומים ברמת כל המשתמשים — זמינים רק עם הרשאות מנהל
+          execFile('reg', ['delete', RUN_KEY_MACHINE, '/v', RUN_NAME, '/f'], () => {
+            // ביטול מדיניות ההסתרה של דף "חשבונות" (הוגדרה בעת ההתקנה)
+            execFile('reg', ['delete', 'HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\Explorer', '/v', 'SettingsPageVisibility', '/f'], resolve);
+          });
         });
       });
     });
@@ -874,7 +1093,7 @@ async function sendRecovery() {
   const email = schedule.recoveryEmail;
   if (!email) return { ok: false, error: 'לא הוגדר מייל שחזור בהגדרות' };
   if (!RECOVERY_SECRET) return { ok: false, error: 'המפתח הסודי לא הוגדר בתוכנה (RECOVERY_SECRET ב-main.js)' };
-  const password = decryptPassword(schedule.passwordEnc) || schedule.passwordPlain;
+  const password = decryptPassword(schedule.passwordEnc);
   if (!password) return { ok: false, error: 'לא הוגדרה סיסמה' };
   try {
     const res = await fetch(RECOVERY_URL, {
@@ -1109,15 +1328,23 @@ function registerIpc() {
   ipcMain.handle('settings:get', () => {
     // passwordPlain/passwordEnc לא מועברים לממשק — נדרשים רק בתהליך הראשי לשחזור
     const safe = { ...schedule };
+    delete safe.pinHash;
     delete safe.passwordPlain;
     delete safe.passwordEnc;
-    return { ...safe, sessionUnlocked: schedule.pinHash ? sessionUnlocked : true };
+    return {
+      ...safe,
+      pinSet: !!schedule.pinHash,
+      sessionUnlocked: schedule.pinHash ? sessionUnlocked : true
+    };
   });
 
   ipcMain.handle('settings:save', (_e, data) => {
     // אימות סיסמה בצד השרת — לא להסתמך על אימות קליינט בלבד
     if (schedule.pinHash && !sessionUnlocked) {
       return { ok: false, error: 'נדרשת סיסמה כדי לשנות הגדרות' };
+    }
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+      return { ok: false, error: 'מבנה הגדרות לא תקין' };
     }
     // סיסמה, סוד שחזור, פתיחה ידנית והרצה כמנהל לא ניתנים לשינוי דרך שמירה רגילה
     if (data && typeof data === 'object') {
@@ -1245,7 +1472,10 @@ function registerIpc() {
 
   ipcMain.handle('update:check', () => checkForUpdate());
 
-  ipcMain.handle('update:download', () => downloadAndInstallUpdate());
+  ipcMain.handle('update:download', () => {
+    if (schedule.pinHash && !sessionUnlocked) return Promise.resolve({ ok: false, error: 'נדרשת סיסמה כדי להתקין עדכון' });
+    return downloadAndInstallUpdate();
+  });
 
   ipcMain.handle('shell:open', (_e, url) => {
     if (typeof url === 'string' && /^https?:\/\//.test(url)) shell.openExternal(url);
@@ -1274,6 +1504,16 @@ function registerIpc() {
     if (!uninstaller) {
       return { ok: false, error: 'לא נמצא מתקין ההסרה — הסירו את התוכנה דרך "התקן והסר תוכניות" בלוח הבקרה' };
     }
+    // דגל עצירה לשומר-השער המערכתי (רץ כ-SYSTEM) — כדי שלא ישחזר
+    // קבצים ומשימות בזמן שה-Uninstaller מסיר אותם. נכתב במיקום המשותף
+    // שהוא בודק, לפני שמתחילה ההסרה בפועל.
+    try {
+      fs.mkdirSync(machineDir(), { recursive: true });
+      fs.writeFileSync(machineQuitFlag(), String(Date.now()));
+    } catch { /* ignore */ }
+    // לעצור את תהליך השומר בפועל לפני מחיקת התיקייה המוגנת. מחיקת המשימה
+    // בלבד אינה מבטיחה שתהליך שכבר רץ יסתיים.
+    await stopGuardTask();
     // 1) הסרת רישומי ההפעלה עם Windows (Registry + משימה מתוזמנת) —
     //    לפני הפעלת ה-Uninstaller, כדי שלא יישארו רישומים לאחר ההסרה.
     await removeStartupEntries();
@@ -1329,17 +1569,27 @@ function registerIpc() {
   // דשבורד: יומן פעילות + מצב ההגנה + גיבוי ושחזור
   ipcMain.handle('activity:get', (_e, limit) => readActivity(Number(limit) || 1500));
 
-  ipcMain.handle('security:get', () => ({
-    pin: !!schedule.pinHash,
-    enabled: schedule.enabled !== false,
-    elevated: isElevated(),
-    shared: isWin && fs.existsSync(machineSettingsFile()),
-    recovery: !!schedule.recoveryEmail,
-    netElevated: isElevated(),
-    netActive: netBlockApplied
-  }));
+  ipcMain.handle('security:get', () => {
+    let protectedCopy = false;
+    try {
+      const exe = sourceExecutable(protectedAppDir());
+      protectedCopy = isWin && fs.existsSync(exe) && appVersion() && appVersion() === protectedVersion();
+    } catch { /* ignore */ }
+    return {
+      pin: !!schedule.pinHash,
+      enabled: schedule.enabled !== false,
+      elevated: isElevated(),
+      shared: isWin && fs.existsSync(machineSettingsFile()),
+      recovery: !!schedule.recoveryEmail,
+      netElevated: isElevated(),
+      netActive: netBlockApplied,
+      protectedCopy,
+      lastTamper: lastTamper()
+    };
+  });
 
   ipcMain.handle('backup:export', async () => {
+    if (schedule.pinHash && !sessionUnlocked) return { ok: false, error: 'נדרשת סיסמה כדי לייצא גיבוי' };
     const parent = win && !win.isDestroyed() ? win : undefined;
     try {
       const res = await dialog.showSaveDialog(parent, {
@@ -1361,6 +1611,7 @@ function registerIpc() {
   });
 
   ipcMain.handle('backup:import', async () => {
+    if (schedule.pinHash && !sessionUnlocked) return { ok: false, error: 'נדרשת סיסמה כדי לייבא גיבוי' };
     const parent = win && !win.isDestroyed() ? win : undefined;
     try {
       const res = await dialog.showOpenDialog(parent, {
@@ -1402,6 +1653,7 @@ function registerIpc() {
    סגירה לגיטימית (תפריט "יציאה") כותבת דגל עצירה כך שהשומר לא מקפיץ. */
 
 const isWatchdog = process.argv.includes('--watchdog');
+const isSystemWatchdog = process.argv.includes('--watchdog-system');
 const stateDir = () => app.getPath('userData');
 const mainHbFile = () => path.join(stateDir(), 'main.heartbeat');
 const watchHbFile = () => path.join(stateDir(), 'watchdog.heartbeat');
@@ -1431,6 +1683,9 @@ function clearQuitFlags() {
   for (const p of quitFlagPaths()) {
     try { fs.unlinkSync(p); } catch { /* ignore */ }
   }
+  // דגל עצירה של השומר-השער המערכתי (במיקום המשותף) — מתנקה באתחול חדש,
+  // כדי שהשומר לא ייצא על דגל ישן מתקינה/עדכון קודמים.
+  try { fs.unlinkSync(machineQuitFlag()); } catch { /* ignore */ }
 }
 
 // דגל "הפעל מחדש אחרי התקנה": האפליקציה כותבת אותו (באותם נתיבים כמו דגל
@@ -1541,6 +1796,165 @@ function superviseWatchdog() {
   check();
 }
 
+/* ================= שומר-שער מערכתי (הגנה מפני משתמש עם הרשאות מנהל) =================
+   למנהל מערכת יש תמיד את היכולת לקחת בעלות על קבצים ולמחוק אותם — לכן
+   אי אפשר למנוע ממנו מחיקה, אבל אפשר להפוך אותה לחסרת תועלת:
+   - המשימה BenHazmanimGuard מריצה את התוכנה כ-SYSTEM (חשבון מערכת) מתוך
+     העותק המוגן כבר באתחול המחשב. כל עוד התהליך רץ, קבצי הליבה של העותק
+     המוגן נעולים בידי Windows ואי אפשר למחוק אותם — אפילו כמנהל.
+   - השומר המערכתי בודק כל כמה שניות את תקינות הקבצים והמשימות:
+     אם תיקיית ההתקנה או העותק המוגן נמחקו/ניזוקו — משחזר אותם מהעותק השני.
+     אם המשימות המתוזמנות נמחקו — יוצר אותן מחדש.
+   - השומר יוצא רק כשיש דגל עצירה (הסרה לגיטימית עם סיסמת הורה) או כשקובץ
+     ההגדרות המשותף נמחק (הסרה) — כדי שלא ישחזר קבצים בזמן ה-Uninstaller. */
+
+const guardHbFile = () => path.join(machineDir(), 'guard.heartbeat');
+const machineQuitFlag = () => path.join(machineDir(), 'quit.flag');
+function guardShouldExit() {
+  // עצירה לגיטימית מסומנת במפורש על ידי המתקין/מסלול ההסרה. מחיקת
+  // settings.json לבדה אינה סיבה לצאת — אחרת מנהל יכול למחוק רק את הקובץ
+  // ולעצור את כל מנגנון השחזור.
+  if (fs.existsSync(machineQuitFlag())) return true;
+  // אם תיקיית הנתונים עצמה הוסרה (למשל בסיום הסרה), אין מה לשחזר ממנה.
+  if (!fs.existsSync(machineDir())) return true;
+  return false;
+}
+
+// השומר המערכתי רץ מתוך העותק המוגן, ולכן process.execPath שלו הוא העותק המוגן.
+function guardTaskCommand() {
+  const exe = sourceExecutable(protectedAppDir());
+  return `"${exe}" "${launchAppPath(protectedAppDir())}" --watchdog-system`;
+}
+
+function stopGuardTask() {
+  return new Promise((resolve) => {
+    if (!isWin) return resolve();
+    execFile('schtasks', ['/End', '/TN', GUARD_TASK_NAME], () => resolve());
+  });
+}
+
+function setGuardTask(enabled) {
+  return new Promise((resolve) => {
+    if (!isWin || !isElevated()) return resolve({ ok: false, error: 'נדרשת הרשאת מנהל' });
+    if (enabled) {
+      // ONSTART + /RU SYSTEM: רץ כ-SYSTEM כבר באתחול המחשב, לפני כל כניסה.
+      execFile('schtasks',
+        ['/Create', '/TN', GUARD_TASK_NAME, '/TR', guardTaskCommand(), '/SC', 'ONSTART', '/RU', 'SYSTEM', '/RL', 'HIGHEST', '/F'],
+        (err) => resolve(err ? { ok: false, error: err.message } : { ok: true }));
+    } else {
+      execFile('schtasks', ['/Delete', '/TN', GUARD_TASK_NAME, '/F'], () => resolve({ ok: true }));
+    }
+  });
+}
+
+// רישום אירועי חבלה ליומן משותף — כדי שההורה יוכל לראות שניסו למחוק קבצים
+function logTamper(kind) {
+  try {
+    fs.mkdirSync(machineDir(), { recursive: true });
+    fs.appendFileSync(path.join(machineDir(), 'tamper.log'), JSON.stringify({ ts: Date.now(), kind }) + '\n', 'utf8');
+  } catch { /* ignore */ }
+}
+function lastTamper() {
+  try {
+    const lines = fs.readFileSync(path.join(machineDir(), 'tamper.log'), 'utf8').split('\n').filter(Boolean);
+    const last = lines[lines.length - 1];
+    if (!last) return null;
+    const e = JSON.parse(last);
+    return { ts: e.ts, kind: e.kind };
+  } catch { return null; }
+}
+
+function restoreSharedSettings() {
+  if (fs.existsSync(machineSettingsFile()) || !fs.existsSync(protectedSettingsFile())) return;
+  try {
+    fs.copyFileSync(protectedSettingsFile(), machineSettingsFile());
+    logTamper('settings-restored');
+  } catch { /* ignore */ }
+}
+
+async function restoreProtectedCopy() {
+  // העותק המוגן נמחק/ניזוק — לשחזר מתיקיית ההתקנה המקורית (אם היא שלמה)
+  const info = installInfo();
+  const dst = protectedAppDir();
+  if (!info || !info.dir) return;
+  const srcOk = fs.existsSync(sourceExecutable(info.dir)) && fs.existsSync(packageJsonPath(info.dir));
+  const dstOk = fs.existsSync(sourceExecutable(dst)) && fs.existsSync(packageJsonPath(dst));
+  if (srcOk && !dstOk) {
+    logTamper('protected-copy-restored');
+    try {
+      fs.rmSync(dst, { recursive: true, force: true });
+      fs.mkdirSync(dst, { recursive: true });
+      fs.cpSync(info.dir, dst, { recursive: true });
+      try { fs.copyFileSync(machineSettingsFile(), protectedSettingsFile()); } catch { /* ignore */ }
+      await hardenProtectedCopy();
+    } catch { /* ignore */ }
+  }
+}
+
+function restoreInstallDir() {
+  // תיקיית ההתקנה המקורית נמחקה — לשחזר מהעותק המוגן
+  const info = installInfo();
+  if (!info || !info.dir) return;
+  const srcOk = fs.existsSync(sourceExecutable(protectedAppDir())) && fs.existsSync(packageJsonPath(protectedAppDir()));
+  const dstOk = fs.existsSync(sourceExecutable(info.dir)) && fs.existsSync(packageJsonPath(info.dir));
+  if (srcOk && !dstOk) {
+    logTamper('install-dir-restored');
+    try {
+      fs.rmSync(info.dir, { recursive: true, force: true });
+      fs.mkdirSync(info.dir, { recursive: true });
+      fs.cpSync(protectedAppDir(), info.dir, { recursive: true });
+    } catch { /* ignore */ }
+  }
+}
+
+function ensureGuardTasks() {
+  // המשימות נמחקו — לשחזר את המשימה הראשית מה-XML שנשמר בעת ההתקנה.
+  // חשוב: יצירה מחדש מתוך SYSTEM ללא ה-XML המקורי הייתה יוצרת משימה
+  // שרצה כ-SYSTEM ללא ממשק משתמש. אם אין תבנית, משאירים את HKLM Run
+  // כמנגנון גיבוי ומדווחים במקום ליצור משימה לא-שמישה.
+  execFile('schtasks', ['/Query', '/TN', TASK_NAME], (err) => {
+    if (!err) return;
+    try {
+      if (!fs.existsSync(taskXmlFile())) {
+        logTamper('main-task-missing-no-template');
+        return;
+      }
+      execFile('schtasks',
+        ['/Create', '/TN', TASK_NAME, '/XML', taskXmlFile(), '/F'],
+        () => { /* ignore */ });
+    } catch { logTamper('main-task-restore-failed'); }
+  });
+  execFile('schtasks', ['/Query', '/TN', GUARD_TASK_NAME], (err) => {
+    if (err) {
+      execFile('schtasks',
+        ['/Create', '/TN', GUARD_TASK_NAME, '/TR', guardTaskCommand(), '/SC', 'ONSTART', '/RU', 'SYSTEM', '/RL', 'HIGHEST', '/F'],
+        () => { /* ignore */ });
+    }
+  });
+}
+
+async function runSystemWatchdog() {
+  // שומר-שער מערכתי: ללא חלונות וללא מגש — רק שחזור קבצים ומשימות
+  writeHeartbeat(guardHbFile());
+  let checking = false;
+  const check = async () => {
+    if (checking) return;
+    checking = true;
+    try {
+      if (guardShouldExit()) { app.exit(0); return; }
+      writeHeartbeat(guardHbFile());
+      restoreSharedSettings();
+      await restoreProtectedCopy();
+      restoreInstallDir();
+      ensureGuardTasks();
+    } finally {
+      checking = false;
+    }
+  };
+  setInterval(() => { check().catch(() => {}); }, 10000);
+  await check();
+}
+
 function gracefulQuit() {
   isQuitting = true;
   logEvent('app-quit');
@@ -1557,7 +1971,12 @@ function gracefulQuit() {
 
 /* ================= אתחול ================= */
 
-if (isWatchdog) {
+if (isSystemWatchdog) {
+  // מצב שומר-שער מערכתי (SYSTEM) — אינו נועל את ה-instance ואינו יוצר
+  // חלונות: רק משחזר את קבצי התוכנה והמשימות המתוזמנות שנמחקו.
+  app.whenReady().then(() => runSystemWatchdog());
+  app.on('window-all-closed', () => { /* נשאר פעיל */ });
+} else if (isWatchdog) {
   // מצב שומר-שער — אינו נועל את ה-instance ואינו יוצר חלונות
   app.whenReady().then(() => { runWatchdog(); });
   app.on('window-all-closed', () => { /* נשאר פעיל */ });

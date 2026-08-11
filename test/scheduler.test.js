@@ -325,6 +325,31 @@ test('nextTransition accounts for override days', () => {
   assert.equal(st2.nextAt.getHours(), 8);
 });
 
+test('nextTransition finds a weekly window more than three days away', () => {
+  const s = S.defaultSchedule();
+  // עכשיו יום ראשון; החלון הבא ביום חמישי — מעבר שאופק של 3 ימים מפספס.
+  s.week[4].slots.push({ start: S.parseHM('08:00'), end: S.parseHM('10:00'), type: 'blocked' });
+  const st = S.getStatus(s, new Date(2026, 0, 4, 12, 0));
+  assert.equal(st.next, 'blocked');
+  assert.equal(st.nextAt.getDay(), 4);
+  assert.equal(st.nextAt.getHours(), 8);
+});
+
+test('nextTransition finds a distant one-off override', () => {
+  const s = S.defaultSchedule();
+  s.mode = 'allowlist';
+  s.overrides = [{ date: '2026-01-20', type: 'allow' }];
+  const st = S.getStatus(s, new Date(2026, 0, 4, 12, 0));
+  assert.equal(st.next, 'allowed');
+  assert.equal(st.nextAt.getDate(), 20);
+  assert.equal(st.nextAt.getHours(), 0);
+});
+
+test('normalizeSchedule drops impossible calendar dates in overrides', () => {
+  const s = S.normalizeSchedule({ overrides: [{ date: '2026-02-30', type: 'block' }] });
+  assert.equal(s.overrides.length, 0);
+});
+
 test('warning: fires within warnMinutes before an upcoming block', () => {
   const s = S.defaultSchedule();
   s.warnMinutes = 5;

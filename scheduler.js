@@ -84,7 +84,8 @@
       overrides: normalizeOverrides(s.overrides),
       startWithWindows: s.startWithWindows !== false, // ברירת מחדל: פעיל (אפליקציית הורים)
       runAsAdmin: s.runAsAdmin === true,
-      manualUnlockUntil: s.manualUnlockUntil || null,
+      manualUnlockUntil: s.manualUnlockUntil !== null && s.manualUnlockUntil !== undefined && s.manualUnlockUntil !== '' && Number.isFinite(Number(s.manualUnlockUntil))
+        ? Number(s.manualUnlockUntil) : null,
       recoveryEmail: String(s.recoveryEmail || '').trim(),
       recoverySecret: String(s.recoverySecret || '').trim(),
       updateUrl: String(s.updateUrl || '').trim(),
@@ -117,6 +118,9 @@
       if (!o || typeof o !== 'object') return;
       const date = String(o.date || '');
       if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return;
+      const [y, m, d] = date.split('-').map(Number);
+      const parsed = new Date(y, m - 1, d);
+      if (dateKey(parsed) !== date) return;
       map.set(date, {
         date,
         type: o.type === 'block' ? 'block' : o.type === 'netblock' ? 'netblock' : 'allow'
@@ -173,13 +177,26 @@
     return new Date(day.getFullYear(), day.getMonth(), day.getDate(), Math.floor(minutes / 60), minutes % 60);
   }
 
-  // המעבר הבא בין מותר לחסום (בודק את שלושת הימים הקרובים)
-  // מדלג על גבולות שאינם משנים בפועל את המצב (למשל שני חלונות זהים סמוכים)
+  // המעבר הבא בין מותר לחסום (בודק לפחות מחזור שבועי מלא)
+  // מדלג על גבולות שאינם משנים בפועל את המצב (למשל שני חלונות זהים סמוכים).
+  // בנוסף נבדקים חריגים חד-פעמיים עתידיים, גם אם הם רחוקים ביותר משבוע.
   function nextTransition(schedule, now) {
     const current = stateAt(schedule, now);
     const ats = [];
-    for (let i = 0; i < 3; i++) {
-      const day = startOfDay(now, i);
+    const days = new Map();
+    const addDay = (day) => days.set(dateKey(day), startOfDay(day, 0));
+    for (let i = 0; i < 8; i++) addDay(startOfDay(now, i));
+    for (const ov of (schedule.overrides || [])) {
+      const parts = String(ov.date).split('-').map(Number);
+      if (parts.length !== 3 || parts.some((n) => !Number.isFinite(n))) continue;
+      const day = new Date(parts[0], parts[1] - 1, parts[2]);
+      if (dateKey(day) !== ov.date) continue;
+      if (day.getTime() >= startOfDay(now, 0).getTime()) {
+        addDay(day);
+        addDay(startOfDay(day, 1));
+      }
+    }
+    for (const day of days.values()) {
       for (const s of daySlots(schedule, day)) {
         const start = dayAt(day, s.start);
         let end = dayAt(day, s.end);

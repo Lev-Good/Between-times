@@ -28,6 +28,7 @@ let loginPending = false;
 const PIN_SESSION_MS = 5 * 60 * 1000;
 
 const $ = (id) => document.getElementById(id);
+const hasPin = () => API ? !!schedule.pinSet : !!schedule.pinHash;
 
 /* ---------- טוסט ---------- */
 let toastTimer = null;
@@ -48,7 +49,7 @@ function toast(msg, type = '') {
 
 /* ---------- סשן כניסה להגדרות ---------- */
 function applyLoginState() {
-  const needsLogin = !!(schedule.pinHash && !sessionUnlocked);
+  const needsLogin = !!(hasPin() && !sessionUnlocked);
   $('loginModal').classList.toggle('hidden', !needsLogin);
   if (needsLogin) {
     $('app').classList.add('blurred');
@@ -80,7 +81,7 @@ async function tryLogin(pin) {
 // הראשי מודיע שנעל את הסשן. כך כל פתיחה מחדש — משורת המשימות, מהמגש או
 // מהתראה — דורשת סיסמת הורה, גם אם הדף לא נטען מחדש.
 function lockLocalSession() {
-  if (!schedule.pinHash) return;
+  if (!hasPin()) return;
   sessionUnlocked = false;
   pinVerifiedAt = 0;
   applyLoginState();
@@ -88,7 +89,7 @@ function lockLocalSession() {
 
 /* ---------- PIN ---------- */
 function pinRequired() {
-  return !!(schedule.pinHash && sessionUnlocked && Date.now() - pinVerifiedAt > PIN_SESSION_MS);
+  return !!(hasPin() && sessionUnlocked && Date.now() - pinVerifiedAt > PIN_SESSION_MS);
 }
 
 function promptPin() {
@@ -114,7 +115,7 @@ function promptPin() {
 async function verifyPinSession() {
   // סשן נעול = מודאל הכניסה כבר על המסך — אסור להמשיך בפעולה
   // (הגנה לעומק; הלחיצות חסומות בכל מקרה ע"י ה-blur)
-  if (schedule.pinHash && !sessionUnlocked) return false;
+  if (hasPin() && !sessionUnlocked) return false;
   if (!pinRequired()) return true;
   const pin = await promptPin();
   if (pin == null) return false;
@@ -130,8 +131,69 @@ async function verifyPinSession() {
   return true;
 }
 
+/* ---------- חלונית אישור כללית ---------- */
+function confirmDialog({ title, message, okLabel, danger }) {
+  return new Promise((resolve) => {
+    const modal = $('confirmModal');
+    const okBtn = $('confirmOk');
+    const cancelBtn = $('confirmCancel');
+    $('confirmTitle').textContent = title || 'אישור';
+    $('confirmMsg').textContent = message || '';
+    okBtn.textContent = okLabel || 'אישור';
+    okBtn.classList.toggle('btn-danger', !!danger);
+    okBtn.classList.toggle('btn-primary', !danger);
+    modal.classList.remove('hidden');
+    const done = (val) => {
+      modal.classList.add('hidden');
+      okBtn.onclick = null;
+      cancelBtn.onclick = null;
+      resolve(val);
+    };
+    okBtn.onclick = () => done(true);
+    cancelBtn.onclick = () => done(false);
+    cancelBtn.focus();
+  });
+}
+
 /* ---------- שמירה ---------- */
 async function persist() {
+  // הגנה מפני נעילה פתאומית בזמן הגדרה: אם הלוח החדש חוסם את המחשב (או את
+  // האינטרנט) בשעה הנוכחית — השמירה תפעיל את החסימה מיד, בעוד המשתמש באמצע
+  // ההגדרה, וזה נראה כמו "קריסה" (מסך חסימה כהה שקופץ שוב ושוב). לכן מבקשים
+  // אישור מפורש לפני השמירה; ביטול מחזיר את הלוח למצב שנשמר בפועל.
+  const stNow = T.getStatus(schedule, new Date());
+  const locksNow = !!(hasPin() && schedule.enabled &&
+    (stNow.state === 'blocked' || stNow.state === 'netblock'));
+  if (locksNow) {
+    const net = stNow.state === 'netblock';
+    const ok = await confirmDialog({
+      title: net ? 'האינטרנט ייחסם מיד' : 'המחשב יינעל מיד',
+      message: net
+        ? 'הלוח החדש חוסם את האינטרנט בשעה הנוכחית — ברגע השמירה האינטרנט ייחסם מיד. לשמור בכל זאת?'
+        : 'הלוח החדש חוסם את המחשב בשעה הנוכחית — ברגע השמירה המחשב יינעל מיד עם מסך חסימה במסך מלא. לשמור בכל זאת?',
+      okLabel: 'שמור ונעל',
+      danger: !net
+    });
+    if (!ok) {
+      // ביטול — לחזור למצב שנשמר בפועל (הממשק כבר מציג את הלוח החדש)
+      if (API) {
+        try {
+          const data = await API.getSettings();
+          schedule = T.normalizeSchedule(data);
+          schedule.pinSet = !!(data && data.pinSet);
+        } catch { /* ignore */ }
+      } else {
+        try {
+          const raw = localStorage.getItem('ben-hazmanim-settings');
+          if (raw) schedule = T.normalizeSchedule(JSON.parse(raw));
+        } catch { /* ignore */ }
+      }
+      renderWeek();
+      applySettingsToUI();
+      refreshStatus();
+      return false;
+    }
+  }
   try {
     if (API) {
       const res = await API.saveSettings(schedule);
@@ -595,13 +657,13 @@ async function refreshStatus() {
 // באנר ראשוני: בלי סיסמה אין חסימה פעילה — מנחה להגדיר סיסמה כדי שהגנה תופעל
 function updateSetupBanner() {
   const el = $('setupBanner');
-  if (el) el.classList.toggle('hidden', !!schedule.pinHash);
+  if (el) el.classList.toggle('hidden', hasPin());
 }
 
 function applySettingsToUI() {
   $('masterToggle').checked = schedule.enabled;
   $('warnInput').value = schedule.warnMinutes;
-  $('pinStatus').textContent = schedule.pinHash ? 'מוגדרת' : 'לא מוגדרת';
+  $('pinStatus').textContent = hasPin() ? 'מוגדרת' : 'לא מוגדרת';
   $('recoveryEmail').value = schedule.recoveryEmail || '';
   $('blockMessage').value = schedule.blockMessage || '';
   $('netIconToggle').checked = schedule.showNetIcon !== false;
@@ -865,12 +927,16 @@ async function renderSecurity() {
     return;
   }
   const sec = await API.getSecurity();
+  const tamperHint = sec.lastTamper
+    ? '⚠ התגלה ניסיון מחיקה/שיבוש של קבצי התוכנה — הקבצים שוחזרו (' + new Date(sec.lastTamper.ts).toLocaleString('he-IL') + ')'
+    : 'עותק מוגן במחשב — מחיקת התוכנה לא תשבית את האכיפה';
   const items = [
     { ok: sec.pin, label: 'סיסמה מוגדרת', hint: 'מגנה על ההגדרות ועל מסך החסימה' },
     { ok: sec.enabled, label: 'האכיפה פעילה', hint: 'המתג הראשי דלוק' },
     { ok: sec.elevated, label: 'הרצה עם הרשאות מנהל', hint: 'מאפשרת חסימת כל המשתמשים' },
     { ok: sec.netElevated, label: 'חסימת אינטרנט בלבד זמינה', hint: 'חוק חומת אש ייעודי — דורש הרצה כמנהל' },
     { ok: sec.shared, label: 'הגדרות משותפות לכל המשתמשים', hint: 'כל חשבון במחשב נחסם לפי אותו לוח' },
+    { ok: sec.protectedCopy, label: 'הגנה על קבצי התוכנה', hint: tamperHint },
     { ok: sec.recovery, label: 'מייל לשחזור סיסמה', hint: 'לשחזור אם שוכחים את הסיסמה' }
   ];
   list.innerHTML = '';
@@ -924,6 +990,7 @@ function init() {
     if (API) {
       const data = await API.getSettings();
       schedule = T.normalizeSchedule(data);
+      schedule.pinSet = !!(data && data.pinSet);
       sessionUnlocked = !!(data && data.sessionUnlocked);
     } else {
       try {
@@ -1092,7 +1159,7 @@ function init() {
       return;
     }
     let oldPin = null;
-    if (schedule.pinHash) {
+    if (hasPin()) {
       oldPin = await promptPin();
       if (oldPin == null) return;
     }
@@ -1106,7 +1173,8 @@ function init() {
       ok = true;
     }
     if (!ok) return;
-    schedule.pinHash = T.sha256Hex(pin);
+    if (!API) schedule.pinHash = T.sha256Hex(pin);
+    schedule.pinSet = true;
     pinVerifiedAt = Date.now();
     $('pinInput').value = '';
     $('pinInput2').value = '';
@@ -1116,7 +1184,7 @@ function init() {
   };
 
   $('pinClearBtn').onclick = async () => {
-    if (!schedule.pinHash) return;
+    if (!hasPin()) return;
     const oldPin = await promptPin();
     if (oldPin == null) return;
     let ok = false;
@@ -1129,7 +1197,8 @@ function init() {
       ok = true;
     }
     if (!ok) return;
-    schedule.pinHash = null;
+    if (!API) schedule.pinHash = null;
+    schedule.pinSet = false;
     pinVerifiedAt = Date.now();
     $('pinStatus').textContent = 'לא מוגדרת';
     $('pinInput').value = '';
@@ -1240,7 +1309,7 @@ function init() {
   };
   const doUninstall = async () => {
     const pin = $('uninstallInput').value;
-    if (schedule.pinHash && !pin) { toast('הזינו את סיסמת ההורה', 'error'); return; }
+    if (hasPin() && !pin) { toast('הזינו את סיסמת ההורה', 'error'); return; }
     $('uninstallOk').disabled = true;
     try {
       const res = await API.uninstallApp(pin);

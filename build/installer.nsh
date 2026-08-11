@@ -36,6 +36,18 @@
   FileOpen $0 "$APPDATA\${PRODUCT_NAME}\quit.flag" w
   FileWrite $0 "installer"
   FileClose $0
+  ; also stop the SYSTEM watchdog (BenHazmanimGuard, runs from the protected
+  ; copy in %ProgramData%\BenHazmanim\app) so it won't restore files/tasks
+  ; while the installer is replacing them
+  ReadEnvStr $R0 "PROGRAMDATA"
+  CreateDirectory "$R0\BenHazmanim"
+  FileOpen $0 "$R0\BenHazmanim\quit.flag" w
+  FileWrite $0 "installer"
+  FileClose $0
+  ; The SYSTEM guard is a separate process and is not covered by the normal
+  ; app wait loop. End its scheduled instance before replacing the protected
+  ; copy; otherwise it can keep files locked during an upgrade.
+  nsExec::Exec 'schtasks /End /TN BenHazmanimGuard'
   ; give the app (checks the flag every ~3s) time to exit on its own, so the
   ; installer's own kill-loop finds it already stopped. Only wait while the
   ; process actually exists (up to ~8s), so fresh installs are not slowed down.
@@ -74,6 +86,16 @@
   FileOpen $0 "$APPDATA\${PRODUCT_NAME}\quit.flag" w
   FileWrite $0 "uninstaller"
   FileClose $0
+  ; stop the SYSTEM watchdog too (it monitors %ProgramData%\BenHazmanim)
+  ReadEnvStr $R0 "PROGRAMDATA"
+  CreateDirectory "$R0\BenHazmanim"
+  FileOpen $0 "$R0\BenHazmanim\quit.flag" w
+  FileWrite $0 "uninstaller"
+  FileClose $0
+  ; Stop and remove the SYSTEM guard before deleting its protected copy.
+  ; /Delete alone does not reliably terminate an already-running instance.
+  nsExec::Exec 'schtasks /End /TN BenHazmanimGuard'
+  nsExec::Exec 'schtasks /Delete /TN BenHazmanimGuard /F'
   ; remove the shared per-machine settings (%ProgramData%\BenHazmanim)
   ; ($PROGRAMDATA / $COMMONAPPDATA are not available in the NSIS version
   ; bundled with electron-builder 26, so expand the env var through cmd)

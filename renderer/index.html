@@ -421,6 +421,18 @@
     </div>
   </div>
 
+  <!-- חלונית אישור כללית (למשל לפני שמירה שנועלת את המחשב מיד) -->
+  <div class="modal-overlay hidden" id="confirmModal">
+    <div class="modal">
+      <h3 id="confirmTitle">אישור</h3>
+      <p id="confirmMsg"></p>
+      <div class="modal-actions">
+        <button class="btn btn-primary" id="confirmOk">אישור</button>
+        <button class="btn btn-ghost" id="confirmCancel">ביטול</button>
+      </div>
+    </div>
+  </div>
+
   <div class="toast hidden" id="toast"></div>
 
   <script src="../scheduler.js"></script>

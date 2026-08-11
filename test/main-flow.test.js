@@ -308,6 +308,157 @@ test('startup: non-elevated run does NOT touch HKLM', async () => {
   m.cleanup();
 });
 
+/* ================= עותק מוגן (הגנה מפני מחיקת קבצי התוכנה) ================= */
+
+// תיקיית התקנה מדומה (app.getAppPath) עם package.json וקובץ הרצה — מקור ההעתקה
+function createAppDir(m) {
+  const appDir = path.join(m.tmpRoot, 'app');
+  fs.mkdirSync(appDir, { recursive: true });
+  fs.writeFileSync(path.join(appDir, 'package.json'), JSON.stringify({ name: 'ben-hazmanim', version: '9.9.9' }), 'utf8');
+  fs.writeFileSync(path.join(appDir, path.basename(process.execPath)), 'fake-exe');
+  fs.writeFileSync(path.join(appDir, 'assets.txt'), 'data');
+  return appDir;
+}
+const protectedDir = (m) => path.join(process.env.PROGRAMDATA, 'BenHazmanim', 'app');
+
+test('protected copy: elevated run creates hardened copy and task points at it', async () => {
+  const m = loadMain({ elevate: true });
+  createAppDir(m);
+  await m.ready();
+
+  // העותק המוגן נוצר בתיקייה המשותפת
+  const pd = protectedDir(m);
+  assert.ok(fs.existsSync(path.join(pd, 'package.json')), 'העותק המוגן צריך לכלול package.json');
+  assert.equal(
+    JSON.parse(fs.readFileSync(path.join(pd, 'package.json'), 'utf8')).version,
+    '9.9.9',
+    'העותק המוגן צריך להיות מאותה גרסה'
+  );
+  assert.ok(fs.existsSync(path.join(pd, path.basename(process.execPath))), 'העותק המוגן צריך לכלול את קובץ ההרצה');
+  assert.ok(fs.existsSync(path.join(pd, 'assets.txt')), 'העותק המוגן כולל את שאר קבצי התוכנה');
+
+  // הקשחת הרשאות: takeown + icacls על העותק המוגן
+  const takeown = m.state.execCalls.find((c) => c.cmd === 'takeown' && c.args.includes(pd));
+  assert.ok(takeown, 'צריך להריץ takeown על העותק המוגן');
+  assert.ok(takeown.args.includes(pd), 'takeown על תיקיית העותק המוגן');
+  const icacls = m.state.execCalls.find((c) => c.cmd === 'icacls' && c.args.includes(pd));
+  assert.ok(icacls, 'צריך להריץ icacls על העותק המוגן');
+  assert.ok(icacls.args.includes(pd), 'icacls על תיקיית העותק המוגן');
+
+  // המשימה המתוזמנת מצביעה על העותק המוגן
+  const taskCreate = m.state.execCalls.filter((c) => c.cmd === 'schtasks' && c.args.includes('/Create'));
+  assert.ok(taskCreate.length >= 1, 'צריך ליצור משימה מתוזמנת');
+  for (const t of taskCreate) {
+    const trIdx = t.args.indexOf('/TR');
+    assert.ok(trIdx >= 0 && t.args[trIdx + 1].includes(pd), 'המשימה צריכה להריץ את העותק המוגן');
+  }
+
+  // מצב ההגנה מדווח על עותק מוגן פעיל
+  const sec = await m.ipcHandlers.get('security:get')();
+  assert.equal(sec.protectedCopy, true);
+  m.cleanup();
+});
+
+test('protected copy: no re-copy when version matches; task still points at copy', async () => {
+  const m = loadMain({ elevate: true });
+  createAppDir(m);
+  // עותק מוגן קיים כבר עם אותה גרסה
+  const pd = protectedDir(m);
+  fs.mkdirSync(pd, { recursive: true });
+  fs.writeFileSync(path.join(pd, 'package.json'), JSON.stringify({ name: 'ben-hazmanim', version: '9.9.9' }), 'utf8');
+  fs.writeFileSync(path.join(pd, path.basename(process.execPath)), 'old-copy');
+  await m.ready();
+
+  const takeown = m.state.execCalls.filter((c) => c.cmd === 'takeown');
+  const icacls = m.state.execCalls.filter((c) => c.cmd === 'icacls');
+  assert.ok(takeown.length >= 1, 'גם גרסה תואמת צריכה לוודא שהעותק מוגן');
+  assert.ok(icacls.length >= 1, 'גם גרסה תואמת צריכה לוודא שהעותק מוגן');
+
+  const taskCreate = m.state.execCalls.filter((c) => c.cmd === 'schtasks' && c.args.includes('/Create'));
+  assert.ok(taskCreate.length >= 1, 'צריך ליצור משימה מתוזמנת');
+  for (const t of taskCreate) {
+    const trIdx = t.args.indexOf('/TR');
+    assert.ok(trIdx >= 0 && t.args[trIdx + 1].includes(pd), 'המשימה מצביעה על העותק המוגן');
+  }
+  m.cleanup();
+});
+
+test('protected copy: non-elevated run does NOT create or touch the copy', async () => {
+  const m = loadMain({});
+  createAppDir(m);
+  await m.ready();
+
+  const pd = protectedDir(m);
+  assert.equal(fs.existsSync(pd), false, 'ללא הרשאות מנהל אין עותק מוגן');
+  const takeown = m.state.execCalls.filter((c) => c.cmd === 'takeown');
+  const icacls = m.state.execCalls.filter((c) => c.cmd === 'icacls');
+  assert.equal(takeown.length, 0, 'ללא הרשאות מנהל אין הקשחת הרשאות');
+  assert.equal(icacls.length, 0, 'ללא הרשאות מנהל אין הקשחת הרשאות');
+
+  // המשימה מצביעה על ההתקנה המקורית
+  const taskCreate = m.state.execCalls.filter((c) => c.cmd === 'schtasks' && c.args.includes('/Create'));
+  assert.ok(taskCreate.length >= 1, 'צריך ליצור משימה מתוזמנת');
+  for (const t of taskCreate) {
+    const trIdx = t.args.indexOf('/TR');
+    assert.ok(trIdx >= 0 && t.args[trIdx + 1].includes(path.join(m.tmpRoot, 'app')), 'המשימה מצביעה על ההתקנה המקורית');
+  }
+
+  const sec = await m.ipcHandlers.get('security:get')();
+  assert.equal(sec.protectedCopy, false);
+  m.cleanup();
+});
+
+test('startup: elevated run creates SYSTEM guard task and records install location', async () => {
+  const m = loadMain({
+    elevate: true,
+    exec(cmd, args) {
+      if (cmd === 'schtasks' && args.includes('/Create')) return { err: null, stdout: '', stderr: '' };
+      if (cmd === 'schtasks' && args.includes('/Query')) return { err: new Error('not found'), stdout: '', stderr: '' };
+      return { err: null, stdout: '', stderr: '' };
+    }
+  });
+  createAppDir(m);
+  await m.ready();
+
+  // מיקום ההתקנה המקורי נרשם לקובץ משותף (לשימוש השומר המערכתי לשחזור)
+  const installJson = path.join(process.env.PROGRAMDATA, 'BenHazmanim', 'install.json');
+  assert.ok(fs.existsSync(installJson), 'מיקום ההתקנה נרשם');
+  const info = JSON.parse(fs.readFileSync(installJson, 'utf8'));
+  assert.equal(info.dir, path.join(m.tmpRoot, 'app'), 'מיקום ההתקנה נכון');
+
+  // משימת השומר המערכתי: SYSTEM, באתחול המחשב, מתוך העותק המוגן
+  const guardCreate = m.state.execCalls.find(
+    (c) => c.cmd === 'schtasks' && c.args.includes('BenHazmanimGuard') && c.args.includes('/Create')
+  );
+  assert.ok(guardCreate, 'משימת שומר-שער מערכתי נוצרה');
+  assert.ok(guardCreate.args.includes('SYSTEM'), 'רצה כ-SYSTEM');
+  assert.ok(guardCreate.args.includes('ONSTART'), 'באתחול המחשב');
+  const tr = guardCreate.args[guardCreate.args.indexOf('/TR') + 1];
+  assert.ok(tr.includes('--watchdog-system'), 'עם דגל --watchdog-system');
+  assert.ok(tr.includes(protectedDir(m)), 'מצביעה על העותק המוגן');
+
+  // הקפצה מיידית של השומר המערכתי
+  const guardRun = m.state.execCalls.find(
+    (c) => c.cmd === 'schtasks' && c.args.includes('/Run') && c.args.includes('BenHazmanimGuard')
+  );
+  assert.ok(guardRun, 'השומר המערכתי הוקפץ מיד');
+  m.cleanup();
+});
+
+test('startup: non-elevated run does NOT create the SYSTEM guard task', async () => {
+  const m = loadMain({});
+  createAppDir(m);
+  await m.ready();
+
+  const guardCreate = m.state.execCalls.find(
+    (c) => c.cmd === 'schtasks' && c.args.includes('BenHazmanimGuard') && c.args.includes('/Create')
+  );
+  assert.equal(guardCreate, undefined, 'ללא הרשאות מנהל אין משימת שומר מערכתי');
+  const installJson = path.join(process.env.PROGRAMDATA, 'BenHazmanim', 'install.json');
+  assert.equal(fs.existsSync(installJson), false, 'ללא הרשאות מנהל אין רישום מיקום התקנה');
+  m.cleanup();
+});
+
 /* ================= הסרה: ללא סיסמה + חסימה פעילה ================= */
 
 test('uninstall: works without password when no pin is set (blocked schedule)', async () => {
@@ -513,6 +664,15 @@ test('lock:now + unlock:now with correct pin', async () => {
 
 /* ================= הגדרות ================= */
 
+test('settings:save rejects malformed IPC payloads', async () => {
+  const m = loadMain({});
+  await m.ready();
+  const res = await m.ipcHandlers.get('settings:save')({}, null);
+  assert.equal(res.ok, false);
+  assert.match(res.error || '', /מבנה/);
+  m.cleanup();
+});
+
 test('settings:save requires session unlock when pin is set', async () => {
   const settings = S.defaultSchedule();
   settings.pinHash = S.sha256Hex('1234');
@@ -618,7 +778,8 @@ test('settings:save never lets client override pinHash/password', async () => {
   );
   assert.ok(res.ok);
   const back = await m.ipcHandlers.get('settings:get')();
-  assert.equal(back.pinHash, settings.pinHash, 'pinHash לא ניתן לשינוי מהממשק');
+  assert.equal(back.pinHash, undefined, 'pinHash אינו חשוף לממשק');
+  assert.equal(back.pinSet, true, 'הסיסמה נשארת מוגדרת');
   assert.equal(back.passwordPlain, undefined, 'סיסמה לא חשופה לממשק');
   m.cleanup();
 });
@@ -987,6 +1148,20 @@ test('backup:export cancels gracefully', async () => {
   m.cleanup();
 });
 
+test('backup IPC rejects export/import while the parent session is locked', async () => {
+  const settings = S.defaultSchedule();
+  settings.pinHash = S.sha256Hex('1234');
+  const m = loadMain({ settings });
+  await m.ready();
+  const exported = await m.ipcHandlers.get('backup:export')();
+  const imported = await m.ipcHandlers.get('backup:import')();
+  assert.equal(exported.ok, false);
+  assert.match(exported.error || '', /סיסמה/);
+  assert.equal(imported.ok, false);
+  assert.match(imported.error || '', /סיסמה/);
+  m.cleanup();
+});
+
 /* ================= קיצורי דרך (misc) ================= */
 
 test('app:version returns the app version', async () => {
@@ -1119,6 +1294,124 @@ test('watchdog: starts cleanly when no quit.flag (writes heartbeat)', async () =
   });
 });
 
+/* ================= שומר-שער מערכתי (--watchdog-system) ================= */
+
+function withSystemWatchdogArg(m, fn) {
+  const origArgv = process.argv;
+  process.argv = [origArgv[0], 'main.js', '--watchdog-system'];
+  try {
+    delete require.cache[require.resolve('../main.js')];
+    require('../main.js');
+    return fn();
+  } finally {
+    process.argv = origArgv;
+  }
+}
+
+// סביבת שומר מערכתי: תיקיית התקנה + עותק מוגן + הגדרות משותפות + מיקום התקנה
+function guardEnv(m) {
+  const appDir = createAppDir(m);
+  const pd = protectedDir(m);
+  fs.mkdirSync(pd, { recursive: true });
+  fs.writeFileSync(path.join(pd, 'package.json'), JSON.stringify({ name: 'ben-hazmanim', version: '9.9.9' }), 'utf8');
+  fs.writeFileSync(path.join(pd, path.basename(process.execPath)), 'protected-exe');
+  const machineDir = path.join(process.env.PROGRAMDATA, 'BenHazmanim');
+  fs.mkdirSync(machineDir, { recursive: true });
+  // הגדרות משותפות חייבות להתקיים — אחרת השומר יוצא (סימן הסרה)
+  fs.writeFileSync(path.join(machineDir, 'settings.json'), '{}', 'utf8');
+  fs.writeFileSync(path.join(machineDir, 'install.json'), JSON.stringify({ exe: 'x', dir: appDir }), 'utf8');
+  fs.writeFileSync(path.join(pd, 'settings.backup.json'), '{}', 'utf8');
+  // תבנית ה-XML משמרת את המשתמש האינטראקטיבי של המשימה הראשית;
+  // שומר שרץ כ-SYSTEM לא יוצר אותה מחדש עם principal שגוי.
+  fs.writeFileSync(path.join(machineDir, 'main-task.xml'), '<Task><Principals/><Actions/></Task>', 'utf8');
+  return { appDir, pd, machineDir };
+}
+
+const guardTamperLog = () => path.join(process.env.PROGRAMDATA, 'BenHazmanim', 'tamper.log');
+
+test('system watchdog: restores deleted install dir from protected copy', async () => {
+  const m = makeMock({ elevate: true });
+  const { appDir } = guardEnv(m);
+  // מחיקת תיקיית ההתקנה המקורית — בדיוק מה שמשתמש עם הרשאות מנהל יכול לעשות
+  fs.rmSync(appDir, { recursive: true, force: true });
+  assert.equal(fs.existsSync(path.join(appDir, 'package.json')), false);
+
+  await withSystemWatchdogArg(m, async () => {
+    await m.ready(); // ה-check() הראשון רץ מיד — משחזר
+    assert.ok(fs.existsSync(path.join(appDir, 'package.json')), 'תיקיית ההתקנה שוחזרה מהעותק המוגן');
+    assert.ok(fs.existsSync(path.join(appDir, path.basename(process.execPath))), 'קובץ ההרצה שוחזר');
+    const tamper = fs.readFileSync(guardTamperLog(), 'utf8');
+    assert.match(tamper, /install-dir-restored/, 'אירוע החבלה נרשם ליומן');
+  });
+});
+
+test('system watchdog: restores deleted protected copy from install dir', async () => {
+  const m = makeMock({ elevate: true });
+  const { pd } = guardEnv(m);
+  fs.rmSync(pd, { recursive: true, force: true });
+
+  await withSystemWatchdogArg(m, async () => {
+    await m.ready();
+    assert.ok(fs.existsSync(path.join(pd, 'package.json')), 'העותק המוגן שוחזר מתיקיית ההתקנה');
+    assert.ok(fs.existsSync(path.join(pd, path.basename(process.execPath))), 'קובץ ההרצה שוחזר');
+    const tamper = fs.readFileSync(guardTamperLog(), 'utf8');
+    assert.match(tamper, /protected-copy-restored/, 'אירוע החבלה נרשם ליומן');
+  });
+});
+
+test('system watchdog: recreates deleted scheduled tasks pointing at protected copy', async () => {
+  const m = makeMock({ elevate: true });
+  guardEnv(m);
+  await withSystemWatchdogArg(m, async () => {
+    await m.ready();
+    // ברירת המחדל של המוק: /Query נכשל (משימה לא קיימת) → יצירה מחדש
+    const creates = m.state.execCalls.filter((c) => c.cmd === 'schtasks' && c.args.includes('/Create'));
+    const main = creates.find((c) => c.args.includes('BenHazmanim') && !c.args.includes('BenHazmanimGuard'));
+    assert.ok(main, 'המשימה הראשית נוצרה מחדש');
+    assert.ok(main.args.includes('/XML'), 'המשימה הראשית משוחזרת מתבנית XML');
+    const guard = creates.find((c) => c.args.includes('BenHazmanimGuard'));
+    assert.ok(guard, 'משימת השומר המערכתי נוצרה מחדש');
+    assert.ok(guard.args.includes('SYSTEM'), 'שומר מערכתי כ-SYSTEM');
+    assert.ok(guard.args.includes('ONSTART'), 'באתחול המחשב');
+  });
+});
+
+test('system watchdog: exits on machine quit flag (uninstall)', async () => {
+  const m = makeMock({ elevate: true });
+  const { machineDir } = guardEnv(m);
+  fs.writeFileSync(path.join(machineDir, 'quit.flag'), String(Date.now()));
+  await withSystemWatchdogArg(m, async () => {
+    await m.ready();
+    assert.ok(m.state.exitCalled, 'השומר יוצא כשיש דגל עצירה (הסרה)');
+  });
+});
+
+test('system watchdog: does not exit merely because settings were deleted', async () => {
+  const m = makeMock({ elevate: true });
+  const { machineDir } = guardEnv(m);
+  fs.rmSync(path.join(machineDir, 'settings.json'));
+  await withSystemWatchdogArg(m, async () => {
+    await m.ready();
+    assert.equal(m.state.exitCalled, false, 'מחיקת settings.json לבדה לא עוצרת את השומר');
+    assert.ok(fs.existsSync(path.join(machineDir, 'settings.json')), 'השומר משחזר את ההגדרות מהעותק המוגן');
+  });
+});
+
+test('security:get reports last tamper event (written by system watchdog)', async () => {
+  const m = loadMain({});
+  const machineDir = path.join(process.env.PROGRAMDATA, 'BenHazmanim');
+  fs.mkdirSync(machineDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(machineDir, 'tamper.log'),
+    JSON.stringify({ ts: Date.now(), kind: 'install-dir-restored' }) + '\n',
+    'utf8'
+  );
+  await m.ready();
+  const sec = await m.ipcHandlers.get('security:get')();
+  assert.equal(sec.lastTamper.kind, 'install-dir-restored', 'מסך ההגנה מדווח על ניסיון החבלה');
+  m.cleanup();
+});
+
 test('settings:get never exposes the password to the renderer', async () => {
   const settings = S.defaultSchedule();
   settings.pinHash = S.sha256Hex('1234');
@@ -1129,7 +1422,8 @@ test('settings:get never exposes the password to the renderer', async () => {
   const res = await m.ipcHandlers.get('settings:get')();
   assert.equal(res.passwordPlain, undefined, 'סיסמה מלאה אסורה בממשק');
   assert.equal(res.passwordEnc, undefined);
-  assert.equal(res.pinHash, settings.pinHash, 'pinHash תקין');
+  assert.equal(res.pinHash, undefined, 'pinHash אינו נחשף לממשק');
+  assert.equal(res.pinSet, true, 'מצב הסיסמה נחשף ללא ההאש עצמו');
   m.cleanup();
 });
 
