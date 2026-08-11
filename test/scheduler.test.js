@@ -639,3 +639,15 @@ test('allowedApps: entries survive a full roundtrip', () => {
   assert.deepEqual(n.allowedApps, s.allowedApps);
 });
 
+test('normalizeSchedule rejects malformed clock values instead of silently wrapping them', () => {
+  const s = S.normalizeSchedule({ week: [{ slots: [
+    { start: '25:00', end: '26:00', type: 'blocked' },
+    { start: '08:61', end: '09:00', type: 'blocked' },
+    { start: '24:00', end: '01:00', type: 'blocked' },
+    { start: '23:00', end: '24:00', type: 'blocked' }
+  ] }] });
+  assert.equal(s.week[0].slots.length, 1);
+  assert.equal(s.week[0].slots[0].start, 1380);
+  assert.equal(s.week[0].slots[0].end, 1440);
+});
+

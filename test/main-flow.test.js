@@ -338,6 +338,7 @@ test('protected copy: elevated run creates hardened copy and task points at it',
   );
   assert.ok(fs.existsSync(path.join(pd, path.basename(process.execPath))), 'העותק המוגן צריך לכלול את קובץ ההרצה');
   assert.ok(fs.existsSync(path.join(pd, 'assets.txt')), 'העותק המוגן כולל את שאר קבצי התוכנה');
+  assert.ok(fs.existsSync(path.join(pd, 'integrity.json')), 'העותק המוגן צריך לכלול Manifest של שלמות קבצי הליבה');
 
   // הקשחת הרשאות: takeown + icacls על העותק המוגן
   const takeown = m.state.execCalls.find((c) => c.cmd === 'takeown' && c.args.includes(pd));
@@ -661,6 +662,30 @@ test('lock:now + unlock:now with correct pin', async () => {
   assert.ok(ok.ok);
   const st2 = await m.ipcHandlers.get('status:get')();
   assert.equal(st2.manualLock, false, 'הנעילה הוסרה');
+  m.cleanup();
+});
+
+test('enforcement state machine reports stable desired and actual states', async () => {
+  const settings = S.defaultSchedule();
+  settings.pinHash = S.sha256Hex('1234');
+  settings.enabled = false;
+  const m = loadMain({ settings });
+  await m.ready();
+
+  await m.ipcHandlers.get('lock:now')();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  let st = await m.ipcHandlers.get('status:get')();
+  assert.equal(st.enforcement.desired, 'blocked');
+  assert.equal(st.enforcement.actual, 'blocked');
+  assert.equal(st.enforcement.phase, 'stable');
+
+  await m.ipcHandlers.get('unlock:now')({}, '1234');
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  st = await m.ipcHandlers.get('status:get')();
+  assert.equal(st.enforcement.desired, 'allowed');
+  assert.equal(st.enforcement.actual, 'allowed');
+  assert.equal(st.enforcement.phase, 'stable');
+  assert.ok(st.enforcement.transitionId >= 2);
   m.cleanup();
 });
 
@@ -1622,10 +1647,11 @@ test('netblock: unlock with password releases the internet until the next transi
 
 test('allowed-apps:detect — מוצא תוכנות מוכרות מהסריקה (App Paths, רישום התקנה, קיצורי דרך) עם דה-דופליקציה', async () => {
   // בידוד מנתיבי ההתקנה האמיתיים של המחשב — כדי שהבדיקה תהיה דטרמיניסטית
-  const pf = process.env.ProgramFiles, pfx = process.env['ProgramFiles(x86)'], la = process.env.LOCALAPPDATA;
+  const pf = process.env.ProgramFiles, pfx = process.env['ProgramFiles(x86)'], la = process.env.LOCALAPPDATA, sd = process.env.SystemDrive;
   process.env.ProgramFiles = 'C:\\__bhz_test_progfiles';
   process.env['ProgramFiles(x86)'] = 'C:\\__bhz_test_progfiles_x86';
   process.env.LOCALAPPDATA = 'C:\\__bhz_test_localappdata';
+  process.env.SystemDrive = 'Z:';
   const m = loadMain({
     exec: (cmd, args) => {
       const joined = String(args.join(' '));
@@ -1668,15 +1694,46 @@ test('allowed-apps:detect — מוצא תוכנות מוכרות מהסריקה 
   assert.ok(apps.some((s) => s.startsWith('word|')), 'וורד נמצאה דרך App Paths');
   assert.equal(apps.filter((s) => s.startsWith('otzaria|')).length, 1, 'אוצריא מופיעה פעם אחת בלבד (דה-דופליקציה)');
   assert.ok(apps.some((s) => s.startsWith('zayit|')), 'זית נמצאה דרך האייקון/קיצור הדרך');
-  process.env.ProgramFiles = pf; process.env['ProgramFiles(x86)'] = pfx; process.env.LOCALAPPDATA = la;
+  process.env.ProgramFiles = pf; process.env['ProgramFiles(x86)'] = pfx; process.env.LOCALAPPDATA = la; process.env.SystemDrive = sd;
   m.cleanup();
 });
 
+test('allowed-apps:detect recognizes Otzaria and Otzar executable names from registry paths', async () => {
+  const sd = process.env.SystemDrive;
+  process.env.SystemDrive = 'Z:';
+  const m = loadMain({
+    exec: (cmd, args) => {
+      if (cmd === 'powershell.exe' && String(args.join(' ')).includes('ConvertTo-Json')) {
+        const dir = path.join(m.tmpRoot, 'known-apps');
+        fs.mkdirSync(dir, { recursive: true });
+        const otzaria = path.join(dir, 'otzaria.exe');
+        const otzar = path.join(dir, 'otzar.exe');
+        fs.writeFileSync(otzaria, 'MZ');
+        fs.writeFileSync(otzar, 'MZ');
+        return {
+          err: null,
+          stdout: JSON.stringify({ appPaths: [otzaria, otzar], uninstall: [], shortcuts: [] }),
+          stderr: ''
+        };
+      }
+      return { err: null, stdout: '', stderr: '' };
+    }
+  });
+  await m.ready();
+  const res = await m.ipcHandlers.get('allowed-apps:detect')();
+  assert.equal(res.ok, true);
+  assert.ok(res.apps.some((a) => a.id === 'otzaria' && /otzaria\.exe$/i.test(a.path)));
+  assert.ok(res.apps.some((a) => a.id === 'otzar' && /otzar\.exe$/i.test(a.path)));
+  m.cleanup();
+  process.env.SystemDrive = sd;
+});
+
 test('allowed-apps:detect — ללא תוכנות מותקנות מחזיר רשימה ריקה', async () => {
-  const pf = process.env.ProgramFiles, pfx = process.env['ProgramFiles(x86)'], la = process.env.LOCALAPPDATA;
+  const pf = process.env.ProgramFiles, pfx = process.env['ProgramFiles(x86)'], la = process.env.LOCALAPPDATA, sd = process.env.SystemDrive;
   process.env.ProgramFiles = 'C:\\__bhz_test_progfiles';
   process.env['ProgramFiles(x86)'] = 'C:\\__bhz_test_progfiles_x86';
   process.env.LOCALAPPDATA = 'C:\\__bhz_test_localappdata';
+  process.env.SystemDrive = 'Z:';
   const m = loadMain({
     exec: (cmd, args) => {
       if (cmd === 'powershell.exe' && String(args.join(' ')).includes('ConvertTo-Json')) {
@@ -1689,7 +1746,7 @@ test('allowed-apps:detect — ללא תוכנות מותקנות מחזיר רש
   const res = await m.ipcHandlers.get('allowed-apps:detect')();
   assert.equal(res.ok, true);
   assert.deepEqual(res.apps, []);
-  process.env.ProgramFiles = pf; process.env['ProgramFiles(x86)'] = pfx; process.env.LOCALAPPDATA = la;
+  process.env.ProgramFiles = pf; process.env['ProgramFiles(x86)'] = pfx; process.env.LOCALAPPDATA = la; process.env.SystemDrive = sd;
   m.cleanup();
 });
 
@@ -1730,29 +1787,24 @@ test('allowed-apps:inspect-path — קובץ לא קיים מחזיר שגיאה
   m.cleanup();
 });
 
-/* ================= עדכניות ההגדרות: פיצול קבצים + שאריות "פתוח עד המעבר הבא" =================
-   שתי בעיות שדווחו: (1) "המעבר הבא" פנטום למרות שאין חלונות מוגדרים — שארית
-   מ-manualUnlockUntil ישן של לוח שנמחק; (2) מסך נעילה מיידי באתחול למרות לוח
-   ריק — שמירה שנפלה לקובץ המשתמש (חוסר הרשאת כתיבה למשותף) בעוד האכיפה
-   קוראת את הקובץ המשותף הישן. */
+/* ================= עדכניות ההגדרות: מקור אמת משותף + שאריות "פתוח עד המעבר הבא" =================
+   קובץ משותף קיים הוא מקור האמת ב-Windows; קובץ משתמש אינו יכול להחליף
+   אותו לפי mtime, כדי למנוע עקיפת מדיניות באמצעות settings.json מקומי. */
 
-test('loadSettings: קובץ משתמש עדכני יותר (שמירה שנפלה אליו) גובר על הקובץ המשותף הישן', async () => {
-  // קובץ המשתמש (לוח ריק) נכתב עכשיו על ידי loadMain
+test('loadSettings: קובץ משותף גובר על קובץ משתמש חדש יותר', async () => {
+  // קובץ המשתמש (לוח ריק) נכתב על ידי loadMain
   const m = loadMain({ settings: S.defaultSchedule() });
   const machineDir = path.join(process.env.PROGRAMDATA, 'BenHazmanim');
   fs.mkdirSync(machineDir, { recursive: true });
-  // הקובץ המשותף הישן עדיין מכיל חלון חסימה שנמחק כבר בלוח החדש
-  const stale = S.defaultSchedule();
-  stale.week[2].slots.push({ start: S.parseHM('23:50'), end: S.parseHM('24:00'), type: 'blocked' });
-  fs.writeFileSync(path.join(machineDir, 'settings.json'), JSON.stringify(stale), 'utf8');
+  // הקובץ המשותף מכיל את מדיניות החסימה, גם אם קובץ המשתמש חדש יותר.
+  const canonical = S.defaultSchedule();
+  canonical.week[2].slots.push({ start: S.parseHM('23:50'), end: S.parseHM('24:00'), type: 'blocked' });
+  fs.writeFileSync(path.join(machineDir, 'settings.json'), JSON.stringify(canonical), 'utf8');
   fs.utimesSync(path.join(machineDir, 'settings.json'), new Date('2020-01-01'), new Date('2020-01-01'));
 
   await m.ready();
   const back = await m.ipcHandlers.get('settings:get')();
-  assert.equal(back.week[2].slots.length, 0, 'לוח ריק מהקובץ העדכני — החלון הישן לא חוזר');
-  const st = await m.ipcHandlers.get('status:get')();
-  assert.equal(st.state, 'allowed', 'אכיפה לפי הלוח העדכני — אין חסימה');
-  assert.equal(st.nextAt, null, 'אין "המעבר הבא" פנטום');
+  assert.equal(back.week[2].slots.length, 1, 'הקובץ המשותף הוא מקור האמת');
   m.cleanup();
 });
 
@@ -1910,5 +1962,71 @@ test('settings:save: שארית פתיחה שעברה מנוקה גם בשמיר
   assert.ok(res.ok);
   const back = await m.ipcHandlers.get('settings:get')();
   assert.equal(back.manualUnlockUntil, null, 'שמירה מנקה ערך שעבר');
+  m.cleanup();
+});
+
+test('startup: future manual unlock is not restored after restart', async () => {
+  const settings = blockNowSchedule();
+  settings.pinHash = S.sha256Hex('1234');
+  settings.manualUnlockUntil = Date.now() + 60 * 60 * 1000;
+  const m = loadMain({ settings });
+  await m.ready();
+  const back = await m.ipcHandlers.get('settings:get')();
+  assert.equal(back.manualUnlockUntil, null, 'Override של Session לא שורד הפעלה מחדש');
+  assert.equal((await m.ipcHandlers.get('status:get')()).state, 'blocked');
+  m.cleanup();
+});
+
+test('allowed-apps:launch rejects a renderer-supplied executable not in the server allowlist', async () => {
+  const settings = blockNowSchedule();
+  settings.pinHash = S.sha256Hex('1234');
+  settings.allowedApps = [];
+  const m = loadMain({ settings });
+  await m.ready();
+  const res = await m.ipcHandlers.get('allowed-apps:launch')({}, { exe: 'C:\\\\Windows\\\\System32\\\\cmd.exe' });
+  assert.equal(res.ok, false);
+  assert.match(res.error || '', /רשימת ההרשאות/);
+  assert.equal(m.state.spawnCalls.some((call) => String(call.cmd).toLowerCase().includes('cmd.exe')), false, 'אסור להפעיל תהליך שלא אושר בשרת');
+  m.cleanup();
+});
+
+test('sensitive IPC rejects requests from an unknown renderer sender', async () => {
+  const m = loadMain({});
+  await m.ready();
+  const event = { sender: {} };
+  assert.equal((await m.ipcHandlers.get('settings:save')(event, {})).ok, false);
+  assert.equal((await m.ipcHandlers.get('status:get')(event)).ok, false);
+  assert.equal((await m.ipcHandlers.get('activity:get')(event)).ok, false);
+  assert.equal((await m.ipcHandlers.get('update:check')(event)).ok, false);
+  assert.equal((await m.ipcHandlers.get('settings:open')(event)).ok, false);
+  m.cleanup();
+});
+
+test('corrupt shared settings fail closed instead of falling back to a user file', async () => {
+  const m = loadMain({ settings: S.defaultSchedule() });
+  const dir = path.join(process.env.PROGRAMDATA, 'BenHazmanim');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'settings.json'), '{not-json', 'utf8');
+  await m.ready();
+  const safe = await m.ipcHandlers.get('settings:get')();
+  const st = await m.ipcHandlers.get('status:get')();
+  assert.equal(safe.configError, true);
+  assert.equal(st.configError, true);
+  assert.equal(st.state, 'blocked');
+  m.cleanup();
+});
+
+test('protected copy integrity tampering is repaired by the system watchdog', async () => {
+  const m = loadMain({ elevate: true });
+  const appDir = createAppDir(m);
+  await m.ready();
+  const pd = protectedDir(m);
+  fs.writeFileSync(path.join(pd, 'package.json'), JSON.stringify({ name: 'tampered', version: '9.9.9' }), 'utf8');
+  await withSystemWatchdogArg(m, async () => {
+    await m.ready();
+    const restored = JSON.parse(fs.readFileSync(path.join(pd, 'package.json'), 'utf8'));
+    assert.equal(restored.name, 'ben-hazmanim');
+    assert.ok(fs.existsSync(path.join(pd, 'integrity.json')), 'ה-Manifest נשאר תקין לאחר השחזור');
+  });
   m.cleanup();
 });

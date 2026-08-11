@@ -161,7 +161,10 @@ async function persist() {
   // האינטרנט) בשעה הנוכחית — השמירה תפעיל את החסימה מיד, בעוד המשתמש באמצע
   // ההגדרה, וזה נראה כמו "קריסה" (מסך חסימה כהה שקופץ שוב ושוב). לכן מבקשים
   // אישור מפורש לפני השמירה; ביטול מחזיר את הלוח למצב שנשמר בפועל.
-  const stNow = T.getStatus(schedule, new Date());
+  // החלטת האישור משתמשת באותו timestamp שהגיע מה-Main (השעון המהימן),
+  // ולא בשעון מערכת שעלול להיות שונה לאחר שינוי ידני.
+  const confirmationNow = status && status.now ? new Date(status.now) : new Date();
+  const stNow = T.getStatus(schedule, confirmationNow);
   const locksNow = !!(hasPin() && schedule.enabled &&
     (stNow.state === 'blocked' || stNow.state === 'netblock'));
   if (locksNow) {
@@ -422,10 +425,31 @@ function renderSlotRow(day, idx, isOverlap) {
   const end = document.createElement('input');
   end.type = 'time';
   end.className = 'time-input';
+  // input[type=time] אינו מקבל את הערך התקני 24:00 בדפדפנים. מציגים
+  // 23:59 בשדה (הערך האחרון האפשרי בבורר) ומספקים כפתור מפורש לסוף היום,
+  // כדי שלא נאבד חלונות שמסתיימים ב-1440 דקות או נציג שדה ריק.
   end.value = slot.end >= 1440 ? '23:59' : T.fmtHM(slot.end);
+  end.title = slot.end >= 1440 ? 'סוף היום — 24:00' : 'שעת סיום';
+  end.setAttribute('aria-label', slot.end >= 1440 ? 'שעת סיום — סוף היום, 24:00' : 'שעת סיום');
   end.onchange = async () => {
     if (!(await verifyPinSession())) { renderWeek(); return; }
-    slot.end = T.parseHM(end.value);
+    const parsed = T.parseHM(end.value);
+    if (parsed == null) { renderWeek(); return; }
+    slot.end = parsed;
+    renderWeek();
+    persist();
+    refreshStatus(); // עדכון מיידי של הספירה לאחור לפי הלוח החדש
+  };
+
+  const endDayBtn = document.createElement('button');
+  endDayBtn.type = 'button';
+  endDayBtn.className = 'end-day-btn' + (slot.end >= 1440 ? ' active' : '');
+  endDayBtn.textContent = slot.end >= 1440 ? '24:00' : 'סוף היום';
+  endDayBtn.title = slot.end >= 1440 ? 'החלפה לסיום ב-23:59' : 'הגדרת סיום החלון ל-24:00 (סוף היום)';
+  endDayBtn.setAttribute('aria-pressed', slot.end >= 1440 ? 'true' : 'false');
+  endDayBtn.onclick = async () => {
+    if (!(await verifyPinSession())) { renderWeek(); return; }
+    slot.end = slot.end >= 1440 ? 1439 : 1440;
     renderWeek();
     persist();
     refreshStatus(); // עדכון מיידי של הספירה לאחור לפי הלוח החדש
@@ -477,7 +501,7 @@ function renderSlotRow(day, idx, isOverlap) {
     else toast('החלון כבר קיים בכל הימים');
   };
 
-  row.append(start, dash, end, typeBtn, allDaysBtn, del);
+  row.append(start, dash, end, endDayBtn, typeBtn, allDaysBtn, del);
   return row;
 }
 

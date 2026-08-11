@@ -104,6 +104,24 @@
     return out;
   }
 
+  function parseScheduleHM(value, allowEndOfDay) {
+    if (typeof value === 'number') {
+      if (!Number.isFinite(value) || !Number.isInteger(value) || value < 0 || value > 1440) return null;
+      if (value === 1440 && !allowEndOfDay) return null;
+      return value;
+    }
+    const text = String(value == null ? '' : value).trim();
+    const match = /^(\d{2}):(\d{2})$/.exec(text);
+    if (!match) return null;
+    const h = Number(match[1]);
+    const m = Number(match[2]);
+    if (m > 59 || h > 23) {
+      if (allowEndOfDay && h === 24 && m === 0) return 1440;
+      return null;
+    }
+    return h * 60 + m;
+  }
+
   function normalizeSchedule(s) {
     const base = defaultSchedule();
     if (!s || typeof s !== 'object') return base;
@@ -136,15 +154,15 @@
     };
     for (let d = 0; d < 7; d++) {
       const src = (s.week || [])[d] || { slots: [] };
-      const slots = (src.slots || [])
+      const slots = (Array.isArray(src.slots) ? src.slots : [])
         .filter((x) => x && typeof x === 'object')
         .map((x) => ({
-          start: parseHM(x.start),
-          end: parseHM(x.end),
+          start: parseScheduleHM(x.start, false),
+          end: parseScheduleHM(x.end, true),
           // שלושה סוגי חלונות: מותר, חסום (נעילת מחשב מלאה) או חסימת אינטרנט בלבד
           type: x.type === 'allowed' ? 'allowed' : x.type === 'netblock' ? 'netblock' : 'blocked'
         }))
-        .filter((x) => x.start !== x.end);
+        .filter((x) => x.start !== null && x.end !== null && x.start !== x.end);
       out.week.push({ day: d, slots });
     }
     return out;

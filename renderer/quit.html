@@ -141,6 +141,64 @@
       80% { transform: translateX(5px); }
     }
     .locked { opacity: 0.55; pointer-events: none; }
+    /* ---------- חלונית יציאה בשפה של ממשק הניהול ---------- */
+    body::before, body::after { display: none; }
+    body {
+      background:
+        radial-gradient(520px 360px at 86% 0%, rgba(224, 66, 87, .12), transparent 68%),
+        radial-gradient(520px 360px at 4% 100%, rgba(51, 127, 178, .14), transparent 68%),
+        #f4f7fb;
+    }
+    :root[data-theme='light'] {
+      color-scheme: light;
+      --q-bg: #f4f7fb;
+      --q-panel: rgba(255,255,255,.97);
+      --q-border: #d5dee8;
+      --q-shadow: 0 24px 64px rgba(31,52,78,.18), 0 2px 8px rgba(31,52,78,.06);
+      --q-title: none;
+      --q-input-bg: #fff;
+      --text: #172238;
+      --muted: #68768b;
+      --border: #e1e7ef;
+      --border-strong: #b8c7d7;
+      --accent: #337fb2;
+      --accent-2: #26719f;
+      --red: #c83e4d;
+      --red-bg: #fff0f1;
+    }
+    :root[data-theme='light'] .quit-screen {
+      max-width: 430px;
+      padding: 34px 36px 30px;
+      border-radius: 22px;
+      backdrop-filter: blur(8px);
+    }
+    :root[data-theme='light'] .quit-icon {
+      width: 76px; height: 76px; margin-bottom: 20px;
+      border-radius: 22px;
+      background: linear-gradient(145deg, #df5664, #bd3042);
+      box-shadow: 0 12px 28px rgba(200,62,77,.28), inset 0 2px 0 rgba(255,255,255,.35);
+    }
+    :root[data-theme='light'] .quit-icon .icon { width: 37px; height: 37px; }
+    :root[data-theme='light'] .quit-title {
+      color: #172238; background: none; -webkit-text-fill-color: currentColor;
+      font-size: 29px;
+    }
+    :root[data-theme='light'] .quit-sub { color: #68768b; font-size: 15px; }
+    :root[data-theme='light'] .quit-warn {
+      background: #fff8e6; border-color: #efd58a; color: #6e5a22;
+    }
+    :root[data-theme='light'] .quit-input {
+      border-color: #b8c7d7; color: #172238; font-size: 19px;
+      padding-block: 14px;
+    }
+    :root[data-theme='light'] .quit-input:focus { border-color: #337fb2; box-shadow: 0 0 0 3px rgba(51,127,178,.18); }
+    :root[data-theme='light'] .quit-actions .btn-danger { background: #c83e4d; box-shadow: 0 7px 16px rgba(200,62,77,.2); }
+    :root[data-theme='light'] .quit-actions .btn-ghost { color: #52657a; border-color: #c8d3df; background: #fff; }
+    :root[data-theme='light'] .quit-actions .btn-ghost:hover { border-color: #337fb2; background: #eef6fb; }
+    @media (max-width: 420px) {
+      :root[data-theme='light'] .quit-screen { padding-inline: 22px; }
+      :root[data-theme='light'] .quit-actions { flex-direction: column; }
+    }
   </style>
 </head>
 <body>

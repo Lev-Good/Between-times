@@ -73,6 +73,18 @@
       70% { transform: scale(1.25); opacity: 0; }
       100% { transform: scale(1.25); opacity: 0; }
     }
+    /* ---------- אייקון רשת תואם למערכת העיצוב ---------- */
+    :root { --ni-ring: rgba(200,62,77,.38); --ni-bg: linear-gradient(145deg,#ffffff,#f9e8eb); --ni-border: #d7aab1; --ni-icon: #c83e4d; --ni-shadow: 0 8px 22px rgba(79,35,45,.24); --ni-tip: #24354a; }
+    :root[data-theme='dark'] { --ni-ring: rgba(251,113,133,.42); --ni-bg: linear-gradient(145deg,#202b3c,#3c2330); --ni-border: rgba(255,255,255,.18); --ni-icon: #ff8b9b; --ni-shadow: 0 8px 24px rgba(0,0,0,.45); --ni-tip: #f2f3ff; }
+    .net-badge .ring { width: 66px; height: 66px; border-width: 1.5px; }
+    .net-badge .core { width: 58px; height: 58px; border-radius: 18px; }
+    .net-badge .core svg { width: 29px; height: 29px; }
+    .net-badge .tip {
+      top: calc(50% + 35px); padding: 5px 9px; border-radius: 7px;
+      background: rgba(255,255,255,.94); border: 1px solid #d5dee8;
+      box-shadow: 0 5px 14px rgba(31,52,78,.14); color: #24354a;
+    }
+    :root[data-theme='dark'] .net-badge .tip { background: rgba(27,34,50,.94); border-color: rgba(255,255,255,.16); color: #f2f3ff; }
   </style>
 </head>
 <body>

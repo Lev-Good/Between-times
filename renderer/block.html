@@ -428,6 +428,103 @@
     .chip-particles { background: radial-gradient(circle, #f2f3ff 1px, transparent 2px) 0 0/10px 10px, #141428; }
     .chip-aurora { background: linear-gradient(135deg, #7b6bff, #34d399); }
     @keyframes bgFade { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+    /* ---------- סבב עיצוב בהיר למסך החסימה ----------
+       שפה רגועה וברורה למסך שילד רואה לאורך זמן: כרטיס לבן, היררכיה
+       קצרה, צבעים עם משמעות קבועה וניגודיות טובה. ההתנהגות והפעולות
+       נשארות ללא שינוי. */
+    body::before, body::after { display: none; }
+    body {
+      background:
+        radial-gradient(760px 420px at 88% 4%, rgba(224, 66, 87, 0.12), transparent 65%),
+        radial-gradient(680px 420px at 8% 96%, rgba(59, 130, 246, 0.14), transparent 66%),
+        #f4f7fb;
+    }
+    :root[data-theme='light'] {
+      color-scheme: light;
+      --b-bg: #f4f7fb;
+      --b-panel: rgba(255, 255, 255, 0.94);
+      --b-border: #d9e0ea;
+      --b-shadow: 0 24px 70px rgba(31, 52, 78, 0.16), 0 2px 8px rgba(31, 52, 78, 0.06);
+      --b-title: none;
+      --b-count-bg: #f6f8fb;
+      --b-input-bg: #fff;
+      --text: #172238;
+      --muted: #68768b;
+      --border: #e2e7ef;
+      --border-strong: #b8c4d3;
+      --accent: #337fb2;
+      --accent-2: #26719f;
+      --red: #c83e4d;
+    }
+    :root[data-theme='light'] .block-screen {
+      width: min(560px, calc(100vw - 32px));
+      max-width: none;
+      padding: 34px 36px 28px;
+      border-radius: 24px;
+      backdrop-filter: blur(10px);
+    }
+    :root[data-theme='light'] .block-icon {
+      width: 88px; height: 88px; margin-bottom: 18px;
+      border-radius: 24px;
+      background: linear-gradient(145deg, #df5664, #bd3042);
+      box-shadow: 0 12px 28px rgba(200, 62, 77, 0.28), inset 0 2px 0 rgba(255,255,255,.35);
+      animation: none;
+    }
+    :root[data-theme='light'] .block-icon .icon { width: 43px; height: 43px; }
+    :root[data-theme='light'] .block-title {
+      color: #162238;
+      background: none;
+      -webkit-text-fill-color: currentColor;
+      font-size: 34px;
+      letter-spacing: -.7px;
+    }
+    :root[data-theme='light'] .block-sub { color: #68768b; font-size: 15px; }
+    :root[data-theme='light'] .block-msg { color: #8d2836; }
+    :root[data-theme='light'] .clocks { gap: 9px; margin-top: 20px; }
+    :root[data-theme='light'] .clock-card {
+      background: #f8fafc;
+      border-color: #e1e7ef;
+      border-radius: 14px;
+      padding: 10px 6px 9px;
+    }
+    :root[data-theme='light'] .clock-face { width: 62px; height: 62px; }
+    :root[data-theme='light'] .clock-face .cf-ring { stroke: #b7c5d5; }
+    :root[data-theme='light'] .clock-face .cf-tick { stroke: #8393a7; }
+    :root[data-theme='light'] .clock-face .cf-hour { stroke: #26374e; }
+    :root[data-theme='light'] .clock-face .cf-second { stroke: #c83e4d; }
+    :root[data-theme='light'] .clock-value { color: #26719f; font-size: 15px; }
+    :root[data-theme='light'] .block-count { color: #68768b; }
+    :root[data-theme='light'] .torah-quote {
+      margin-top: 18px; padding: 14px 18px 11px;
+      background: #f6f8fb; border-color: #e1e7ef; border-radius: 14px;
+    }
+    :root[data-theme='light'] .torah-quote::before { color: #337fb2; }
+    :root[data-theme='light'] .tq-text { color: #24354a; font-size: 14.5px; }
+    :root[data-theme='light'] .tq-source { color: #337fb2; }
+    :root[data-theme='light'] .unlock-toggle,
+    :root[data-theme='light'] .bg-btn,
+    :root[data-theme='light'] .study-apps-btn { border-style: solid; border-color: #c8d3df; color: #52657a; background: #fff; }
+    :root[data-theme='light'] .unlock-toggle:hover,
+    :root[data-theme='light'] .bg-btn:hover,
+    :root[data-theme='light'] .study-apps-btn:hover { color: #1d5278; border-color: #337fb2; background: #eef6fb; }
+    :root[data-theme='light'] .pin-box .text-input { border-color: #b8c7d7; color: #172238; }
+    :root[data-theme='light'] .pin-box .btn-primary,
+    :root[data-theme='light'] #noPinBox .btn-primary { background: #337fb2; box-shadow: 0 7px 16px rgba(51,127,178,.22); }
+    :root[data-theme='light'] .btn-ghost { color: #52657a; border-color: #c8d3df; background: #fff; }
+    :root[data-theme='light'] .btn-ghost:hover { border-color: #337fb2; background: #eef6fb; }
+    :root[data-theme='light'] .restore-fab,
+    :root[data-theme='light'] .minimize-btn { background: rgba(255,255,255,.94); border-color: #cbd6e2; color: #52657a; box-shadow: 0 8px 22px rgba(31,52,78,.12); }
+    :root[data-theme='light'] .bg-picker,
+    :root[data-theme='light'] .study-apps-panel { background: rgba(255,255,255,.98); border-color: #d5dee8; box-shadow: 0 14px 34px rgba(31,52,78,.16); }
+    :root[data-theme='light'] .bg-option,
+    :root[data-theme='light'] .study-app { background: #f7f9fc; border-color: #e0e6ee; color: #24354a; }
+    :root[data-theme='light'] .bg-option.active { border-color: #337fb2; box-shadow: 0 0 0 2px rgba(51,127,178,.16); }
+    :root[data-theme='light'] .block-reason { background: #fff8e6; border-color: #efd58a; color: #6e5a22; }
+    @media (max-width: 520px) {
+      :root[data-theme='light'] .block-screen { padding-inline: 20px; }
+      :root[data-theme='light'] .block-title { font-size: 29px; }
+      :root[data-theme='light'] .clock-label { font-size: 11px; }
+    }
   </style>
 </head>
 <body data-bg="blobs">
@@ -921,8 +1018,15 @@
       renderStudyApps(status);
       // משפטי העידוד מהמקורות — ניתנים להסתרה מההגדרות (showTorahQuotes)
       tqBox.classList.toggle('tq-hidden', status.showTorahQuotes === false);
-      // ללא סיסמה מוגדרת — מסך החסימה מציע דרך החוצה במקום שדה סיסמה
-      if (status.pinSet === false) {
+      // קובץ הגדרות פגום הוא מצב Fail Closed: אין להציג כפתור "דלג"
+      // שיכול להיראות כמו פתיחה מוצלחת. התיקון מתבצע דרך חלון ההגדרות.
+      if (status.configError) {
+        pinBox.style.display = 'none';
+        pinToggle.style.display = 'none';
+        noPinBox.style.display = 'none';
+        lockMsg.textContent = 'קובץ ההגדרות פגום — פתחו את ההגדרות כדי לתקן או לשחזר גיבוי';
+        lockMsg.classList.remove('ok');
+      } else if (status.pinSet === false) {
         pinBox.style.display = 'none';
         pinToggle.style.display = 'none';
         noPinBox.style.display = '';

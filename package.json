@@ -1,7 +1,7 @@
 {
   "name": "ben-hazmanim",
   "productName": "בין הזמנים - ניהול זמן מחשב",
-  "version": "1.5.2",
+  "version": "1.5.3",
   "description": "ניהול שעות גישה למחשב - הגדרת שעות וימים מותרים/חסומים מראש",
   "main": "main.js",
   "author": "לב טוב דיגיטל <mytovmail@gmail.com> (https://digital.levtov.uk/)",
@@ -36,15 +36,15 @@
       "icon": "assets/icon.ico",
       "artifactName": "Setup.${version}.exe"
     },
-  "nsis": {
-    "oneClick": true,
-    "perMachine": false,
-    "installerLanguages": [
-      "he_IL",
-      "en_US"
-    ],
-    "deleteAppDataOnUninstall": true,
-    "include": "build/installer.nsh"
-  }
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "installerLanguages": [
+        "he_IL",
+        "en_US"
+      ],
+      "deleteAppDataOnUninstall": true,
+      "include": "build/installer.nsh"
+    }
   }
 }

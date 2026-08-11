@@ -689,6 +689,16 @@ button.type-badge:hover {
 }
 button.type-badge:hover .icon { opacity: 0.85; transform: rotate(180deg); }
 button.type-badge:active { transform: scale(0.97); }
+.end-day-btn {
+  background: none; border: 1px solid var(--border-strong);
+  color: var(--muted); cursor: pointer; font-family: inherit;
+  font-size: 11px; font-weight: 700;
+  padding: 4px 8px; border-radius: 999px;
+  transition: color 0.15s var(--ease), border-color 0.15s var(--ease), background 0.15s var(--ease);
+}
+.end-day-btn:hover, .end-day-btn.active {
+  color: var(--accent); border-color: var(--accent); background: rgba(123, 107, 255, 0.12);
+}
 .all-days-btn {
   display: inline-flex; align-items: center; gap: 4px;
   background: none; border: 1px solid var(--border-strong);
@@ -1361,4 +1371,240 @@ button.type-badge:active { transform: scale(0.97); }
   background: linear-gradient(135deg, var(--accent), var(--accent-2));
   color: #fff;
   box-shadow: 0 4px 14px rgba(123, 107, 255, 0.4);
+}
+
+/* ============================================================
+   רענון עיצוב 2026 — בהשראת לוח הזמנים והדשבורד החדשים
+   ============================================================ */
+
+/* חלון רחב יותר: מאפשר לוח שבועי קריא ודשבורד שאינו דחוס */
+.app {
+  max-width: 1440px;
+  padding: 30px 34px 72px;
+}
+
+/* ניווט עליון שטוח וברור — בדומה לאפליקציית ניהול מקצועית */
+.app { display: flex; flex-direction: column; }
+.update-banner, .warn-banner, .setup-banner { order: 0; }
+.tabs {
+  order: 1;
+  margin: 0 0 28px;
+  padding: 0 6px;
+  gap: 0;
+  border: 0;
+  border-bottom: 1px solid var(--border-strong);
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+}
+.hero { order: 2; }
+.tab-panel { order: 3; }
+.footer { order: 4; }
+.tab-btn {
+  flex: 0 0 auto;
+  min-width: 148px;
+  padding: 14px 24px 13px;
+  border-radius: 0;
+  color: var(--muted);
+  position: relative;
+}
+.tab-btn::after {
+  content: "";
+  position: absolute;
+  inset-inline: 18px;
+  bottom: -1px;
+  height: 3px;
+  border-radius: 3px 3px 0 0;
+  background: transparent;
+  transition: background 0.2s var(--ease), transform 0.2s var(--ease);
+  transform: scaleX(0.5);
+}
+.tab-btn:hover { background: transparent; color: var(--text); }
+.tab-btn.active {
+  background: transparent;
+  color: var(--accent);
+  box-shadow: none;
+}
+.tab-btn.active::after { background: var(--accent); transform: scaleX(1); }
+
+/* כרטיסים בהירים: גבול עדין והיררכיה נקייה */
+.card {
+  border-radius: 18px;
+  padding: 28px;
+  box-shadow: var(--shadow-md);
+}
+.card-head h2 { font-size: 21px; }
+.card-head h2::before { height: 22px; width: 5px; }
+.hint { font-size: 13px; }
+
+/* כרטיס מצב — פחות זכוכית, יותר לוח בקרה */
+.status-card {
+  min-height: 154px;
+  padding: 26px 30px;
+  border-radius: 18px;
+}
+.status-title { font-size: 26px; }
+.status-detail { font-size: 14px; }
+
+/* מצב ברירת מחדל — בחירה ברורה ומודגשת */
+.mode-btn { min-height: 92px; padding: 19px 20px; border-radius: 14px; }
+.mode-btn.active { box-shadow: 0 7px 20px rgba(123, 107, 255, 0.16); }
+.mode-text strong { font-size: 16px; }
+
+/* לוח שבועי: שבעה ימים במסך רחב, בלי לאבד קריאות */
+.week-grid { grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 12px; }
+.day-card { padding: 13px 11px; border-radius: 14px; }
+.day-name { font-size: 14px; }
+.day-clock { width: 138px; height: 138px; }
+.slot-row { padding: 7px 8px; gap: 5px; }
+.time-input { width: 72px; padding-inline: 6px; }
+.end-day-btn, .all-days-btn { padding-inline: 6px; font-size: 10px; }
+.type-badge { padding-inline: 8px; }
+.add-slot { font-size: 12px; }
+
+/* סטטיסטיקות: חמישה מדדים עם אייקון ומספר גדול */
+.stats-cards { gap: 14px; }
+.stat-card {
+  position: relative;
+  min-height: 108px;
+  padding: 18px 20px;
+  text-align: right;
+  overflow: hidden;
+}
+.stat-card::after {
+  content: "";
+  position: absolute;
+  width: 90px; height: 90px;
+  border-radius: 50%;
+  inset-inline-start: -28px;
+  bottom: -42px;
+  background: currentColor;
+  opacity: 0.055;
+}
+.stat-icon {
+  position: absolute;
+  inset-inline-start: 16px;
+  top: 17px;
+  width: 34px; height: 34px;
+  display: grid; place-items: center;
+  border-radius: 10px;
+  background: var(--ghost-bg);
+  border: 1px solid var(--border);
+}
+.stat-icon .icon { width: 18px; height: 18px; }
+.stat-icon-blocked { color: var(--red); }
+.stat-icon-week { color: var(--accent); }
+.stat-icon-manual { color: var(--yellow); }
+.stat-icon-success { color: var(--green); }
+.stat-icon-fail { color: var(--red); }
+.stat-label { font-size: 12px; padding-inline-end: 42px; margin-bottom: 10px; }
+.stat-value { font-size: 28px; line-height: 1; }
+.stats-sub { font-size: 18px; margin-top: 26px; }
+.bar-chart { height: 210px; padding: 18px 22px 0; border-radius: 16px; gap: 18px; }
+.bar-fill { max-width: 58px; border-radius: 9px 9px 3px 3px; }
+.event-row { padding: 12px 16px; border-radius: 10px; }
+
+/* מקטעי הגדרות — כרטיסים אחידים עם שטח נשימה */
+.settings-grid { gap: 14px 18px; }
+.setting {
+  min-height: 76px;
+  padding: 17px 19px;
+  border-radius: 15px;
+}
+.setting-text strong { font-size: 15px; }
+.setting-text span { font-size: 13px; }
+.theme-setting { min-height: 78px; }
+.recovery-grid { gap: 18px 26px; }
+
+/* חלוניות: נקיות, רחבות מעט יותר ומדגישות את הפעולה הראשית */
+.modal { width: min(420px, calc(100vw - 36px)); padding: 32px; border-radius: 18px; }
+.modal.login { width: min(410px, calc(100vw - 36px)); }
+.modal h3 { font-size: 23px; }
+.modal p { font-size: 14px; line-height: 1.65; }
+.modal .text-input { min-height: 48px; }
+.modal-actions .btn { min-width: 120px; }
+
+/* מצב בהיר בסגנון הדשבורד שבתמונות */
+:root[data-theme='light'] {
+  --bg: #f4f6fa;
+  --bg-2: #eef1f6;
+  --surface: #ffffff;
+  --surface-2: #f8fafc;
+  --surface-3: #e8eef5;
+  --text: #17212b;
+  --muted: #637080;
+  --accent: #3f7ea5;
+  --accent-2: #5b9bc2;
+  --green: #398d50;
+  --green-bg: rgba(57, 141, 80, 0.12);
+  --red: #bd4a45;
+  --red-bg: rgba(189, 74, 69, 0.11);
+  --yellow: #c28b16;
+  --yellow-bg: rgba(194, 139, 22, 0.12);
+  --border: rgba(38, 55, 70, 0.14);
+  --border-strong: rgba(38, 55, 70, 0.25);
+  --shadow-lg: 0 24px 65px rgba(55, 72, 88, 0.16), 0 3px 12px rgba(55, 72, 88, 0.08);
+  --shadow-md: 0 10px 28px rgba(55, 72, 88, 0.12);
+  --shadow-sm: 0 3px 12px rgba(55, 72, 88, 0.09);
+  --glow-1: rgba(91, 155, 194, 0.12);
+  --glow-2: rgba(57, 141, 80, 0.045);
+  --glow-3: rgba(91, 155, 194, 0.04);
+  --grid-line: rgba(38, 55, 70, 0.045);
+  --tabs-bg: transparent;
+  --status-grad: linear-gradient(135deg, #ffffff, #f4f8fb);
+  --card-grad: #ffffff;
+  --card2-grad: linear-gradient(180deg, #ffffff, #fbfcfd);
+  --mode-grad: linear-gradient(180deg, #ffffff, #f7fafc);
+  --clock-face: #f9fbfd;
+  --slot-bg: #f8fafc;
+  --setting-bg: #f9fbfd;
+  --ghost-bg: rgba(38, 55, 70, 0.055);
+  --mode-icon-bg: #edf3f7;
+  --overlay-bg: rgba(28, 39, 48, 0.42);
+  --toast-bg: rgba(255, 255, 255, 0.98);
+  --scroller: rgba(38, 55, 70, 0.2);
+  --scroller-hover: rgba(38, 55, 70, 0.34);
+}
+:root[data-theme='light'] body::before {
+  background: radial-gradient(850px 420px at 90% -10%, rgba(91, 155, 194, 0.1), transparent 68%), var(--bg);
+}
+:root[data-theme='light'] .tabs { border-bottom-color: #c9d2da; }
+:root[data-theme='light'] .tab-btn.active { color: #2f6f96; }
+:root[data-theme='light'] .mode-btn.active { border-color: #5b9bc2; background: #eef6fb; }
+:root[data-theme='light'] .status-card::before { background: linear-gradient(135deg, rgba(63, 126, 165, 0.22), transparent 42%); }
+:root[data-theme='light'] .status-inner { background: #ffffff; }
+:root[data-theme='light'] .btn-primary { background: #3f7ea5; box-shadow: 0 5px 16px rgba(63, 126, 165, 0.28); }
+:root[data-theme='light'] .btn-danger { background: #bd4a45; box-shadow: 0 5px 16px rgba(189, 74, 69, 0.24); }
+:root[data-theme='light'] .btn-ghost:hover { background: #edf5f9; color: #2f6f96; }
+:root[data-theme='light'] .modal { background: #ffffff; border-color: #cbd5dd; }
+:root[data-theme='light'] .stat-card { border-top: 3px solid var(--accent); }
+:root[data-theme='light'] .stat-icon-blocked { color: var(--red); }
+:root[data-theme='light'] .stat-icon-week { color: var(--accent); }
+:root[data-theme='light'] .stat-icon-manual { color: var(--yellow); }
+:root[data-theme='light'] .stat-icon-success { color: var(--green); }
+:root[data-theme='light'] .stat-icon-fail { color: var(--red); }
+
+/* התאמות רוחב */
+@media (max-width: 1250px) {
+  .week-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
+@media (max-width: 900px) {
+  .app { padding-inline: 20px; }
+  .week-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .stats-cards { grid-template-columns: repeat(3, 1fr); }
+}
+@media (max-width: 760px) {
+  .app { padding: 20px 14px 56px; }
+  .tabs { overflow-x: auto; }
+  .tab-btn { min-width: 115px; padding-inline: 14px; }
+  .week-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .stats-cards { grid-template-columns: repeat(2, 1fr); }
+  .status-card { min-height: 0; }
+}
+@media (max-width: 520px) {
+  .week-grid { grid-template-columns: 1fr; }
+  .stats-cards { grid-template-columns: 1fr; }
+  .mode-toggle { grid-template-columns: 1fr; }
+  .stat-card { min-height: 96px; }
 }
