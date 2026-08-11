@@ -502,7 +502,8 @@ function buildStatus() {
     secondsUntilLabel: st.secondsUntilNext != null ? S.formatDuration(st.secondsUntilNext) : null,
     pinSet: !!schedule.pinHash,
     netBlockFailed: netBlockFailed,
-    blockBg: schedule.blockBg
+    blockBg: schedule.blockBg,
+    showTorahQuotes: schedule.showTorahQuotes !== false
   };
 }
 

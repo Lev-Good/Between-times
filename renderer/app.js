@@ -667,6 +667,7 @@ function applySettingsToUI() {
   $('recoveryEmail').value = schedule.recoveryEmail || '';
   $('blockMessage').value = schedule.blockMessage || '';
   $('netIconToggle').checked = schedule.showNetIcon !== false;
+  $('torahQuotesToggle').checked = schedule.showTorahQuotes !== false;
   updateMasterLabel();
   setModeUI();
   applyTheme();
@@ -1143,6 +1144,17 @@ function init() {
     schedule.showNetIcon = $('netIconToggle').checked;
     await persist();
     refreshStatus(); // התהליך הראשי יפתח/יסגור את האייקון לפי ההגדרה החדשה
+  };
+
+  /* ---------- משפטי עידוד מהמקורות במסך החסימה ---------- */
+  $('torahQuotesToggle').onchange = async () => {
+    if (!(await verifyPinSession())) {
+      $('torahQuotesToggle').checked = schedule.showTorahQuotes !== false;
+      return;
+    }
+    schedule.showTorahQuotes = $('torahQuotesToggle').checked;
+    await persist();
+    refreshStatus(); // מסך החסימה יקבל את ההגדרה החדשה
   };
 
   /* ---------- סיסמה ---------- */

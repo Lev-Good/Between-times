@@ -199,6 +199,47 @@
       font-size: 14px; font-weight: 600; margin-top: 14px;
       color: var(--muted); min-height: 20px;
     }
+    /* משפטי עידוד מחזקים מהמקורות — מתחלפים מדי כמה שניות */
+    .torah-quote {
+      margin-top: 22px;
+      padding: 18px 20px 14px;
+      background: var(--b-count-bg);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      position: relative;
+    }
+    .torah-quote::before {
+      content: '❝';
+      position: absolute;
+      top: 2px;
+      inset-inline-start: 12px;
+      font-size: 28px;
+      line-height: 1;
+      color: var(--accent);
+      opacity: 0.45;
+      pointer-events: none;
+    }
+    .tq-text {
+      font-size: 15.5px;
+      font-weight: 700;
+      line-height: 1.9;
+      color: var(--text);
+      text-align: center;
+    }
+    .tq-source {
+      margin-top: 8px;
+      font-size: 12.5px;
+      font-weight: 700;
+      color: var(--accent-2);
+      text-align: center;
+      letter-spacing: 0.3px;
+    }
+    .torah-quote.tq-hidden { display: none; }
+    .torah-quote.tq-fade-in { animation: tqFade 0.6s ease; }
+    @keyframes tqFade {
+      from { opacity: 0; transform: translateY(8px); }
+      to { opacity: 1; transform: none; }
+    }
     /* כפתור פתיחה קטן ושקט — שדה הסיסמה מוסתר כברירת מחדל (לחיצה פותחת) */
     .unlock-toggle {
       margin-top: 24px;
@@ -388,6 +429,11 @@
       </div>
     </div>
     <div class="block-count" id="countdown"></div>
+    <!-- משפטי עידוד מחזקים מהמקורות — מתחלפים מדי כמה שניות -->
+    <div class="torah-quote" id="torahQuote">
+      <div class="tq-text" id="tqText"></div>
+      <div class="tq-source" id="tqSource"></div>
+    </div>
     <!-- כפתור קטן ושקט לפתיחה בסיסמה — מיועד למקרי חירום בלבד,
          ולכן שדה הסיסמה מוסתר ומוצג רק בלחיצה על הכפתור -->
     <button class="unlock-toggle" id="pinToggle" type="button">
@@ -440,6 +486,7 @@
   </button>
 
   <script src="../scheduler.js"></script>
+  <script src="torah-quotes.js"></script>
   <script src="vendor/webgl-fluid-simulation.js"></script>
   <script>
     const T = window.TimeScheduler;
@@ -450,6 +497,36 @@
     const pinToggle = document.getElementById('pinToggle');
     const lockMsg = document.getElementById('lockMsg');
     const blockMsg = document.getElementById('blockMsg');
+
+    /* ---------- משפטי עידוד מחזקים מהמקורות ----------
+       כל משפט הוא ציטוט מדויק מתוך התנ"ך, המשנה או התלמוד.
+       המשפטים מתחלפים כל 25 שניות ללא חזרה עד שמסתיים הסיבוב. */
+    const tqText = document.getElementById('tqText');
+    const tqSource = document.getElementById('tqSource');
+    const tqBox = document.getElementById('torahQuote');
+    let tqOrder = null; // סדר המשפטים המעורבב (כל משפט מוצג פעם אחת בסיבוב)
+    function tqShuffle() {
+      tqOrder = window.TORAH_QUOTES.map((_, i) => i);
+      for (let i = tqOrder.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        const tmp = tqOrder[i]; tqOrder[i] = tqOrder[j]; tqOrder[j] = tmp;
+      }
+    }
+    function showNextQuote() {
+      if (!window.TORAH_QUOTES || !window.TORAH_QUOTES.length) {
+        tqBox.classList.add('tq-hidden');
+        return;
+      }
+      if (!tqOrder || !tqOrder.length) tqShuffle();
+      const q = window.TORAH_QUOTES[tqOrder.pop()];
+      tqText.textContent = q.t;
+      tqSource.textContent = q.s;
+      tqBox.classList.remove('tq-fade-in');
+      void tqBox.offsetWidth; // אתחול האנימציה מחדש
+      tqBox.classList.add('tq-fade-in');
+    }
+    showNextQuote();
+    setInterval(showNextQuote, 25000);
     let lockUntil = 0; // אם במצב נעילה זמנית — מתי היא מסתיימת
     let pinExpanded = false; // המשתמש לחץ על "פתיחה בסיסמת ההורה"
 
@@ -716,6 +793,8 @@
       if (!status) return;
       applyBlockTheme(status.theme);
       applyBg(status.blockBg);
+      // משפטי העידוד מהמקורות — ניתנים להסתרה מההגדרות (showTorahQuotes)
+      tqBox.classList.toggle('tq-hidden', status.showTorahQuotes === false);
       // ללא סיסמה מוגדרת — מסך החסימה מציע דרך החוצה במקום שדה סיסמה
       if (status.pinSet === false) {
         pinBox.style.display = 'none';
@@ -854,7 +933,8 @@
         pinSet: true,
         theme: 'dark',
         blockMessage: '',
-        blockBg: 'blobs'
+        blockBg: 'blobs',
+        showTorahQuotes: true
       });
     }
   </script>

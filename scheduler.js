@@ -62,6 +62,7 @@
       manualUnlockUntil: null,
       showNetIcon: true,        // אייקון צף קטן כשהמחשב פתוח והאינטרנט חסום
       blockBg: 'blobs',         // רקע מסך החסימה: blobs | fluid | particles | aurora
+      showTorahQuotes: true,    // משפטי עידוד מהמקורות במסך החסימה
       week
     };
   }
@@ -91,6 +92,7 @@
       updateUrl: String(s.updateUrl || '').trim(),
       showNetIcon: s.showNetIcon !== false,
       blockBg: ['blobs', 'fluid', 'particles', 'aurora'].includes(s.blockBg) ? s.blockBg : 'blobs',
+      showTorahQuotes: s.showTorahQuotes !== false,
       week: []
     };
     for (let d = 0; d < 7; d++) {

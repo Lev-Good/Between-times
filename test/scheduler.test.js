@@ -493,3 +493,9 @@ test('showNetIcon defaults to true and survives normalize', () => {
   assert.equal(S.normalizeSchedule({ showNetIcon: false }).showNetIcon, false);
 });
 
+test('showTorahQuotes defaults to true and survives normalize', () => {
+  assert.equal(S.defaultSchedule().showTorahQuotes, true);
+  assert.equal(S.normalizeSchedule({}).showTorahQuotes, true);
+  assert.equal(S.normalizeSchedule({ showTorahQuotes: false }).showTorahQuotes, false);
+});
+
