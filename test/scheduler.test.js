@@ -61,6 +61,30 @@ test('allowlist mode allows only listed slots', () => {
   assert.equal(S.getStatus(s, outSlot).state, 'blocked');
 });
 
+test('blockedByDefault: חסימה בברירת המחדל של "התר" מסומנת; חסימה מחלון אינה', () => {
+  // "התר" עם לוח ריק — חסום לפי ברירת המחדל (ולא לפי חלון מוגדר)
+  const s = S.defaultSchedule();
+  s.mode = 'allowlist';
+  const st1 = S.getStatus(s, new Date(2026, 0, 5, 12, 0));
+  assert.equal(st1.state, 'blocked');
+  assert.equal(st1.blockedByDefault, true, 'חסימה לפי ברירת המחדל של התר');
+
+  // חלון חסום אמיתי (blocklist) — לא ברירת מחדל
+  const s2 = S.defaultSchedule();
+  s2.week[1].slots.push({ start: S.parseHM('11:00'), end: S.parseHM('13:00'), type: 'blocked' });
+  const st2 = S.getStatus(s2, new Date(2026, 0, 5, 12, 0));
+  assert.equal(st2.state, 'blocked');
+  assert.equal(st2.blockedByDefault, false, 'חסימה מחלון מוגדר');
+
+  // "התר" עם חלון מותר פעיל — פתוח, לא ברירת מחדל
+  const s3 = S.defaultSchedule();
+  s3.mode = 'allowlist';
+  s3.week[1].slots.push({ start: S.parseHM('11:00'), end: S.parseHM('13:00'), type: 'allowed' });
+  const st3 = S.getStatus(s3, new Date(2026, 0, 5, 12, 0));
+  assert.equal(st3.state, 'allowed');
+  assert.equal(st3.blockedByDefault, false);
+});
+
 test('overnight slot wraps to next day', () => {
   const s = S.defaultSchedule();
   s.week[0].slots.push({ start: S.parseHM('22:00'), end: S.parseHM('06:00'), type: 'blocked' });

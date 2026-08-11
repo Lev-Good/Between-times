@@ -395,6 +395,7 @@ function renderWeek() {
 
     grid.appendChild(card);
   });
+  updateModeWarning(); // כמות החלונות המותרים השתנתה — עדכון האזהרה
 }
 
 function renderSlotRow(day, idx, isOverlap) {
@@ -686,6 +687,27 @@ function updateMasterLabel() {
 function setModeUI() {
   $('modeBlocklist').classList.toggle('active', schedule.mode === 'blocklist');
   $('modeAllowlist').classList.toggle('active', schedule.mode === 'allowlist');
+  updateModeWarning();
+}
+
+/* ---------- אזהרת מצב "התר" (חסום תמיד) ----------
+   במצב "המחשב חסום תמיד" המחשב חסום בכל רגע שלא מסומן כ"מותר" — ואם אין
+   אף חלון מותר, הוא חסום 24/7. זה מצב מסוכן להיתקל בו בטעות (נראה כמו
+   באג: "אין זמנים מוגדרים אבל המחשב חסום"), לכן הוא מוצג באנר בולט. */
+function updateModeWarning() {
+  const warn = $('modeWarning');
+  const text = $('modeWarningText');
+  if (schedule.mode !== 'allowlist') { warn.classList.add('hidden'); return; }
+  const allowedSlots = (schedule.week || []).reduce(
+    (n, d) => n + (d.slots || []).filter((s) => s.type === 'allowed').length, 0);
+  const allowedOverrides = (schedule.overrides || []).filter((o) => o.type === 'allow').length;
+  if (allowedSlots + allowedOverrides === 0) {
+    warn.className = 'mode-warning severe';
+    text.innerHTML = '<strong>שימו לב — המחשב חסום כל הזמן!</strong> מצב "המחשב חסום תמיד" פעיל ואף חלון "מותר" לא מוגדר בלוח. אם זו לא הכוונה — חזרו למצב "המחשב פתוח תמיד" או הוסיפו חלונות "מותר".';
+  } else {
+    warn.className = 'mode-warning';
+    text.innerHTML = '<strong>מצב "המחשב חסום תמיד" פעיל.</strong> המחשב פתוח רק בחלונות "מותר" שבלוח — בכל שאר הזמנים הוא חסום.';
+  }
 }
 
 function showUpdateBanner(note) {

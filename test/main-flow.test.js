@@ -1836,3 +1836,79 @@ test('settings:save: פתיחה "עד המעבר הבא" לא מתבטלת בש�
   assert.equal(st3.nextAt, null, 'אין "המעבר הבא" פנטום אחרי מחיקת החלונות');
   m.cleanup();
 });
+
+/* ================= פתיחה \"עד המעבר הבא\" כשאין מעבר (התר ריק) ================= */
+
+// באג אמיתי מהשטח: מצב \"התר\" עם לוח ריק = חסום תמיד. פתיחה עם סיסמה נתנה
+// \"נפתח\" אבל מסך החסימה נשאר — כי הקוד שמר ערך manualUnlockUntil ישן שכבר
+// עבר במקום לתת חלון פתיחה רענן, והאכיפה המשיכה לראות את החסימה.
+test('unlock:now: \"התר\" ריק עם שארית פתיחה שעברה — פתיחה רעננה נפתחת בפועל', async () => {
+  const settings = S.defaultSchedule();
+  settings.mode = 'allowlist'; // חסום תמיד
+  settings.pinHash = S.sha256Hex('1234');
+  settings.manualUnlockUntil = new Date(2000, 0, 1).getTime(); // שארית ישנה שכבר עברה
+  const m = loadMain({ settings });
+  await m.ready();
+
+  const before = await m.ipcHandlers.get('status:get')();
+  assert.equal(before.state, 'blocked', 'לוח \"התר\" ריק חוסם תמיד');
+  assert.equal(before.blockedByDefault, true, 'החסימה לפי ברירת המחדל — מוסברת למסך החסימה');
+
+  const ul = await m.ipcHandlers.get('unlock:now')({}, '1234');
+  assert.ok(ul.ok, 'הפתיחה מצליחה');
+
+  const st = await m.ipcHandlers.get('status:get')();
+  assert.equal(st.state, 'allowed', 'המחשב פתוח בפועל — לא רק \"הכתוב נפתח\"');
+  assert.ok(st.nextAt && st.nextAt.getTime() > Date.now(), 'חלון פתיחה רענן בעתיד');
+
+  const back = await m.ipcHandlers.get('settings:get')();
+  assert.ok(back.manualUnlockUntil > Date.now(), 'הערך השמור רענן — לא השארית שעברה');
+  m.cleanup();
+});
+
+test('unlock:now: \"התר\" ריק בלי שארית — פתיחה נותנת חלון קבוע מעכשיו', async () => {
+  const settings = S.defaultSchedule();
+  settings.mode = 'allowlist';
+  settings.pinHash = S.sha256Hex('1234');
+  const m = loadMain({ settings });
+  await m.ready();
+
+  const ul = await m.ipcHandlers.get('unlock:now')({}, '1234');
+  assert.ok(ul.ok);
+  const st = await m.ipcHandlers.get('status:get')();
+  assert.equal(st.state, 'allowed');
+  assert.ok(st.nextAt && st.nextAt.getTime() > Date.now() + 30 * 60 * 1000, 'חלון של שעה לפחות');
+  m.cleanup();
+});
+
+// שארית פתיחה שעברה באתחול היא זבל — אינה פותחת כלום ורק מבלבלת. מנקים.
+test('loadSettings: שארית פתיחה שעברה מנוקה באתחול גם כשהלוח חוסם', async () => {
+  const settings = blockNowSchedule(); // חסום כרגע לפי חלון
+  settings.pinHash = S.sha256Hex('1234');
+  settings.manualUnlockUntil = new Date(2000, 0, 1).getTime(); // עבר מזמן
+  const m = loadMain({ settings });
+  await m.ready();
+
+  const back = await m.ipcHandlers.get('settings:get')();
+  assert.equal(back.manualUnlockUntil, null, 'ערך שעבר מנוקה באתחול');
+  const st = await m.ipcHandlers.get('status:get')();
+  assert.equal(st.state, 'blocked', 'הלוח עדיין חוסם');
+  m.cleanup();
+});
+
+test('settings:save: שארית פתיחה שעברה מנוקה גם בשמירה רגילה', async () => {
+  const settings = blockNowSchedule(); // חסום כרגע
+  settings.pinHash = S.sha256Hex('1234');
+  settings.manualUnlockUntil = new Date(2000, 0, 1).getTime();
+  const m = loadMain({ settings });
+  await m.ready();
+
+  await m.ipcHandlers.get('session:unlock')({}, '1234');
+  const data = await m.ipcHandlers.get('settings:get')();
+  data.theme = 'dark';
+  const res = await m.ipcHandlers.get('settings:save')({}, data);
+  assert.ok(res.ok);
+  const back = await m.ipcHandlers.get('settings:get')();
+  assert.equal(back.manualUnlockUntil, null, 'שמירה מנקה ערך שעבר');
+  m.cleanup();
+});

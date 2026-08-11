@@ -199,6 +199,17 @@
       font-size: 14px; font-weight: 600; margin-top: 14px;
       color: var(--muted); min-height: 20px;
     }
+    /* הסבר כשהחסימה נובעת מברירת המחדל של "התר" (לוח ריק — חסום תמיד) */
+    .block-reason {
+      display: flex; align-items: flex-start; gap: 9px;
+      margin-top: 12px; max-width: 480px;
+      padding: 11px 14px; border-radius: 12px;
+      background: rgba(251, 191, 36, 0.08);
+      border: 1px solid rgba(251, 191, 36, 0.3);
+      color: var(--muted); font-size: 12.5px; line-height: 1.6;
+      text-align: right;
+    }
+    .block-reason .icon { color: var(--yellow, #fbbf24); margin-top: 2px; flex-shrink: 0; }
     /* משפטי עידוד מחזקים מהמקורות — מתחלפים מדי כמה שניות */
     .torah-quote {
       margin-top: 22px;
@@ -464,6 +475,11 @@
       </div>
     </div>
     <div class="block-count" id="countdown"></div>
+    <!-- הסבר כשהחסימה נובעת מברירת המחדל של "התר" (לוח ריק — חסום תמיד) -->
+    <div class="block-reason hidden" id="blockReason">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg>
+      <span id="blockReasonText"></span>
+    </div>
     <!-- משפטי עידוד מחזקים מהמקורות — מתחלפים מדי כמה שניות -->
     <div class="torah-quote" id="torahQuote">
       <div class="tq-text" id="tqText"></div>
@@ -545,6 +561,8 @@
     const pinToggle = document.getElementById('pinToggle');
     const lockMsg = document.getElementById('lockMsg');
     const blockMsg = document.getElementById('blockMsg');
+    const blockReason = document.getElementById('blockReason');
+    const blockReasonText = document.getElementById('blockReasonText');
 
     /* ---------- משפטי עידוד מחזקים מהמקורות ----------
        כל משפט הוא ציטוט מדויק מתוך התנ"ך, המשנה או התלמוד.
@@ -920,6 +938,14 @@
         blockMsg.style.display = '';
       } else {
         blockMsg.style.display = 'none';
+      }
+      // חסימה לפי ברירת המחדל של "התר" (לוח ריק — חסום תמיד) — להסביר
+      // להורה מיד למה המחשב חסום, כדי שלא ייראה כמו באג.
+      if (status.blockedByDefault && status.state === 'blocked') {
+        blockReasonText.textContent = 'המחשב חסום לפי ברירת המחדל שנבחרה בהגדרות (מצב "המחשב חסום תמיד") — כדי לפתוח, הוסיפו חלון "מותר" בלוח או חזרו למצב "המחשב פתוח תמיד". פתיחה בסיסמה כאן פותחת לשעה בלבד.';
+        blockReason.classList.remove('hidden');
+      } else {
+        blockReason.classList.add('hidden');
       }
       // עדכון בסיס הזמן המהימן (מהתהליך הראשי) — השעון מתקתק בין הרענונים
       if (status.now) { baseTrusted = status.now; baseWall = Date.now(); }

@@ -283,10 +283,17 @@ function loadSettings() {
   let dirty = false;
   if (rawState === 'blocked' || rawState === 'netblock') {
     if (schedule.manualUnlockUntil) {
-      const t = S.nextTransition(schedule, now);
-      if (t.at && t.at.getTime() !== schedule.manualUnlockUntil) {
-        schedule.manualUnlockUntil = t.at.getTime();
+      // ערך שעבר כבר לא פותח כלום — רק זבל שנשאר בקובץ (ואף מסבך פתיחה
+      // חוזרת). מנקים אותו באתחול כדי להתחיל נקי.
+      if (schedule.manualUnlockUntil <= now.getTime()) {
+        schedule.manualUnlockUntil = null;
         dirty = true;
+      } else {
+        const t = S.nextTransition(schedule, now);
+        if (t.at && t.at.getTime() !== schedule.manualUnlockUntil) {
+          schedule.manualUnlockUntil = t.at.getTime();
+          dirty = true;
+        }
       }
     }
   } else if (schedule.manualUnlockUntil) {
@@ -1823,9 +1830,15 @@ function registerIpc() {
     const raw = S.stateAt(schedule, now);
     if (raw === 'blocked' || raw === 'netblock') {
       if (schedule.manualUnlockUntil) {
-        const t = S.nextTransition(schedule, now);
-        if (t.at) schedule.manualUnlockUntil = t.at.getTime();
-        // לוח נעול בלי מעבר מוגדר (למשל "התר" ריק) — שומרים את הערך הקיים
+        // ערך שעבר אינו תקף — הפתיחה כבר פגה. ניקוי שלו חיוני: אחרת פתיחה
+        // חוזרת (unlock:now) הייתה ממשיכה להישען על הערך הישן ולא נפתחת.
+        if (schedule.manualUnlockUntil <= now.getTime()) {
+          schedule.manualUnlockUntil = null;
+        } else {
+          const t = S.nextTransition(schedule, now);
+          if (t.at) schedule.manualUnlockUntil = t.at.getTime();
+          // לוח נעול בלי מעבר מוגדר (למשל "התר" ריק) — שומרים את הערך הקיים
+        }
       }
     } else if (schedule.manualUnlockUntil) {
       schedule.manualUnlockUntil = null;
@@ -1944,7 +1957,15 @@ function registerIpc() {
     // שכבר "פתוח"): פתיחה חוזרת בזמן שפתיחה קיימת לא מבטלת אותה.
     if (raw === 'blocked' || raw === 'netblock') {
       const t = S.nextTransition(schedule, now);
-      schedule.manualUnlockUntil = t.at ? t.at.getTime() : (schedule.manualUnlockUntil || trustedNow() + 3600 * 1000);
+      if (t.at) {
+        schedule.manualUnlockUntil = t.at.getTime();
+      } else {
+        // לוח נעול בלי מעבר הבא מוגדר (למשל מצב "התר" עם לוח ריק — חסום
+        // תמיד): נותנים פתיחה לפרק זמן קבוע מעכשיו. חייב להיות ערך רענן —
+        // ערך קיים שכבר עבר אינו פותח כלום (האכיפה רואה "הפתיחה פגה"), ופתיחה
+        // "מוצלחת" הייתה משאירה את מסך החסימה על המסך לנצח.
+        schedule.manualUnlockUntil = trustedNow() + 3600 * 1000;
+      }
     } else {
       schedule.manualUnlockUntil = null;
     }

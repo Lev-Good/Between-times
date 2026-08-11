@@ -518,6 +518,22 @@ body::after {
 .mode-note .icon { color: var(--yellow); margin-top: 2px; }
 .mode-note strong { color: var(--text); }
 
+/* אזהרת מצב "התר" (חסום תמיד) — באנר בולט כשהמחשב חסום בברירת המחדל */
+.mode-warning {
+  display: flex; align-items: flex-start; gap: 10px;
+  margin-top: 12px; padding: 13px 15px; border-radius: 13px;
+  background: var(--yellow-bg); border: 1px solid rgba(251, 191, 36, 0.35);
+  color: var(--muted); font-size: 12.5px; line-height: 1.65;
+}
+.mode-warning .icon { color: var(--yellow); margin-top: 2px; flex-shrink: 0; }
+.mode-warning strong { color: var(--text); }
+.mode-warning.severe {
+  background: var(--red-bg, rgba(239, 68, 68, 0.09));
+  border-color: rgba(239, 68, 68, 0.4);
+}
+.mode-warning.severe .icon { color: var(--red, #ef4444); }
+.mode-warning.severe strong { color: var(--red, #ef4444); }
+
 /* ---------- לוח שבועי ---------- */
 .week-grid {
   display: grid;

@@ -190,21 +190,25 @@
     return minutes >= slot.start || minutes < slot.end;
   }
 
-  function stateAt(schedule, date) {
-    const def = schedule.mode === 'allowlist' ? 'blocked' : 'allowed';
+  // החלון הפעיל כרגע (של היום או של אתמול שחוצה חצות) — או null אם אף חלון
+  // אינו מכסה את הרגע הנוכחי (ואז המצב נקבע לפי ברירת המחדל של הלוח).
+  function activeSlot(schedule, date) {
     const minutes = date.getHours() * 60 + date.getMinutes();
-
-    // חלונות של היום עצמו
     for (const s of daySlots(schedule, date)) {
-      if (slotCovers(s, minutes)) return s.type;
+      if (slotCovers(s, minutes)) return s;
     }
-    // חלונות מאתמול שחוצים חצות וממשיכים לתוך היום
     const prev = new Date(date);
     prev.setDate(prev.getDate() - 1);
     for (const s of daySlots(schedule, prev)) {
-      if (s.start >= s.end && minutes < s.end) return s.type;
+      if (s.start >= s.end && minutes < s.end) return s;
     }
-    return def;
+    return null;
+  }
+
+  function stateAt(schedule, date) {
+    const def = schedule.mode === 'allowlist' ? 'blocked' : 'allowed';
+    const slot = activeSlot(schedule, date);
+    return slot ? slot.type : def;
   }
 
   function startOfDay(date, offset) {
@@ -274,6 +278,9 @@
     const lockedNow = raw === 'blocked' || raw === 'netblock';
     const override = s.manualUnlockUntil && d.getTime() < s.manualUnlockUntil && lockedNow;
     const state = override ? 'allowed' : raw;
+    // חסימה לפי ברירת המחדל של "התר" (לוח ריק — חסום תמיד) ולא לפי חלון
+    // מוגדר — כדי שמסך החסימה יוכל להסביר להורה מה בדיוק חוסם.
+    const byDefault = raw === 'blocked' && s.mode === 'allowlist' && !activeSlot(s, d);
     const t = nextTransition(s, d);
     const nextAt = override ? new Date(s.manualUnlockUntil) : t.at;
 
@@ -302,7 +309,8 @@
       enabled: true,
       warnMinutes: s.warnMinutes,
       warning,
-      warningSeconds: warning ? secondsUntilNext : null
+      warningSeconds: warning ? secondsUntilNext : null,
+      blockedByDefault: byDefault
     };
   }
 
