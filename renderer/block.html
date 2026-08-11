@@ -344,6 +344,41 @@
     @keyframes auroraHue { 0%, 100% { filter: hue-rotate(0deg); } 50% { filter: hue-rotate(28deg); } }
     /* במצב בהיר — פסים עדינים במקום screen (שדורש רקע כהה) */
     :root[data-theme='light'] .aurora-band { opacity: 0.35; mix-blend-mode: normal; }
+    /* כפתור ופאנל "תוכנות לימוד תורניות" — פתיחת תוכנות מותרות בזמן חסימה */
+    .study-apps-wrap { margin-top: 18px; display: flex; flex-direction: column; align-items: center; gap: 10px; }
+    .study-apps-btn {
+      display: inline-flex; align-items: center; gap: 7px;
+      background: transparent; border: 1px dashed var(--border-strong);
+      color: var(--muted); border-radius: 999px; padding: 8px 18px;
+      font-size: 13px; font-weight: 600; cursor: pointer; font-family: inherit;
+      transition: color 0.2s ease, border-color 0.2s ease, background 0.2s ease;
+    }
+    .study-apps-btn:hover { color: var(--text); border-color: var(--accent); background: rgba(123, 107, 255, 0.1); }
+    .study-apps-btn .icon { width: 15px; height: 15px; }
+    .study-apps-panel {
+      background: var(--b-panel);
+      border: 1px solid var(--b-border);
+      border-radius: 18px;
+      padding: 14px 14px 12px;
+      box-shadow: var(--b-shadow);
+      backdrop-filter: blur(18px) saturate(1.15);
+      min-width: 280px;
+      max-width: 340px;
+      animation: bgFade 0.22s var(--ease, ease);
+    }
+    .study-apps-title { font-size: 12.5px; font-weight: 700; color: var(--muted); margin-bottom: 10px; text-align: center; line-height: 1.5; }
+    .study-apps-list { display: flex; flex-direction: column; gap: 8px; }
+    .study-app {
+      display: flex; align-items: center; gap: 9px;
+      background: var(--b-count-bg); border: 1px solid var(--border);
+      color: var(--text); border-radius: 12px; padding: 10px 13px;
+      font-size: 13.5px; font-weight: 700; cursor: pointer; font-family: inherit;
+      text-align: right;
+      transition: border-color 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
+    }
+    .study-app:hover { border-color: var(--accent); transform: scale(1.02); box-shadow: 0 0 0 2px rgba(123, 107, 255, 0.2); }
+    .study-app .icon { width: 16px; height: 16px; color: var(--accent-2); flex-shrink: 0; }
+    .study-apps-note { font-size: 11.5px; color: var(--muted); text-align: center; margin-top: 8px; line-height: 1.5; }
     /* כפתור ופאנל בחירת הרקע */
     .bg-picker-wrap { margin-top: 20px; display: flex; flex-direction: column; align-items: center; gap: 10px; }
     .bg-btn {
@@ -464,7 +499,7 @@
     <!-- בחירת רקע למסך החסימה -->
     <div class="bg-picker-wrap">
       <button class="bg-btn" id="bgToggle" type="button">
-        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="13.5" cy="6.5" r="1.5"/><circle cx="17.5" cy="10.5" r="1.5"/><circle cx="8.5" cy="7.5" r="1.5"/><circle cx="6.5" cy="12.5" r="1.5"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.93 0 1.7-.77 1.7-1.7 0-.45-.18-.87-.46-1.18-.28-.31-.46-.73-.46-1.18a1.7 1.7 0 0 1 1.7-1.7H16a6 6 0 0 0 6-6c0-4.42-4.48-8-10-8z"/></svg>
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="13.5" cy="6.5" r="1.5"/><circle cx="17.5" cy="10.5" r="1.5"/><circle cx="8.5" cy="7.5" r="1.5"/><circle cx="6.5" cy="12.5" r="1.5"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.93 0 1.7-.77 1.7-1.7 0-.45-.18-.87-.46-1.18-.28-.31-.46-.73-.46-1.18a1.7 1.7 0 0 1 1.7-1.7H16a6 6 0 0 0 6-6c0-4.42-4.48-8-10-8z"/></svg>
         רקע
       </button>
       <div class="bg-picker hidden" id="bgPicker">
@@ -475,6 +510,19 @@
           <button class="bg-option" data-bg="particles" type="button"><span class="chip chip-particles"></span>חלקיקים</button>
           <button class="bg-option" data-bg="aurora" type="button"><span class="chip chip-aurora"></span>זוהר</button>
         </div>
+      </div>
+    </div>
+
+    <!-- תוכנות לימוד תורניות — מותרות גם בזמן החסימה (לפי רשימת ההורים) -->
+    <div class="study-apps-wrap" id="studyAppsWrap" style="display:none">
+      <button class="study-apps-btn" id="studyAppsBtn" type="button">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+        תוכנות לימוד תורניות
+      </button>
+      <div class="study-apps-panel hidden" id="studyAppsPanel">
+        <div class="study-apps-title">בחרו תוכנת לימוד — היא מותרת גם בזמן החסימה</div>
+        <div class="study-apps-list" id="studyAppsList"></div>
+        <div class="study-apps-note">החסימה תישאר מושהית כל עוד התוכנה פתוחה, ותחזור מיד כשיוצאים ממנה</div>
       </div>
     </div>
   </div>
@@ -766,6 +814,65 @@
       }
     });
 
+    /* ---------- תוכנות לימוד תורניות מותרות בזמן חסימה ----------
+       ההורה מגדיר בהגדרות רשימת תוכנות (למשל וורד, אוצריא, אוצר החכמה)
+       שמותר לפתוח גם כשהמחשב חסום. לחיצה על תוכנה פותחת אותה — והתהליך
+       הראשי עובר למצב רפוי (מסך החסימה נעלם) עד שסוגרים אותה או עוברים
+       לתוכנה אחרת. */
+    const studyAppsWrap = document.getElementById('studyAppsWrap');
+    const studyAppsBtn = document.getElementById('studyAppsBtn');
+    const studyAppsPanel = document.getElementById('studyAppsPanel');
+    const studyAppsList = document.getElementById('studyAppsList');
+
+    studyAppsBtn.addEventListener('click', () => {
+      studyAppsPanel.classList.toggle('hidden');
+    });
+    // סגירת הפאנל בלחיצה מחוצה לו
+    document.addEventListener('click', (e) => {
+      if (!studyAppsPanel.classList.contains('hidden') &&
+          !studyAppsPanel.contains(e.target) && !studyAppsBtn.contains(e.target)) {
+        studyAppsPanel.classList.add('hidden');
+      }
+    });
+
+    // בניית רשימת התוכנות המורשות על מסך החסימה (מוצגת רק אם ההורה הגדיר
+    // תוכנות ולא מדובר בנעילה ידנית — נעילה ידנית חוסמת תמיד הכל).
+    // הרשימה נבנית מחדש רק כשהתוכנות השתנו (בדיקת הסטטוס רצה כל שנייה).
+    let lastStudyAppsKey = null;
+    function renderStudyApps(status) {
+      const apps = (status && status.allowedAppsEnabled !== false && !status.manualLock &&
+        Array.isArray(status.allowedApps) && status.allowedApps.length)
+        ? status.allowedApps
+        : [];
+      studyAppsWrap.style.display = apps.length ? '' : 'none';
+      if (!apps.length) return;
+      const key = JSON.stringify(apps);
+      if (key === lastStudyAppsKey) return;
+      lastStudyAppsKey = key;
+      studyAppsList.innerHTML = '';
+      apps.forEach((app) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'study-app';
+        b.innerHTML = '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg><span></span>';
+        b.querySelector('span').textContent = app.name || app.exe;
+        b.onclick = async () => {
+          lockMsg.textContent = 'פותח את ' + (app.name || app.exe) + '…';
+          lockMsg.classList.remove('ok');
+          if (API && API.launchAllowedApp) {
+            const res = await API.launchAllowedApp(app);
+            if (!res || !res.ok) {
+              lockMsg.textContent = (res && res.error) || 'הפתיחה נכשלה — בדקו שהתוכנה מותקנת';
+            }
+            // הצלחה: התהליך הראשי מסתיר את מסך החסימה ונכנס למצב רפוי
+          } else {
+            lockMsg.textContent = 'פתיחת תוכנות זמינה רק בגרסת המחשב המלאה';
+          }
+        };
+        studyAppsList.appendChild(b);
+      });
+    }
+
     /* ---------- מזעור החלונית ----------
        כפתור קטן בפינת הכרטיס מסתיר את כל החלונית (הכותרת, השעונים והכניסה
        בסיסמה) כך שהרקע לבדו תופס את כל המסך — למשל כדי לשחק עם הרקעים
@@ -793,6 +900,7 @@
       if (!status) return;
       applyBlockTheme(status.theme);
       applyBg(status.blockBg);
+      renderStudyApps(status);
       // משפטי העידוד מהמקורות — ניתנים להסתרה מההגדרות (showTorahQuotes)
       tqBox.classList.toggle('tq-hidden', status.showTorahQuotes === false);
       // ללא סיסמה מוגדרת — מסך החסימה מציע דרך החוצה במקום שדה סיסמה

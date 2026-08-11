@@ -109,6 +109,19 @@ let netBlockWarned = false;   // הודעת השגיאה נשלחה פעם אח�
 let lastNetActive = false;    // מעקב מצבי לזיהוי תחילת/סיום חסימת אינטרנט ביומן
 let netIconWin = null;        // חלון האייקון הצף (מחשב פתוח + אינטרנט חסום)
 
+// מצב "תוכנת לימוד מותרת": בזמן חסימה לפי הלוח, אם החלון הפעיל שייך לתוכנה
+// תורנית שההורה התיר (למשל וורד, אוצריא, אוצר החכמה) — מסך החסימה מוסתר
+// והתוכנה נשארת בשימוש. החסימה חוזרת מיד כשעוברים לתוכנה אחרת או סוגרים אותה.
+let relaxed = false;          // האם אנחנו במצב "תוכנת לימוד פתוחה" עכשיו
+let relaxedTimer = null;      // בדיקה תכופה יותר (1 שנייה) בזמן מצב רפוי
+let enforceBusy = false;      // הגנה מפני ריצות חופפות של לולאת האכיפה
+let enforceAgain = false;     // בקשה להרצה נוספת שהגיעה בזמן שהאכיפה הייתה עסוקה
+
+// מטמון קצר של התוכנה שבחלון הפעיל — כדי לא להריץ PowerShell כל הזמן.
+// זיהוי נעשה רק לפי צורך (אירוע blur / בדיקת האכיפה) והתוצאה תקפה ~1.2 שניות.
+let fgCache = { at: 0, path: null, busy: false };
+const fgWaiters = [];
+
 /* ================= יומן פעילות (activity.log) =================
    תיעוד אירועים: התחלת/סיום חסימה, נעילות ידניות, פתיחות,
    ניסיונות כושלים ושינויי הגדרות — עבור דשבורד הסטטיסטיקות. */
@@ -318,10 +331,11 @@ function createBlockWindow(display) {
 
   bw.loadFile(path.join(__dirname, 'renderer', 'block.html'));
 
-  // מניעת עקיפה: איבוד מיקוד = החזרה מיידית לחלון החסימה
+  // מניעת עקיפה: איבוד מיקוד = החזרה מיידית לחלון החסימה — אלא אם התוכנה
+  // שקיבלה את הפוקוס היא תוכנת לימוד מותרת (ואז עוברים למצב רפוי).
   bw.on('blur', () => {
     // גניבת מיקוד מתבצעת רק כשיש סיסמה — ללא סיסמה החסימה אינה פעילה
-    if (!isQuitting && isBlockedNow() && schedule.pinHash) focusBlockWindows();
+    if (!isQuitting && isBlockedNow() && schedule.pinHash) maybeStealFocus();
   });
   bw.on('close', (e) => {
     if (!isQuitting && isBlockedNow()) e.preventDefault();
@@ -379,8 +393,8 @@ function registerBlockShortcuts() {
   for (const accel of BLOCK_SHORTCUTS) {
     try {
       globalShortcut.register(accel, () => {
-        // הקיצור נבלע — החזרת חלון החסימה לקדמת המסך
-        focusBlockWindows();
+        // הקיצור נבלע — החזרת חלון החסימה לקדמת המסך (עם כבוד לתוכנות מותרות)
+        maybeStealFocus();
       });
     } catch { /* חלק מהקיצורים אינם ניתנים לרישום */ }
   }
@@ -486,6 +500,215 @@ function showNetIcon(show) {
   } catch { /* האייקון הוא קוסמטי — כשלון אינו קריטי */ }
 }
 
+/* ================= תוכנות תורניות מותרות בזמן חסימה =================
+   אפשרות להורה להתיר תוכנות לימוד וכתיבה תורניות (וורד, אוצריא, זית,
+   אוצר החכמה, בר אילן ועוד) גם בזמן שהמחשב חסום לפי הלוח. הזיהוי נעשה
+   לפי התוכנה שבחלון הפעיל (הפוקוס) — אם היא ברשימה המורשית, מסך החסימה
+   מוסתר והתוכנה נשארת בשימוש; ברגע שעוברים לתוכנה אחרת (או סוגרים אותה)
+   החסימה חוזרת מיד. נעילה ידנית ("נעל עכשיו") תמיד חוסמת הכל. */
+
+// איתור התוכנה שבחלון הפעיל — דרך Win32 API (GetForegroundWindow) עם
+// PowerShell. הפלט הוא הנתיב המלא של קובץ ההרצה של התהליך הפעיל.
+const FG_PS_SCRIPT =
+  "Add-Type -TypeDefinition 'using System;using System.Runtime.InteropServices;public class FgW{" +
+  "[DllImport(\"user32.dll\")]public static extern IntPtr GetForegroundWindow();" +
+  "[DllImport(\"user32.dll\")]public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);}'; " +
+  "$h=[FgW]::GetForegroundWindow(); $pid2=0; [void][FgW]::GetWindowThreadProcessId($h,[ref]$pid2); " +
+  "(Get-Process -Id $pid2 -ErrorAction SilentlyContinue).Path";
+
+function getForegroundApp() {
+  return new Promise((resolve) => {
+    if (!isWin) return resolve(null);
+    // מטמון קצר — לא להריץ PowerShell שוב ושוב על כל אירוע blur
+    if (Date.now() - fgCache.at < 1200 && !fgCache.busy) return resolve(fgCache.path);
+    fgWaiters.push(resolve);
+    if (fgCache.busy) return; // בדיקה כבר רצה — הממתינים יקבלו את תוצאתה
+    fgCache.busy = true;
+    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', FG_PS_SCRIPT], { windowsHide: true, timeout: 8000 }, (err, stdout) => {
+      fgCache.path = err ? null : (String(stdout || '').split(/\r?\n/)[0].trim() || null);
+      fgCache.at = Date.now();
+      fgCache.busy = false;
+      const waiters = fgWaiters.splice(0);
+      waiters.forEach((w) => w(fgCache.path));
+    });
+  });
+}
+
+// בדיקה מקיפה של קובץ הפעלה: שם מוצר (מפרט הגרסה), חותם Authenticode
+// (מצב + שם הנושא), וטביעת SHA-256. התוצאה נשמרת במטמון לפי נתיב (דקה) —
+// כדי שבדיקת החסימה החוזרת לא תכביד. Windows עצמו שומר גם מטמון חתימות.
+const fileInfoCache = new Map();
+const VERIFY_TTL = 60 * 1000;
+
+function inspectAppFile(p) {
+  return new Promise((resolve) => {
+    if (!isWin) return resolve(null);
+    const key = String(p || '').toLowerCase();
+    const hit = fileInfoCache.get(key);
+    if (hit && Date.now() - hit.at < VERIFY_TTL) return resolve(hit);
+    const q = JSON.stringify(String(p || ''));
+    const script =
+      '$i = Get-Item -LiteralPath ' + q + ' -ErrorAction SilentlyContinue; if (-not $i) { exit 1 }; ' +
+      '$s = Get-AuthenticodeSignature -LiteralPath ' + q + '; ' +
+      '$h = (Get-FileHash -Algorithm SHA256 -LiteralPath ' + q + ').Hash; ' +
+      "$i.VersionInfo.ProductName + '|' + $s.Status.ToString() + '|' + $s.SignerCertificate.Subject + '|' + $h";
+    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script], { windowsHide: true, timeout: 15000 }, (err, stdout) => {
+      let res = null;
+      if (!err && stdout) {
+        const parts = String(stdout).split(/\r?\n/)[0].split('|');
+        res = {
+          product: String(parts[0] || '').trim(),
+          status: String(parts[1] || '').trim() || 'NotSigned',
+          subject: String(parts[2] || '').trim(),
+          hash: String(parts[3] || '').trim().toLowerCase()
+        };
+      }
+      if (fileInfoCache.size > 300) fileInfoCache.clear();
+      fileInfoCache.set(key, Object.assign({ at: Date.now() }, res));
+      resolve(res);
+    });
+  });
+}
+
+// חילוץ שם החותם (CN) מתוך נושא התעודה — למשל "Microsoft Corporation"
+function cnOf(subject) {
+  const m = String(subject || '').match(/CN=([^,]+)/);
+  return m ? m[1].trim() : String(subject || '').trim();
+}
+
+// אימות של תוכנה אחת מול התוכנה שבחלון הפעיל, לפי מצב האימות שלה:
+// - publisher: שם הקובץ חייב להתאים + חותם תקני של אותו מוציא לאור + אותו
+//   שם מוצר. כך העתקה/שינוי שם של כל תוכנה אחרת (גם חתומה) נכשלת.
+// - path: הנתיב המלא חייב להתאים במדויק; אם נשמרה טביעת קובץ — גם היא.
+async function foregroundMatchesApp(app, fgPath) {
+  if (!app || !app.exe || !fgPath) return false;
+  const p = String(fgPath).trim().replace(/\\+$/, '');
+  const exe = String(app.exe).trim().replace(/\\+$/, '');
+  if (!p || !exe) return false;
+  const pl = p.toLowerCase();
+  const exeL = exe.toLowerCase();
+
+  if (app.mode === 'publisher' && app.publisher && app.product) {
+    if (path.basename(exeL) !== path.basename(p).toLowerCase()) return false;
+    const info = await inspectAppFile(p);
+    if (!info || info.status !== 'Valid') return false;
+    if (cnOf(info.subject).toLowerCase() !== String(app.publisher).toLowerCase()) return false;
+    if (String(info.product || '').toLowerCase() !== String(app.product).toLowerCase()) return false;
+    return true;
+  }
+
+  // מצב נתיב: רק נתיב מלא מדויק (לעולם לא התאמת שם קובץ בלבד)
+  if (pl !== exeL) return false;
+  if (app.hash) {
+    const info = await inspectAppFile(p);
+    if (!info || !info.hash || info.hash !== String(app.hash).toLowerCase()) return false;
+  }
+  return true;
+}
+
+// האם התוכנה שבחלון הפעיל נמצאת ברשימה המורשית (או ברשימת התוכנות הנלוות
+// שלהן — כמו תוספים לוורד שפועלים כתוכנה נפרדת)? כל תוכנה מאומתת לפי
+// מצב האימות שלה. אם משהו לא תקין — החסימה נשארת פעילה (fail closed).
+async function isAllowedApp(fgPath) {
+  if (!fgPath) return false;
+  if (schedule.allowedAppsEnabled === false) return false;
+  const apps = schedule.allowedApps || [];
+  if (!apps.length) return false;
+  for (const app of apps) {
+    if (await foregroundMatchesApp(app, fgPath)) return true;
+    for (const c of (app.companions || [])) {
+      if (await foregroundMatchesApp(c, fgPath)) return true;
+    }
+  }
+  return false;
+}
+
+// כניסה למצב רפוי: מסתירים את חלונות החסימה, מבטלים קיצורי מקשים ומתחילים
+// בדיקה תכופה (כל שנייה) כדי לחזור לחסימה מיד כשהתוכנה המותרת כבר לא פעילה.
+function enterRelaxed() {
+  if (relaxed) return;
+  relaxed = true;
+  hideBlockWindows();
+  unregisterBlockShortcuts();
+  if (!relaxedTimer) relaxedTimer = setInterval(() => { if (relaxed) enforce(); }, 1000);
+}
+
+function exitRelaxed() {
+  if (!relaxed) return;
+  relaxed = false;
+  if (relaxedTimer) { clearInterval(relaxedTimer); relaxedTimer = null; }
+}
+
+// גניבת פוקוס חכמה: אם חלון התוכנה המותרת קיבל את הפוקוס — לא לגנוב אותו
+// בחזרה, אלא להיכנס למצב רפוי. אחרת — להחזיר את מסך החסימה לקדמת המסך.
+// בלי תוכנות מורשות מוגדרות אין טעם בבדיקת החלון הפעיל (חוסכת PowerShell).
+async function maybeStealFocus() {
+  if (manualLock) { focusBlockWindows(); return; } // נעילה ידנית — תמיד לחסום
+  const appsOn = schedule.allowedAppsEnabled !== false && (schedule.allowedApps || []).length > 0;
+  if (!appsOn) { focusBlockWindows(); return; }
+  const fg = await getForegroundApp();
+  if (await isAllowedApp(fg)) { enterRelaxed(); return; }
+  focusBlockWindows();
+}
+
+// פתיחת תוכנת לימוד מותרת (מתוך מסך החסימה או בדיקה). לפני ההפעלה מבצעים
+// אימות: חותם+מוצר לתוכנה חתומה, טביעת קובץ לתוכנה לא חתומה — כך אי אפשר
+// להריץ במקומה קובץ שהוחלף. אם התוכנה כבר רצה — מעלים את החלון לחזית
+// (לתוכנה חתומה: לפי שם התהליך, והאימות ממשיך בזמן אמת; ללא חתימה: רק לפי
+// הנתיב המלא). ההפעלה המוצלחת מכניסה מיד למצב רפוי.
+function launchAllowedApp(app) {
+  return new Promise(async (resolve) => {
+    const exe = String((app && app.exe) || '').trim();
+    if (!exe) return resolve({ ok: false, error: 'התוכנה לא הוגדרה' });
+    const isAbs = /^[a-zA-Z]:[\\/]/.test(exe) || /^\\\\/.test(exe);
+    const base = path.basename(exe).replace(/\.exe$/i, '');
+    const publisherMode = !!(app.mode === 'publisher' && app.publisher && app.product);
+
+    // אימות הקובץ לפני הפעלה (אם הנתיב קיים)
+    let startTarget = null;
+    try {
+      if (isAbs && fs.existsSync(exe)) {
+        const info = await inspectAppFile(exe);
+        if (publisherMode) {
+          if (!info || info.status !== 'Valid' ||
+              cnOf(info.subject).toLowerCase() !== String(app.publisher).toLowerCase() ||
+              String(info.product || '').toLowerCase() !== String(app.product).toLowerCase()) {
+            return resolve({ ok: false, error: 'התוכנה אינה תואמת את החותם המאומת — ייתכן שהוחלפה או עודכנה. בחרו אותה מחדש בהגדרות.' });
+          }
+        } else if (app.hash) {
+          if (!info || !info.hash || info.hash !== String(app.hash).toLowerCase()) {
+            return resolve({ ok: false, error: 'קובץ התוכנה שונה מהגרסה שאומתה — בחרו אותה מחדש בהגדרות.' });
+          }
+        }
+        startTarget = exe;
+      } else if (publisherMode) {
+        // נתיב ההתקנה לא נמצא (למשל אחרי עדכון תוכנה) — פתיחה לפי שם דרך
+        // App Paths; האימות המלא נעשה בזמן אמת כשהתוכנה הופכת לפעילה.
+        startTarget = base;
+      } else {
+        return resolve({ ok: false, error: 'קובץ התוכנה לא נמצא — בחרו אותה מחדש בהגדרות.' });
+      }
+    } catch {
+      return resolve({ ok: false, error: 'אימות התוכנה נכשל — נסו שוב.' });
+    }
+
+    // העלאה לחזית אם כבר רצה, אחרת פתיחה. לתוכנה חתומה מזהים לפי שם התהליך
+    // (גם בנתיב מעודכן); לתוכנה לא חתומה — רק לפי הנתיב המלא המדויק.
+    const matchCond = publisherMode
+      ? '($_.ProcessName -ieq ' + JSON.stringify(base) + ' -or $_.Path -ieq ' + JSON.stringify(exe) + ')'
+      : '($_.Path -ieq ' + JSON.stringify(exe) + ')';
+    const script =
+      "Add-Type -MemberDefinition '[DllImport(\"user32.dll\")] public static extern bool SetForegroundWindow(IntPtr hWnd);' -Name U -Namespace W; " +
+      'try { $p = Get-Process | Where-Object { $_.MainWindowHandle -ne 0 -and ' + matchCond + ' } | Select-Object -First 1; ' +
+      'if ($p) { [W.U]::SetForegroundWindow($p.MainWindowHandle) } else { Start-Process -FilePath ' + JSON.stringify(startTarget) + ' } } catch { Write-Error $_; exit 1 }';
+    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script], { windowsHide: true, timeout: 15000 }, (err) => {
+      if (err) return resolve({ ok: false, error: 'לא ניתן להפעיל את התוכנה — בדקו שהיא מותקנת במקום הנכון' });
+      if (!manualLock) enterRelaxed();
+      resolve({ ok: true });
+    });
+  });
+}
+
 /* ================= לולאת האכיפה ================= */
 
 function buildStatus() {
@@ -503,7 +726,13 @@ function buildStatus() {
     pinSet: !!schedule.pinHash,
     netBlockFailed: netBlockFailed,
     blockBg: schedule.blockBg,
-    showTorahQuotes: schedule.showTorahQuotes !== false
+    showTorahQuotes: schedule.showTorahQuotes !== false,
+    allowedAppsEnabled: schedule.allowedAppsEnabled !== false,
+    // למסך החסימה מועברות רק תוכנות עם נתיב מלא תקין (אחרת לא ניתן לפתוח
+    // אותן ולא ניתן לאמת אותן) — רשומות ישנות חסרות נתיב נשארות בהגדרות
+    // עם סמן "בחרו מחדש" כדי שההורה יתקן אותן.
+    allowedApps: (schedule.allowedApps || []).filter((a) =>
+      /^[a-zA-Z]:[\\/]/.test(String(a.exe || '')) || /^\\\\/.test(String(a.exe || '')))
   };
 }
 
@@ -524,7 +753,23 @@ function showWarningNotification(status) {
   } catch { /* ignore */ }
 }
 
-function enforce() {
+// לולאת האכיפה — עם הגנה מפני ריצות חופפות: בדיקת התוכנה הפעילה רצה
+// עם PowerShell (אסינכרוני), ולכן כל קריאה נוספת בזמן שהלולאה עסוקה רק
+// מסומנת ומבוצעת מיד אחריה — כך החסימה לא "נפספסת" גם בעומס קריאות.
+async function enforce() {
+  if (enforceBusy) { enforceAgain = true; return; }
+  enforceBusy = true;
+  try {
+    do {
+      enforceAgain = false;
+      await enforceCore();
+    } while (enforceAgain);
+  } finally {
+    enforceBusy = false;
+  }
+}
+
+async function enforceCore() {
   const status = buildStatus();
   // נעילה ידנית חלה תמיד — גם אם האכיפה לפי הלוח מושבתת
   const blocked = !!(manualLock || (schedule.enabled && status.state === 'blocked'));
@@ -594,11 +839,25 @@ function enforce() {
 
   if (!activeBlock) {
     manualLock = false;
+    exitRelaxed();
     hideBlockWindows();
     unregisterBlockShortcuts();
     return;
   }
 
+  // תוכנות תורניות מותרות: אם התוכנה שבחלון הפעיל נמצאת ברשימה המורשית —
+  // מסתירים את מסך החסימה ומאפשרים להמשיך לעבוד איתה. נעילה ידנית תמיד
+  // חוסמת הכל. ברגע שהתוכנה כבר לא פעילה (נסגרה או עברו לאחרת) — חוזרים
+  // לחסימה מלאה בבדיקה הבאה. בלי תוכנות מורשות מוגדרות אין טעם בבדיקת
+  // החלון הפעיל (חוסכת הפעלת PowerShell בכל בדיקה).
+  const fgAllowed = (!manualLock && schedule.allowedAppsEnabled !== false && (schedule.allowedApps || []).length > 0)
+    ? await isAllowedApp(await getForegroundApp())
+    : false;
+  if (fgAllowed) {
+    enterRelaxed();
+    return;
+  }
+  exitRelaxed();
   showBlockWindows(status);
   registerBlockShortcuts();
 }
@@ -1376,6 +1635,40 @@ function registerIpc() {
     enforce(); // מפיץ את הסטטוס החדש (עם blockBg) לכל חלונות החסימה
     return { ok: true };
   });
+
+  // בחירת תוכנת לימוד מהמחשב — בורר קבצים (.exe). מיד בוחרים את הקובץ נבדק:
+  // חותם דיגיטלי (מצב + מוציא לאור), שם מוצר וטביעת SHA-256 — כדי לקבוע את
+  // מצב האימות (publisher לתוכנה חתומה, path+hash לתוכנה לא חתומה).
+  ipcMain.handle('allowed-apps:pick', async () => {
+    if (!isWin) return { ok: false, error: 'זמין רק בווינדוס' };
+    const opts = {
+      title: 'בחירת תוכנת לימוד תורנית',
+      filters: [{ name: 'תוכניות', extensions: ['exe'] }],
+      properties: ['openFile']
+    };
+    const res = (win && !win.isDestroyed())
+      ? await dialog.showOpenDialog(win, opts)
+      : await dialog.showOpenDialog(opts);
+    if (res.canceled || !res.filePaths || !res.filePaths[0]) return { canceled: true };
+    const p = res.filePaths[0];
+    const name = path.basename(p).replace(/\.exe$/i, '');
+    const info = await inspectAppFile(p);
+    const publisher = (info && info.status === 'Valid' && cnOf(info.subject)) ? cnOf(info.subject) : '';
+    const product = (publisher && info && info.product) ? info.product : '';
+    return {
+      canceled: false,
+      path: p,
+      name,
+      mode: (publisher && product) ? 'publisher' : 'path',
+      publisher,
+      product,
+      hash: (info && info.hash) || ''
+    };
+  });
+
+  // פתיחת תוכנת לימוד מותרת מתוך מסך החסימה: אם היא כבר רצה — החלון שלה
+  // מועלה לחזית (ולא נפתח עותק נוסף); אחרת היא נפתחת מחדש.
+  ipcMain.handle('allowed-apps:launch', (_e, app) => launchAllowedApp(app));
 
   ipcMain.handle('lock:now', () => {
     // נעילה ידנית: מפעילה את מסך החסימה המלא של בין הזמנים על כל המסכים

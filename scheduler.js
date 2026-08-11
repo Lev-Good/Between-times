@@ -63,8 +63,45 @@
       showNetIcon: true,        // אייקון צף קטן כשהמחשב פתוח והאינטרנט חסום
       blockBg: 'blobs',         // רקע מסך החסימה: blobs | fluid | particles | aurora
       showTorahQuotes: true,    // משפטי עידוד מהמקורות במסך החסימה
+      allowedAppsEnabled: true, // תוכנות תורניות מותרות בזמן חסימה — הפעלה/כיבוי
+      allowedApps: [],          // רשימת התוכנות: [{name, exe}]
       week
     };
+  }
+
+  // רשימת תוכנות הלימוד המותרות בזמן חסימה, עם מנגנון אימות מאובטח:
+  // - תוכנה חתומה דיגיטלית: mode 'publisher' — אימות לפי חותם (מוציא לאור)
+  //   + שם מוצר + שם קובץ. עמיד לעדכוני תוכנה, ומונע העתקה/שינוי שם של
+  //   תוכנה אחרת (גם תוכנת מיקרוסופט אחרת — כי שם המוצר שונה).
+  // - תוכנה לא חתומה: mode 'path' — אימות לפי נתיב מלא מדויק + טביעת SHA-256
+  //   של הקובץ (אם נשמרה). רשומות כפולות, ריקות או לא תקינות נמחקות.
+  function normalizeAllowedApps(list) {
+    const out = [];
+    const seen = new Set();
+    (Array.isArray(list) ? list : []).forEach((a) => {
+      if (!a || typeof a !== 'object') return;
+      const exe = String(a.exe || '').trim();
+      if (!exe) return;
+      const key = exe.toLowerCase();
+      if (seen.has(key)) return;
+      seen.add(key);
+      const name = (String(a.name || '').trim() || exe.split(/[\\/]/).pop().replace(/\.exe$/i, '')).slice(0, 80);
+      const publisher = String(a.publisher || '').trim().slice(0, 200);
+      const product = String(a.product || '').trim().slice(0, 120);
+      const hash = String(a.hash || '').trim().toLowerCase();
+      const validHash = /^[0-9a-f]{64}$/.test(hash) ? hash : '';
+      const mode = (a.mode === 'publisher' && publisher && product) ? 'publisher' : 'path';
+      out.push({
+        name,
+        exe,
+        mode,
+        publisher: mode === 'publisher' ? publisher : '',
+        product: mode === 'publisher' ? product : '',
+        hash: validHash,
+        companions: normalizeAllowedApps(a.companions)
+      });
+    });
+    return out;
   }
 
   function normalizeSchedule(s) {
@@ -93,6 +130,8 @@
       showNetIcon: s.showNetIcon !== false,
       blockBg: ['blobs', 'fluid', 'particles', 'aurora'].includes(s.blockBg) ? s.blockBg : 'blobs',
       showTorahQuotes: s.showTorahQuotes !== false,
+      allowedAppsEnabled: s.allowedAppsEnabled !== false,
+      allowedApps: normalizeAllowedApps(s.allowedApps),
       week: []
     };
     for (let d = 0; d < 7; d++) {

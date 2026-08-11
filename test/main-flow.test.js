@@ -169,7 +169,9 @@ function makeMock(config) {
       state.spawnCalls.push({ cmd, args, opts });
       return { on: () => {}, unref: () => {}, pid: 4242 };
     },
-    execFile: (cmd, args, cb) => {
+    execFile: (cmd, args, opts, cb) => {
+      // חלק מקריאות ה-execFile כוללות אופציות (למשל windowsHide ל-PowerShell)
+      if (typeof opts === 'function') { cb = opts; }
       state.execCalls.push({ cmd, args });
       const r = execImpl(cmd, args);
       cb(r.err, r.stdout, r.stderr);

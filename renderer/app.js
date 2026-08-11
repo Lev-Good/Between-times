@@ -668,10 +668,12 @@ function applySettingsToUI() {
   $('blockMessage').value = schedule.blockMessage || '';
   $('netIconToggle').checked = schedule.showNetIcon !== false;
   $('torahQuotesToggle').checked = schedule.showTorahQuotes !== false;
+  $('allowedAppsToggle').checked = schedule.allowedAppsEnabled !== false;
   updateMasterLabel();
   setModeUI();
   applyTheme();
   renderOverrides();
+  renderAllowedApps();
   updateSetupBanner();
 }
 
@@ -919,6 +921,124 @@ function renderOverrides() {
   });
 }
 
+/* ---------- תוכנות תורניות מותרות בזמן חסימה ----------
+   כל תוכנה מאומתת: חתומה דיגיטלית = אימות לפי חותם+שם מוצר (עמיד לעדכונים),
+   לא חתומה = אימות לפי נתיב מלא + טביעת קובץ. תוכנות נלוות (תוספים שפועלים
+   כתוכנה נפרדת לצד התוכנה הראשית) מאומתות באותה חומרה. */
+
+// סמן אבטחה לכל תוכנה — לפי מצב האימות שלה
+function appBadge(app) {
+  const abs = /^[a-zA-Z]:[\\/]/.test(app.exe || '') || /^\\\\/.test(app.exe || '');
+  if (app.mode === 'publisher' && app.publisher) {
+    return { cls: 'secure', text: 'חתומה ואומתה — ' + app.publisher };
+  }
+  if (app.hash) return { cls: 'warn', text: 'לא חתומה — אומתה טביעת הקובץ' };
+  if (abs) return { cls: 'warn', text: 'לא חתומה — נתיב מלא בלבד' };
+  return { cls: 'danger', text: 'חסר נתיב מלא — בחרו מחדש' };
+}
+
+function appRow(app, onDelete) {
+  const row = document.createElement('div');
+  row.className = 'override-row allowed-app-row';
+  const info = document.createElement('div');
+  info.className = 'override-info';
+  const name = document.createElement('strong');
+  name.textContent = app.name;
+  const exe = document.createElement('span');
+  exe.className = 'app-exe';
+  exe.textContent = app.exe;
+  const badge = appBadge(app);
+  const b = document.createElement('span');
+  b.className = 'app-badge ' + badge.cls;
+  b.textContent = badge.text;
+  info.append(name, exe, b);
+  const del = document.createElement('button');
+  del.className = 'del-btn';
+  del.innerHTML = ICONS.close;
+  del.title = 'הסר תוכנה מהרשימה';
+  del.onclick = onDelete;
+  row.append(info, del);
+  return row;
+}
+
+function renderAllowedApps() {
+  const list = $('allowedAppsList');
+  if (!list) return;
+  list.innerHTML = '';
+  const apps = schedule.allowedApps || [];
+  if (apps.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'override-empty';
+    empty.textContent = 'לא הוגדרו תוכנות — בזמן החסימה כל התוכנות חסומות';
+    list.appendChild(empty);
+    return;
+  }
+  apps.forEach((app, i) => {
+    list.appendChild(appRow(app, async () => {
+      if (!(await verifyPinSession())) { renderAllowedApps(); return; }
+      schedule.allowedApps.splice(i, 1);
+      renderAllowedApps();
+      persist();
+      refreshStatus();
+    }));
+
+    // תוכנות נלוות (למשל תוספים שפועלים כתוכנה נפרדת)
+    const comps = app.companions || [];
+    comps.forEach((c, ci) => {
+      const crow = appRow(c, async () => {
+        if (!(await verifyPinSession())) { renderAllowedApps(); return; }
+        app.companions.splice(ci, 1);
+        renderAllowedApps();
+        persist();
+        refreshStatus();
+      });
+      crow.classList.add('companion');
+      list.appendChild(crow);
+    });
+
+    const addComp = document.createElement('button');
+    addComp.className = 'btn btn-ghost btn-sm add-companion';
+    addComp.innerHTML = ICONS.plus + '<span>הוספת תוכנה נלווית</span>';
+    addComp.title = 'הוספת תוכנה שפועלת יחד עם "' + app.name + '" (למשל תוסף נפרד)';
+    addComp.onclick = async () => {
+      if (!(await verifyPinSession())) { renderAllowedApps(); return; }
+      if (!API) { toast('בחירה מהמחשב זמינה רק בגרסת המחשב המלאה'); return; }
+      const res = await API.pickAllowedApp();
+      if (!res || res.canceled) return;
+      if (!res.path) { toast((res && res.error) || 'הבחירה נכשלה', 'error'); return; }
+      if (!app.companions) app.companions = [];
+      const dup = app.companions.some((c) => String(c.exe).toLowerCase() === String(res.path).toLowerCase());
+      if (dup) { toast('התוכנה כבר נמצאת כנלווית'); return; }
+      app.companions.push({
+        name: res.name, exe: res.path, mode: res.mode,
+        publisher: res.publisher || '', product: res.product || '', hash: res.hash || ''
+      });
+      renderAllowedApps();
+      persist();
+      refreshStatus();
+      toast('התוכנה הנלווית נוספה — ' + (res.mode === 'publisher' ? 'חתימה אומתה' : 'טביעת הקובץ נשמרה'), 'success');
+    };
+    list.appendChild(addComp);
+  });
+}
+
+// הוספת תוכנה ראשית לאחר בחירה מהמחשב (עם פרטי האימות מהתהליך הראשי)
+function addAllowedApp(res) {
+  if (!schedule.allowedApps) schedule.allowedApps = [];
+  const dup = schedule.allowedApps.some((a) => String(a.exe).toLowerCase() === String(res.path).toLowerCase()) ||
+    schedule.allowedApps.some((a) => (a.companions || []).some((c) => String(c.exe).toLowerCase() === String(res.path).toLowerCase()));
+  if (dup) { toast('התוכנה כבר נמצאת ברשימה'); return; }
+  schedule.allowedApps.push({
+    name: res.name, exe: res.path, mode: res.mode,
+    publisher: res.publisher || '', product: res.product || '', hash: res.hash || '',
+    companions: []
+  });
+  renderAllowedApps();
+  persist();
+  refreshStatus();
+  toast('התוכנה נוספה — ' + (res.mode === 'publisher' ? 'החתימה אומתה' : 'טביעת הקובץ נשמרה'), 'success');
+}
+
 /* ---------- מצב ההגנה ---------- */
 async function renderSecurity() {
   const list = $('securityList');
@@ -1155,6 +1275,26 @@ function init() {
     schedule.showTorahQuotes = $('torahQuotesToggle').checked;
     await persist();
     refreshStatus(); // מסך החסימה יקבל את ההגדרה החדשה
+  };
+
+  /* ---------- תוכנות תורניות מותרות בזמן חסימה ---------- */
+  $('allowedAppsToggle').onchange = async () => {
+    if (!(await verifyPinSession())) {
+      $('allowedAppsToggle').checked = schedule.allowedAppsEnabled !== false;
+      return;
+    }
+    schedule.allowedAppsEnabled = $('allowedAppsToggle').checked;
+    await persist();
+    refreshStatus(); // מסך החסימה יקבל את ההגדרה החדשה
+  };
+
+  $('allowedAppPickBtn').onclick = async () => {
+    if (!(await verifyPinSession())) { renderAllowedApps(); return; }
+    if (!API) { toast('בחירה מהמחשב זמינה רק בגרסת המחשב המלאה'); return; }
+    const res = await API.pickAllowedApp();
+    if (!res || res.canceled) return;
+    if (!res.path) { toast((res && res.error) || 'הבחירה נכשלה', 'error'); return; }
+    addAllowedApp(res);
   };
 
   /* ---------- סיסמה ---------- */

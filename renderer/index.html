@@ -283,6 +283,32 @@
         </label>
       </div>
 
+      <!-- תוכנות תורניות מותרות בזמן חסימה -->
+      <div class="card-head" style="margin-top:26px">
+        <h2>תוכנות תורניות מותרות בזמן חסימה</h2>
+        <p class="hint">גם כשהמחשב חסום לפי הלוח — אפשר יהיה לפתוח ולהשתמש בתוכנות לימוד וכתיבה תורניות: וורד (לכתיבת תורה), אוצריא, זית, אוצר החכמה ובר אילן. בזמן שימוש בתוכנה מותרת החסימה מושהית, וחוזרת מיד כשעוברים לתוכנה אחרת או סוגרים אותה. נעילה ידנית ("נעל עכשיו") תמיד חוסמת הכל.</p>
+      </div>
+      <div class="setting">
+        <div class="setting-text">
+          <strong>אפשר תוכנות תורניות בזמן חסימה</strong>
+          <span>מציג את רשימת התוכנות על מסך החסימה ומאפשר לפתוח אותן גם כשהמחשב חסום</span>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="allowedAppsToggle" checked />
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="allowed-apps">
+        <div class="allowed-apps-list" id="allowedAppsList"></div>
+        <div class="allowed-apps-add">
+          <button class="btn btn-primary btn-sm" id="allowedAppPickBtn">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+            בחירת תוכנה מהמחשב…
+          </button>
+        </div>
+        <p class="hint">בחרו את קובץ ההרצה (.exe) של התוכנה מתיקיית ההתקנה שלה, והתוכנה תיבדק מיד: אם היא חתומה דיגיטלית — יישמר החותם ושם המוצר, והזיהוי ימשיך לעבוד גם אחרי עדכון התוכנה. אם אינה חתומה — יישמרו הנתיב המלא וטביעת הקובץ, ותידרש בחירה מחדש אחרי עדכון התוכנה. תוכנות נלוות (תוספים שפועלים כתוכנה נפרדת לצד התוכנה הראשית) אפשר להוסיף מתחת לתוכנה.</p>
+      </div>
+
       <!-- חריגים חד-פעמיים -->
       <div class="card-head" style="margin-top:26px">
         <h2>חריגים חד-פעמיים</h2>

@@ -29,6 +29,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   exportBackup: () => ipcRenderer.invoke('backup:export'),
   importBackup: () => ipcRenderer.invoke('backup:import'),
 
+  pickAllowedApp: () => ipcRenderer.invoke('allowed-apps:pick'),
+  launchAllowedApp: (app) => ipcRenderer.invoke('allowed-apps:launch', app),
+
   quitApp: (pin) => ipcRenderer.invoke('app:quit', pin),
   uninstallApp: (pin) => ipcRenderer.invoke('app:uninstall', pin),
   quitCancel: () => ipcRenderer.invoke('quit:cancel'),

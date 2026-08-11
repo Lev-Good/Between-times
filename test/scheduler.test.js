@@ -499,3 +499,93 @@ test('showTorahQuotes defaults to true and survives normalize', () => {
   assert.equal(S.normalizeSchedule({ showTorahQuotes: false }).showTorahQuotes, false);
 });
 
+/* ================= תוכנות תורניות מותרות בזמן חסימה (allowedApps) ================= */
+
+test('allowedApps: defaults to enabled with an empty list', () => {
+  const s = S.defaultSchedule();
+  assert.equal(s.allowedAppsEnabled, true);
+  assert.deepEqual(s.allowedApps, []);
+  const n = S.normalizeSchedule({});
+  assert.equal(n.allowedAppsEnabled, true);
+  assert.deepEqual(n.allowedApps, []);
+});
+
+test('allowedApps: normalize keeps valid entries and drops invalid/duplicates', () => {
+  const n = S.normalizeSchedule({ allowedApps: [
+    { name: 'Microsoft Word', exe: 'C:\\Office\\WINWORD.EXE', mode: 'publisher', publisher: 'Microsoft Corporation', product: 'Microsoft Word' },
+    { name: '', exe: 'C:\\Otzaria\\Otzaria.exe', mode: 'path', hash: 'abc123' }, // hash לא תקין -> נמחק
+    { exe: '   ' },            // קובץ ריק — נמחק
+    { name: 'כפילות', exe: 'C:\\A\\X.EXE' },
+    { name: 'כפילות 2', exe: 'c:\\a\\x.exe' }, // כפילות (לא רגישה לרישיות) — נמחקת
+    null,
+    'לא אובייקט'
+  ] });
+  assert.equal(n.allowedApps.length, 3);
+  assert.equal(n.allowedApps[0].name, 'Microsoft Word');
+  assert.equal(n.allowedApps[0].exe, 'C:\\Office\\WINWORD.EXE');
+  assert.equal(n.allowedApps[0].mode, 'publisher');
+  assert.equal(n.allowedApps[0].publisher, 'Microsoft Corporation');
+  assert.equal(n.allowedApps[0].product, 'Microsoft Word');
+  assert.deepEqual(n.allowedApps[0].companions, []);
+  // תוכנה לא חתומה — מצב path, שם ברירת מחדל משם הקובץ, hash לא תקין נמחק
+  assert.equal(n.allowedApps[1].name, 'Otzaria');
+  assert.equal(n.allowedApps[1].mode, 'path');
+  assert.equal(n.allowedApps[1].hash, '');
+  assert.equal(n.allowedAppsEnabled, true);
+});
+
+test('allowedApps: publisher mode requires publisher + product (else falls to path)', () => {
+  const n = S.normalizeSchedule({ allowedApps: [
+    { name: 'א', exe: 'C:\\A\\A.exe', mode: 'publisher', publisher: 'Microsoft Corporation', product: '' },
+    { name: 'ב', exe: 'C:\\B\\B.exe', mode: 'publisher', publisher: '', product: 'X' },
+    { name: 'ג', exe: 'C:\\C\\C.exe', mode: 'publisher', publisher: 'P', product: 'Q' }
+  ] });
+  assert.equal(n.allowedApps[0].mode, 'path');
+  assert.equal(n.allowedApps[0].publisher, '');
+  assert.equal(n.allowedApps[1].mode, 'path');
+  assert.equal(n.allowedApps[2].mode, 'publisher');
+  assert.equal(n.allowedApps[2].product, 'Q');
+});
+
+test('allowedApps: valid SHA-256 hash survives, invalid is dropped', () => {
+  const good = 'a'.repeat(64);
+  const n = S.normalizeSchedule({ allowedApps: [
+    { name: 'א', exe: 'C:\\A\\A.exe', hash: good.toUpperCase() },
+    { name: 'ב', exe: 'C:\\B\\B.exe', hash: 'not-a-hash' }
+  ] });
+  assert.equal(n.allowedApps[0].hash, good);
+  assert.equal(n.allowedApps[1].hash, '');
+});
+
+test('allowedApps: companions are normalized the same way', () => {
+  const n = S.normalizeSchedule({ allowedApps: [
+    {
+      name: 'Word', exe: 'C:\\W\\WINWORD.EXE', mode: 'publisher', publisher: 'Microsoft Corporation', product: 'Microsoft Word',
+      companions: [
+        { name: 'תוסף', exe: 'C:\\W\\addin.exe', mode: 'path', hash: 'b'.repeat(64) },
+        { exe: '   ' }, // ריק — נמחק
+        { name: 'כפילות', exe: 'C:\\W\\addin.exe' } // כפילות — נמחקת
+      ]
+    }
+  ] });
+  assert.equal(n.allowedApps[0].companions.length, 1);
+  assert.equal(n.allowedApps[0].companions[0].name, 'תוסף');
+  assert.equal(n.allowedApps[0].companions[0].mode, 'path');
+  assert.equal(n.allowedApps[0].companions[0].hash, 'b'.repeat(64));
+});
+
+test('allowedAppsEnabled survives normalize and can be turned off', () => {
+  assert.equal(S.normalizeSchedule({ allowedAppsEnabled: false }).allowedAppsEnabled, false);
+  assert.equal(S.normalizeSchedule({ allowedAppsEnabled: true }).allowedAppsEnabled, true);
+});
+
+test('allowedApps: entries survive a full roundtrip', () => {
+  const s = S.defaultSchedule();
+  s.allowedApps = [
+    { name: 'אוצר החכמה', exe: 'C:\\Otzar\\OtzarHochma.exe', mode: 'path', publisher: '', product: '', hash: 'c'.repeat(64), companions: [] },
+    { name: 'בר אילן', exe: 'C:\\BarIlan\\BarIlan.exe', mode: 'publisher', publisher: 'X Ltd', product: 'BarIlan', hash: '', companions: [] }
+  ];
+  const n = S.normalizeSchedule(JSON.parse(JSON.stringify(s)));
+  assert.deepEqual(n.allowedApps, s.allowedApps);
+});
+

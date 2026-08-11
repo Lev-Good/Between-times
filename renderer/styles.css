@@ -1171,6 +1171,79 @@ button.type-badge:active { transform: scale(0.97); }
   .setting { flex-direction: column; align-items: stretch; text-align: right; }
 }
 
+/* ---------- תוכנות תורניות מותרות בזמן חסימה ---------- */
+.allowed-apps {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 12px;
+}
+.allowed-apps-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.allowed-apps .text-input { width: 170px; }
+.allowed-apps .exe-input { width: 230px; direction: ltr; text-align: left; font-size: 12.5px; }
+.allowed-apps-add {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.allowed-apps .hint { margin: 0; }
+.app-exe {
+  color: var(--muted);
+  font-size: 12px;
+  direction: ltr;
+  text-align: left;
+  font-family: Consolas, "Cascadia Mono", monospace;
+  word-break: break-all;
+}
+/* סמני האבטחה של התוכנות המורשות */
+.app-badge {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid;
+  white-space: nowrap;
+}
+.app-badge.secure {
+  color: var(--green);
+  border-color: rgba(52, 211, 153, 0.5);
+  background: rgba(52, 211, 153, 0.08);
+}
+.app-badge.warn {
+  color: #fbbf24;
+  border-color: rgba(251, 191, 36, 0.5);
+  background: rgba(251, 191, 36, 0.08);
+}
+.app-badge.danger {
+  color: var(--red);
+  border-color: rgba(251, 113, 133, 0.55);
+  background: rgba(251, 113, 133, 0.08);
+}
+.allowed-app-row.companion {
+  margin-inline-start: 26px;
+  border-style: dashed;
+}
+.allowed-app-row.companion::before {
+  content: '↳ נלווית: ';
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  align-self: center;
+}
+.add-companion {
+  align-self: flex-start;
+  margin-inline-start: 26px;
+}
+.add-companion .icon { width: 14px; height: 14px; }
+@media (max-width: 760px) {
+  .allowed-apps-add { align-items: stretch; }
+}
+
 /* ============================================================
    מצב בהיר — מופעל באמצעות data-theme="light" על ה-html
    (הערך נקבע ע"י app.js לפי ההגדרה או לפי preferes-color-scheme)
