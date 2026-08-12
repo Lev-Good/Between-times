@@ -110,13 +110,13 @@ function makeMock(config) {
       };
       this.blockDisplayId = null;
     }
-    isDestroyed() { return false; }
+    isDestroyed() { return !!this._destroyed; }
     on(ev, cb) { (this._listeners[ev] = this._listeners[ev] || []).push(cb); }
     emit(ev, arg) { (this._listeners[ev] || []).forEach((l) => l(arg)); }
     show() {}
     focus() {}
     hide() {}
-    destroy() {}
+    destroy() { this._destroyed = true; this.emit('closed'); }
     setAlwaysOnTop() {}
     setVisibleOnAllWorkspaces() {}
     loadFile() {}
@@ -330,6 +330,61 @@ test('netblock: non-elevated UI elevates only the firewall command through UAC',
   assert.equal(uacAttempts, 1, 'A normal UI process must request UAC for the firewall command');
   const st = await m.ipcHandlers.get('status:get')();
   assert.equal(st.netBlockFailed, false, 'Successful UAC elevation must not be reported as a failure');
+  m.cleanup();
+});
+
+test('netblock: unlock from a non-elevated app removes the rule (delete is verified, not exit code)', async () => {
+  // תרחיש המשתמש: אפליקציה רגילה (לא מוגבהת) — החסימה הופעלה דרך UAC,
+  // ועכשיו מבטלים אותה. הביטול חייב להסיר את החוק בפועל, גם אם קוד היציאה
+  // של פקודת ההרמה אינו אמין — ולכן ההצלחה נמדדת לפי מצב החוק.
+  let ruleExists = false;
+  let elevatedDeleteCalled = false;
+  const now = new Date();
+  const s = S.defaultSchedule();
+  s.pinHash = S.sha256Hex('1234');
+  s.week[now.getDay()].slots = [{ start: 0, end: 1440, type: 'netblock' }];
+
+  const m = loadMain({
+    settings: s,
+    elevate: false,
+    exec(cmd, args) {
+      const joined = String(args.join(' '));
+      if (cmd === 'netsh' && joined.includes('show')) {
+        return ruleExists
+          ? { err: null, stdout: 'BenHazmanimNetBlock', stderr: '' }
+          : { err: new Error('no such rule'), stdout: '', stderr: '' };
+      }
+      if (cmd === 'powershell.exe' && joined.includes('Start-Process') && joined.includes('netsh.exe')) {
+        // הדמיית הפעולה המוגבהת: add יוצר את החוק, delete מסיר אותו.
+        if (joined.includes('delete')) {
+          elevatedDeleteCalled = true;
+          ruleExists = false;
+        } else {
+          ruleExists = true;
+        }
+      }
+      return { err: null, stdout: '', stderr: '' };
+    }
+  });
+  createAppDir(m);
+  await m.ready();
+
+  // החסימה פעילה — החוק הופעל והאייקון מוצג (ממתינים שהאכיפה הראשונית תסתיים)
+  let st = await m.ipcHandlers.get('status:get')();
+  assert.equal(st.state, 'netblock');
+  assert.equal(st.netBlockApplied, true, 'החוק הופעל בפועל');
+  await new Promise((r) => setTimeout(r, 100));
+  const iconWins = () => m.state.windows.filter((w) => !w._destroyed && !w.blockDisplayId && !w.title);
+  assert.ok(iconWins().length >= 1, 'האייקון הצף מוצג בזמן חסימת אינטרנט');
+
+  // ביטול עם סיסמה — הפעולה ממתינה להסרת החוק וחוזרת עם מצב אמיתי
+  const res = await m.ipcHandlers.get('unlock:now')({}, '1234');
+  assert.equal(res.ok, true, 'הביטול מצליח');
+  assert.ok(elevatedDeleteCalled, 'ההסרה המוגבהת של החוק בוצעה');
+  st = await m.ipcHandlers.get('status:get')();
+  assert.equal(st.state, 'allowed', 'לאחר הביטול — הרשת פתוחה');
+  assert.equal(st.netBlockApplied, false, 'החוק באמת הוסר');
+  assert.equal(iconWins().length, 0, 'האייקון הצף נסגר אחרי הביטול');
   m.cleanup();
 });
 

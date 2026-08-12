@@ -700,12 +700,32 @@ function reconcileNetBlock(desired) {
   return netOperation;
 }
 
-// הפעלת netsh מתוך תהליך רגיל לא מחזיקה הרשאת מנהל. בעבר המצב הזה סומן
-// כ"האינטרנט חסום" למרות שפקודת חומת האש כלל לא יכלה לרוץ — ולכן בפועל
-// האינטרנט נשאר פתוח. כשאין הרשאה, מרימים רק את פקודת netsh דרך UAC
-// (ולא את כל ממשק התוכנה), ומציגים כשל אם המשתמש ביטל את האישור.
+// הפעלת netsh מתוך תהליך רגיל לא מחזיקה הרשאת מנהל. בעבר הסתמכנו על קוד
+// היציאה של PowerShell מורם (Start-Process -Verb RunAs) — וזה נכשל בשקט:
+// קוד היציאה של התהליך המורם לא תמיד מגיע ל-PowerShell, כך שגם כשחוק
+// חומת האש נמחק בהצלחה האפליקציה חשבה שהפעולה נכשלה והמשיכה לנסות שוב
+// ושוב (כל 5 שניות) — עם חלון UAC/קונסול מהבהב, ובסופו של דבר חסימה
+// שלא בוטלה. הגישה החדשה:
+//   1. מרימים את netsh דרך כלי ההרמה הרשמי של electron-builder
+//      (elevate.exe, שנארז לצד האפליקציה) עם דגל -wait — הוא ממתין
+//      לסיום התהליך המורם; בסביבת פיתוח נופלים ל-PowerShell מוסתר.
+//   2. אין סומכים על קוד היציאה כלל — ההצלחה נמדדת לפי מצב החוק בפועל
+//      (netBlockSet בודק netRuleExists לאחר כל פעולה).
+//   3. ביטול UAC או כשל הרמה מכניסים קירור של דקה כדי שלא יקפצו חלונות
+//      שוב ושוב כל כמה שניות.
 function psSingleQuote(value) {
   return "'" + String(value).replace(/'/g, "''") + "'";
+}
+
+function elevateExe() {
+  const candidates = [
+    path.join(__dirname, 'resources', 'elevate.exe'),
+    path.join(process.resourcesPath || '', 'elevate.exe')
+  ];
+  for (const c of candidates) {
+    try { if (c && fs.existsSync(c)) return c; } catch { /* ignore */ }
+  }
+  return null;
 }
 
 function runNetsh(args) {
@@ -716,21 +736,32 @@ function runNetsh(args) {
       });
     }
     if (Date.now() < netElevationRetryAt) {
-      return resolve({ err: new Error('הרשאת מנהל לא אושרה — נסו שוב מתוך התוכנה כדי להציג בקשת UAC חדשה') });
+      return resolve({ err: new Error('הרשאת מנהל לא אושרה קודם לכן — נסו שוב בעוד דקה או מתוך אפליקציה שהופעלה כמנהל') });
     }
-    // Start-Process -Verb RunAs מציג את בקשת UAC עבור פקודת החומה בלבד.
-    // העברת הארגומנטים כמערך מצמצמת סיכוני quoting וערכי shell לא צפויים.
+    const done = (err, stdout, stderr) => {
+      // כשלון (כולל ביטול UAC) — קירור של דקה. זה מונע את "לולאת החלונות":
+      // ביטול חסימה שנכשל לא יפתח שוב UAC כל 5 שניות.
+      if (err) netElevationRetryAt = Date.now() + 60000;
+      else netElevationRetryAt = 0;
+      resolve({ err, stdout, stderr });
+    };
+    const elevate = elevateExe();
+    if (elevate) {
+      // -wait: ממתין לסיום התהליך המורם. תוצאת הפעולה נבדקת בכל מקרה
+      // לפי מצב החוק (netRuleExists) — לא לפי קוד יציאה.
+      return execFile(elevate, ['-wait', 'netsh', ...args], { windowsHide: true, timeout: 30000 }, (err, stdout, stderr) => {
+        done(err, stdout, stderr);
+      });
+    }
     const list = '@(' + args.map(psSingleQuote).join(',') + ')';
     const script =
       "$ErrorActionPreference='Stop'; try { $p=Start-Process -FilePath 'netsh.exe' " +
       '-ArgumentList ' + list + ' -Verb RunAs -Wait -PassThru; exit ([int]$p.ExitCode) } ' +
       'catch { Write-Error $_; exit 1223 }';
-    netElevationRetryAt = Date.now() + 60000;
     execFile('powershell.exe', [
-      '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script
+      '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-Command', script
     ], { windowsHide: true, timeout: 30000 }, (err, stdout, stderr) => {
-      if (!err) netElevationRetryAt = 0;
-      resolve({ err, stdout, stderr });
+      done(err, stdout, stderr);
     });
   });
 }
@@ -740,28 +771,28 @@ function runNetsh(args) {
 // שהחוק אכן קיים — לא מדווחים "חסום" על סמך יציאת פקודה בלבד.
 async function netBlockSet(enable) {
   if (!isWin) return { ok: false, error: 'זמין רק בווינדוס' };
-  const done = (err, msg) => err
-    ? { ok: false, error: msg || 'חומת האש אינה זמינה, ההרשאה בוטלה או שהיא מנוהלת על ידי תוכנה אחרת — לא ניתן לשנות את חסימת האינטרנט' }
-    : { ok: true };
+  const fail = (msg) => ({ ok: false, error: msg || 'חומת האש אינה זמינה, ההרשאה בוטלה או שהיא מנוהלת על ידי תוכנה אחרת — לא ניתן לשנות את חסימת האינטרנט' });
   if (enable) {
     const exists = await netRuleExists();
     const args = exists
       ? ['advfirewall', 'firewall', 'set', 'rule', 'name=' + NET_RULE, 'new', 'enable=yes', 'action=block', 'dir=out', 'protocol=any', 'localip=any', 'remoteip=any', 'profile=any']
       : ['advfirewall', 'firewall', 'add', 'rule', 'name=' + NET_RULE, 'dir=out', 'action=block', 'enable=yes', 'protocol=any', 'localip=any', 'remoteip=any', 'profile=any'];
-    const result = await runNetsh(args);
-    if (result.err) return done(result.err);
+    await runNetsh(args);
+    // מדידת הצלחה לפי המצב בפועל — לא לפי קוד יציאה של תהליך מורם.
     const present = await netRuleExists();
-    if (!present) return done(new Error('חוק חסימת האינטרנט לא נמצא לאחר ההפעלה — ייתכן שחומת האש מנוהלת על ידי תוכנה אחרת'));
+    if (!present) return fail('חוק חסימת האינטרנט לא נמצא לאחר ההפעלה — ייתכן שחומת האש מנוהלת על ידי תוכנה אחרת');
     const firewallOn = await firewallProfilesEnabled();
-    return done(firewallOn === false
-      ? new Error('חומת האש של Windows כבויה — החוק קיים אך אינו אוכף חסימה')
-      : null);
+    return firewallOn === false
+      ? fail('חומת האש של Windows כבויה — החוק קיים אך אינו אוכף חסימה')
+      : { ok: true };
   }
-  const result = await runNetsh(['advfirewall', 'firewall', 'delete', 'rule', 'name=' + NET_RULE]);
-  if (!result.err) return done(null);
-  // אין חוק כזה = הרשת כבר פתוחה — זה בסדר (אלא אם החוק דווקא קיים)
+  await runNetsh(['advfirewall', 'firewall', 'delete', 'rule', 'name=' + NET_RULE]);
+  // הצלחה = החוק באמת איננו. כך גם אם קוד היציאה של ההרמה אבד בדרך
+  // (PowerShell/elevate), ביטול החסימה מתעדכן נכון והלולאה אינה חוזרת.
   const exists = await netRuleExists();
-  return done(exists ? result.err : null);
+  return exists
+    ? fail('לא ניתן להסיר את חוק חסימת האינטרנט — ייתכן שהמחשב או חומת האש מנוהלים על ידי תוכנה אחרת')
+    : { ok: true };
 }
 
 // סנכרון בעלייה: לדעת אם חוק החסימה נשאר פעיל מסשן קודם (חוקי חומת האש
@@ -1318,6 +1349,9 @@ async function enforceCore() {
   } else {
     netDesired = false;
   }
+  // האייקון הצף מוצג כשחלון חסימת האינטרנט פעיל והחוק באמת הופעל בחומת
+  // האש (netBlockApplied מאומת לפי netRuleExists). מקרה של כשלון הרמה
+  // מוצג בסטטוס, בלי אייקון שיסמן חסימה שלא באמת קיימת.
   showNetIcon(activeNet && netBlockApplied);
   const publish = () => {
     const current = buildStatus();
@@ -2346,7 +2380,7 @@ function registerIpc() {
     return { ok: true };
   });
 
-  ipcMain.handle('unlock:now', (event, pin) => {
+  ipcMain.handle('unlock:now', async (event, pin) => {
     if (!blockSender(event)) return senderError();
     if (configurationFault) {
       return { ok: false, error: 'לא ניתן לפתוח עד לתיקון קובץ ההגדרות' };
@@ -2360,7 +2394,7 @@ function registerIpc() {
         ? (st.nextAt ? st.nextAt.getTime() : trustedNow() + 3600 * 1000)
         : null;
       const persisted = saveSettings();
-      enforce();
+      await enforce();
       return persisted.ok
         ? { ok: true }
         : { ok: true, warning: persisted.error || 'הפתיחה זמינה כעת אך לא נשמרה לדיסק' };
@@ -2392,9 +2426,16 @@ function registerIpc() {
       schedule.manualUnlockUntil = null;
     }
     const persisted = saveSettings();
-    enforce();
+    // הפתיחה אינה מוחזרת כ"הצליחה" לפני שהאכיפה הסתיימה בפועל: ממתינים
+    // להסרת חוק חומת האש, כך שהמשתמש לא יקבל "בוטלה" בזמן שהאינטרנט עדיין
+    // חסום (וגם לא ייקפצו ניסיונות הרמה חוזרים כל כמה שניות).
+    await enforce();
+    const actual = enforcementState.actual;
+    const stillBlocked = !!(schedule.enabled && S.getStatus(schedule, trustedDate()).state === 'netblock' && netBlockApplied);
     return persisted.ok
-      ? { ok: true }
+      ? (stillBlocked
+        ? { ok: false, error: 'האינטרנט עדיין חסום — לא ניתן היה להסיר את חוק חומת האש (נדרש אישור מנהל או שחומת האש מנוהלת על ידי תוכנה אחרת)' }
+        : { ok: true, actual })
       : { ok: true, warning: persisted.error || 'הפתיחה זמינה כעת אך לא נשמרה לדיסק' };
   });
 
