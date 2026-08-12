@@ -47,7 +47,8 @@ function makeMock(config) {
     readyCallbacks: [],
     windowsCreated: 0,
     windows: [],
-    notifications: []
+    notifications: [],
+    tooltips: []
   };
 
   const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'bhz-adv-'));
@@ -138,7 +139,10 @@ function makeMock(config) {
       on: () => {}
     },
     BrowserWindow: MockBrowserWindow,
-    Tray: class { setToolTip() {} setContextMenu() {} },
+    Tray: class {
+      setToolTip(t) { state.tooltips.push(String(t || '')); }
+      setContextMenu() {}
+    },
     Menu: { buildFromTemplate: () => ({ popup: () => {} }) },
     ipcMain: { handle: (channel, fn) => ipcHandlers.set(channel, fn) },
     nativeImage: { createFromPath: () => ({ isEmpty: () => true, resize: () => ({}) }), createEmpty: () => ({}) },
@@ -422,6 +426,95 @@ test('netblock: firewall rule add failure is detected by the reconcile loop', as
 
   // The reconcile loop should have tried to add the rule
   assert.ok(addAttempts > 0, 'Netblock reconcile should attempt firewall add (got ' + addAttempts + ')');
+  m.cleanup();
+});
+
+test('netblock: verification failure (firewall off) sets a cooldown — no UAC window every 5 seconds', async () => {
+  // תרחיש המשתמש: החוק נוצר בהצלחה אבל חומת האש כבויה — החוק קיים אך אינו
+  // אוכף. בעבר לולאת האכיפה (כל 5 שניות) חזרה והריצה netsh מורם בכל פעם,
+  // ולכן נפתח חלון UAC/קונסול שוב ושוב. הקירור חייב למנוע את זה.
+  let uacAttempts = 0;
+  let ruleExists = false;
+  const s = S.defaultSchedule();
+  s.pinHash = S.sha256Hex('1234');
+  s.week.forEach((d) => d.slots.push({ start: 0, end: 1440, type: 'netblock' }));
+
+  const m = loadMain({
+    settings: s,
+    elevate: false,
+    exec(cmd, args) {
+      const joined = String(args.join(' '));
+      if (cmd === 'netsh' && joined.includes('show') && joined.includes('BenHazmanimNetBlock')) {
+        return ruleExists
+          ? { err: null, stdout: 'BenHazmanimNetBlock', stderr: '' }
+          : { err: new Error('no such rule'), stdout: '', stderr: '' };
+      }
+      if (cmd === 'powershell.exe' && joined.includes('Start-Process') && joined.includes('netsh.exe')) {
+        uacAttempts++;
+        ruleExists = true; // הפקודה מצליחה — אבל חומת האש כבויה
+      }
+      if (cmd === 'powershell.exe' && joined.includes('Get-NetFirewallProfile')) {
+        return { err: null, stdout: 'False', stderr: '' }; // כל הפרופילים כבויים
+      }
+      return { err: null, stdout: '', stderr: '' };
+    }
+  });
+  createAppDir(m);
+  await m.ready();
+  await new Promise((r) => setTimeout(r, 150)); // שהאכיפה הראשונית תסתיים
+
+  assert.equal(uacAttempts, 1, 'הניסיון הראשון מבצע הרמת הרשאות אחת');
+  let st = await m.ipcHandlers.get('status:get')();
+  assert.equal(st.netBlockFailed, true, 'חומת אש כבויה — החסימה אינה מוגדרת כפעילה');
+
+  // אכיפה נוספת בתוך חלון הקירור אסורה לפתוח UAC שוב
+  await m.ipcHandlers.get('session:unlock')({}, '1234');
+  const settingsNow = await m.ipcHandlers.get('settings:get')();
+  await m.ipcHandlers.get('settings:save')({}, settingsNow);
+  await new Promise((r) => setTimeout(r, 150));
+  assert.equal(uacAttempts, 1, 'בתוך הקירור לא נפתחים חלונות UAC חוזרים (got ' + uacAttempts + ')');
+  m.cleanup();
+});
+
+test('netblock: tray does not claim the internet is blocked when the rule failed to apply', async () => {
+  // אותו עיקרון כמו המסך הראשי: אסור למגש להציג "האינטרנט חסום" כשהחוק
+  // לא הופעל בפועל (חומת אש כבויה / הרשאה בוטלה) — אחרת נוצרת תחושת
+  // חסימה כוזבת. המצב המדווח חייב להיות המצב האמיתי.
+  let ruleExists = false;
+  const s = S.defaultSchedule();
+  s.pinHash = S.sha256Hex('1234');
+  s.week.forEach((d) => d.slots.push({ start: 0, end: 1440, type: 'netblock' }));
+
+  const m = loadMain({
+    settings: s,
+    elevate: false,
+    exec(cmd, args) {
+      const joined = String(args.join(' '));
+      if (cmd === 'netsh' && joined.includes('show') && joined.includes('BenHazmanimNetBlock')) {
+        return ruleExists
+          ? { err: null, stdout: 'BenHazmanimNetBlock', stderr: '' }
+          : { err: new Error('no such rule'), stdout: '', stderr: '' };
+      }
+      if (cmd === 'powershell.exe' && joined.includes('Start-Process') && joined.includes('netsh.exe')) {
+        ruleExists = true;
+      }
+      if (cmd === 'powershell.exe' && joined.includes('Get-NetFirewallProfile')) {
+        return { err: null, stdout: 'False', stderr: '' };
+      }
+      return { err: null, stdout: '', stderr: '' };
+    }
+  });
+  createAppDir(m);
+  await m.ready();
+  await new Promise((r) => setTimeout(r, 150)); // שהאכיפה הראשונית תסתיים
+
+  const st = await m.ipcHandlers.get('status:get')();
+  assert.equal(st.netBlockFailed, true, 'החוק לא הופעל — אמורה להיות שגיאה');
+  const tips = m.state.tooltips;
+  assert.ok(tips.length > 0, 'המגש עודכן לפחות פעם אחת');
+  const last = tips[tips.length - 1];
+  assert.ok(/שגיאה/.test(last), 'המגש מציג את הכשל, לא חסימה כוזבת — got: ' + last);
+  assert.ok(!/האינטרנט חסום/.test(last), 'המגש אינו מציג "האינטרנט חסום" כשהחוק נכשל — got: ' + last);
   m.cleanup();
 });
 

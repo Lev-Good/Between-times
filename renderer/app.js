@@ -254,6 +254,13 @@ function polar(cx, cy, r, minutes) {
 }
 
 function arcPath(cx, cy, r, fromMin, toMin) {
+  // חלון של כל היום (00:00–24:00): נקודת ההתחלה והסיום זהות, וקשת SVG עם
+  // נקודות זהות לא מצוירת כלל — לכן מציירים מעגל מלא משני חצאי קשתות.
+  if (fromMin === 0 && toMin >= 1440) {
+    return 'M ' + (cx - r) + ' ' + cy +
+      ' A ' + r + ' ' + r + ' 0 1 1 ' + (cx + r) + ' ' + cy +
+      ' A ' + r + ' ' + r + ' 0 1 1 ' + (cx - r) + ' ' + cy;
+  }
   const a = polar(cx, cy, r, fromMin);
   const b = polar(cx, cy, r, toMin);
   const large = (toMin - fromMin) > 720 ? 1 : 0;
