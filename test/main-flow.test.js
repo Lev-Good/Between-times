@@ -116,13 +116,13 @@ function makeMock(config) {
       };
       this.blockDisplayId = null;
     }
-    isDestroyed() { return false; }
+    isDestroyed() { return !!this._destroyed; }
     on(ev, cb) { (this._listeners[ev] = this._listeners[ev] || []).push(cb); }
     emit(ev, arg) { (this._listeners[ev] || []).forEach((l) => l(arg)); }
     show() {}
     focus() {}
     hide() { this.emit('hide'); }
-    destroy() {}
+    destroy() { this._destroyed = true; this.emit('closed'); }
     setAlwaysOnTop() {}
     setVisibleOnAllWorkspaces() {}
     loadFile() {}
