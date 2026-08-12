@@ -49,6 +49,7 @@ function makeMock(config) {
     windows: [],        // כל חלונות ה-BrowserWindow שנוצרו (לכידת אירועים)
     notifications: []
   };
+  let mockNetRuleExists = false;
 
   const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'bhz-flow-'));
   fs.mkdirSync(path.join(tmpRoot, 'userData'), { recursive: true });
@@ -75,9 +76,17 @@ function makeMock(config) {
   function defaultExec(cmd, args) {
     if (cmd === 'schtasks' && args.includes('/Create')) return { err: new Error('access denied'), stdout: '', stderr: '' };
     if (cmd === 'schtasks' && args.includes('/Query')) return { err: new Error('not found'), stdout: '', stderr: '' };
-    // חוק חסימת האינטרנט לא קיים כברירת מחדל — כדי שהרצת בדיקות לא
-    // תפעיל ניקוי netsh מיותר בכל בדיקה (האכיפה תסיר רק אם באמת יש חוק)
-    if (cmd === 'netsh' && args.includes('show')) return { err: new Error('no such rule'), stdout: '', stderr: '' };
+    // הדמיית חוק חומת האש: אחרי add/set הוא קיים, ואחרי delete הוא נעלם.
+    // כך בדיקות האכיפה יכולות לאמת את מצב החוק בפועל ולא רק את קוד היציאה.
+    if (cmd === 'netsh') {
+      if (args.includes('show')) {
+        return mockNetRuleExists
+          ? { err: null, stdout: 'BenHazmanimNetBlock', stderr: '' }
+          : { err: new Error('no such rule'), stdout: '', stderr: '' };
+      }
+      if (args.includes('add') || args.includes('set')) { mockNetRuleExists = true; return { err: null, stdout: '', stderr: '' }; }
+      if (args.includes('delete')) { mockNetRuleExists = false; return { err: null, stdout: '', stderr: '' }; }
+    }
     return { err: null, stdout: '', stderr: '' };
   }
   const execImpl = cfg.exec || defaultExec;

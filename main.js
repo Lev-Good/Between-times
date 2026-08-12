@@ -190,10 +190,12 @@ let lastBlockedState = false; // מעקב מצבי לזיהוי תחילת/סי�
 let lastWarningActive = false; // מעקב מצבי לזיהוי כניסה/יציאה מחלון האזהרה לפני חסימה
 let netBlockApplied = false;  // חוק חסימת האינטרנט פעיל בפועל בחומת האש
 let netBlockFailed = false;   // ניסיון הפעלה נכשל (חומת אש לא זמינה/מנוהלת ע"י תוכנה אחרת)
+let netBlockError = null;     // הסיבה האחרונה לכשל — מוצגת כדי שלא תהיה תחושת חסימה כוזבת
 let netBlockWarned = false;   // הודעת השגיאה נשלחה פעם אחת (לא לשלוח כל 5 שניות)
 let netDesired = false;       // המצב הרצוי האחרון של חוק חומת האש
 let netOperation = null;      // Promise יחיד — מונע add/delete חופפים
 let netNeedsValidation = false; // חוק קיים מסשן קודם חייב אימות מחדש
+let netElevationRetryAt = 0;   // מניעת חלונות UAC חוזרים במקרה של ביטול/כשל
 let lastNetActive = false;    // מעקב מצבי לזיהוי תחילת/סיום חסימת אינטרנט ביומן
 let netIconWin = null;        // חלון האייקון הצף (מחשב פתוח + אינטרנט חסום)
 
@@ -632,8 +634,9 @@ function unregisterBlockShortcuts() {
    החסימה מתבצעת עם חוק חומת אש אחד ייעודי משלנו (dir=out) בשם ייחודי,
    כך שאין כל התנגשות עם סינונים/חוקים קיימים של המשתמש — בזמן החסימה
    כל היציאה חסומה ממילא, ולאחר הסרת החוק הסינונים הקיימים חוזרים לפעול
-   בדיוק כפי שהיו. החוק דורש הרשאת מנהל (המשימה המתוזמנת מריצה את התוכנה
-   מוגבהת בכניסה) — בהרצה רגילה החסימה מדווחת ככשלה במקום להיכשל בשקט. */
+   בדיוק כפי שהיו. החוק דורש הרשאת מנהל: בהרצה מוגבהת הוא מופעל ישירות,
+   ובהרצה רגילה רק פקודת חומת האש מורמת באמצעות UAC — לא מסמנים חסימה
+   פעילה לפני שהחוק נוצר ואומת בפועל. */
 const NET_RULE = 'BenHazmanimNetBlock';
 
 // האם קיים חוק חסימה בשם שלנו? (נקרא בעלייה כדי לסנכרן עם מצב קיים
@@ -642,6 +645,21 @@ function netRuleExists() {
   return new Promise((resolve) => {
     if (!isWin) return resolve(false);
     execFile('netsh', ['advfirewall', 'firewall', 'show', 'rule', 'name=' + NET_RULE], (err) => resolve(!err));
+  });
+}
+
+// חוק יכול להיווצר גם כאשר כל פרופילי חומת האש כבויים — במקרה כזה הוא
+// קיים אך אינו אוכף דבר. בדיקה זו אינה מנתחת פלט מקומי של netsh; אם גרסת
+// Windows אינה מספקת את cmdlet, מחזירים null ומשאירים את בדיקת קיום החוק.
+function firewallProfilesEnabled() {
+  return new Promise((resolve) => {
+    if (!isWin) return resolve(null);
+    const script = '(Get-NetFirewallProfile | Where-Object { $_.Enabled -eq $true }).Count -gt 0';
+    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true, timeout: 10000 }, (err, stdout) => {
+      if (err) return resolve(null);
+      const value = String(stdout || '').trim().toLowerCase();
+      resolve(value === 'true' ? true : value === 'false' ? false : null);
+    });
   });
 }
 
@@ -660,9 +678,11 @@ function reconcileNetBlock(desired) {
         netBlockApplied = wanted;
         netNeedsValidation = false;
         netBlockFailed = false;
+        netBlockError = null;
         netBlockWarned = false;
       } else {
         netBlockFailed = true;
+        netBlockError = res.error || 'לא ניתן לאמת שחסימת האינטרנט פעילה';
         if (!netBlockWarned) {
           netBlockWarned = true;
           logEvent('netblock-fail', { desired: wanted, error: res.error || null });
@@ -680,31 +700,68 @@ function reconcileNetBlock(desired) {
   return netOperation;
 }
 
-// הפעלה/כיבוי של חוק החסימה. נשען על קודי השגיאה של netsh (אמינים גם
-// כשהפלט מקומי, למשל בעברית) ולא על ניתוח טקסט.
-function netBlockSet(enable) {
+// הפעלת netsh מתוך תהליך רגיל לא מחזיקה הרשאת מנהל. בעבר המצב הזה סומן
+// כ"האינטרנט חסום" למרות שפקודת חומת האש כלל לא יכלה לרוץ — ולכן בפועל
+// האינטרנט נשאר פתוח. כשאין הרשאה, מרימים רק את פקודת netsh דרך UAC
+// (ולא את כל ממשק התוכנה), ומציגים כשל אם המשתמש ביטל את האישור.
+function psSingleQuote(value) {
+  return "'" + String(value).replace(/'/g, "''") + "'";
+}
+
+function runNetsh(args) {
   return new Promise((resolve) => {
-    if (!isWin) return resolve({ ok: false, error: 'זמין רק בווינדוס' });
-    if (!isElevated()) {
-      return resolve({ ok: false, error: 'חסימת אינטרנט דורשת הרצה כמנהל — הפעילו את התוכנה כמנהל פעם אחת כדי ליצור את המשימה המתוזמנת המוגבהת' });
-    }
-    const done = (err, msg) => resolve(err ? { ok: false, error: msg || err.message } : { ok: true });
-    if (enable) {
-      execFile('netsh', ['advfirewall', 'firewall', 'add', 'rule', 'name=' + NET_RULE, 'dir=out', 'action=block', 'enable=yes', 'profile=any'], (err) => {
-        if (!err) return done(null);
-        // החוק כבר קיים (למשל מסשן קודם) — להפעיל אותו
-        execFile('netsh', ['advfirewall', 'firewall', 'set', 'rule', 'name=' + NET_RULE, 'new', 'enable=yes', 'action=block', 'dir=out', 'profile=any'], (err2) => {
-          done(err2, 'חומת האש אינה זמינה או מנוהלת על ידי תוכנה אחרת — לא ניתן לחסום את האינטרנט');
-        });
-      });
-    } else {
-      execFile('netsh', ['advfirewall', 'firewall', 'delete', 'rule', 'name=' + NET_RULE], (err) => {
-        if (!err) return done(null);
-        // אין חוק כזה = הרשת כבר פתוחה — זה בסדר (אלא אם החוק דווקא קיים)
-        netRuleExists().then((exists) => done(exists ? err : null));
+    if (isElevated()) {
+      return execFile('netsh', args, { windowsHide: true }, (err, stdout, stderr) => {
+        resolve({ err, stdout, stderr });
       });
     }
+    if (Date.now() < netElevationRetryAt) {
+      return resolve({ err: new Error('הרשאת מנהל לא אושרה — נסו שוב מתוך התוכנה כדי להציג בקשת UAC חדשה') });
+    }
+    // Start-Process -Verb RunAs מציג את בקשת UAC עבור פקודת החומה בלבד.
+    // העברת הארגומנטים כמערך מצמצמת סיכוני quoting וערכי shell לא צפויים.
+    const list = '@(' + args.map(psSingleQuote).join(',') + ')';
+    const script =
+      "$ErrorActionPreference='Stop'; try { $p=Start-Process -FilePath 'netsh.exe' " +
+      '-ArgumentList ' + list + ' -Verb RunAs -Wait -PassThru; exit ([int]$p.ExitCode) } ' +
+      'catch { Write-Error $_; exit 1223 }';
+    netElevationRetryAt = Date.now() + 60000;
+    execFile('powershell.exe', [
+      '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script
+    ], { windowsHide: true, timeout: 30000 }, (err, stdout, stderr) => {
+      if (!err) netElevationRetryAt = 0;
+      resolve({ err, stdout, stderr });
+    });
   });
+}
+
+// הפעלה/כיבוי של חוק החסימה. נשען על קודי השגיאה של netsh (אמינים גם
+// כשהפלט מקומי, למשל בעברית) ולא על ניתוח טקסט. אחרי שינוי מוצלח מאמתים
+// שהחוק אכן קיים — לא מדווחים "חסום" על סמך יציאת פקודה בלבד.
+async function netBlockSet(enable) {
+  if (!isWin) return { ok: false, error: 'זמין רק בווינדוס' };
+  const done = (err, msg) => err
+    ? { ok: false, error: msg || 'חומת האש אינה זמינה, ההרשאה בוטלה או שהיא מנוהלת על ידי תוכנה אחרת — לא ניתן לשנות את חסימת האינטרנט' }
+    : { ok: true };
+  if (enable) {
+    const exists = await netRuleExists();
+    const args = exists
+      ? ['advfirewall', 'firewall', 'set', 'rule', 'name=' + NET_RULE, 'new', 'enable=yes', 'action=block', 'dir=out', 'protocol=any', 'localip=any', 'remoteip=any', 'profile=any']
+      : ['advfirewall', 'firewall', 'add', 'rule', 'name=' + NET_RULE, 'dir=out', 'action=block', 'enable=yes', 'protocol=any', 'localip=any', 'remoteip=any', 'profile=any'];
+    const result = await runNetsh(args);
+    if (result.err) return done(result.err);
+    const present = await netRuleExists();
+    if (!present) return done(new Error('חוק חסימת האינטרנט לא נמצא לאחר ההפעלה — ייתכן שחומת האש מנוהלת על ידי תוכנה אחרת'));
+    const firewallOn = await firewallProfilesEnabled();
+    return done(firewallOn === false
+      ? new Error('חומת האש של Windows כבויה — החוק קיים אך אינו אוכף חסימה')
+      : null);
+  }
+  const result = await runNetsh(['advfirewall', 'firewall', 'delete', 'rule', 'name=' + NET_RULE]);
+  if (!result.err) return done(null);
+  // אין חוק כזה = הרשת כבר פתוחה — זה בסדר (אלא אם החוק דווקא קיים)
+  const exists = await netRuleExists();
+  return done(exists ? result.err : null);
 }
 
 // סנכרון בעלייה: לדעת אם חוק החסימה נשאר פעיל מסשן קודם (חוקי חומת האש
@@ -1150,6 +1207,8 @@ function buildStatus() {
     secondsUntilLabel: st.secondsUntilNext != null ? S.formatDuration(st.secondsUntilNext) : null,
     pinSet: !!schedule.pinHash,
     netBlockFailed: netBlockFailed,
+    netBlockError: netBlockError,
+    netBlockApplied: netBlockApplied,
     clockError: !!st.clockError,
     configError: !!configurationFault,
     enforcement: enforcementSnapshot(),
@@ -2549,6 +2608,8 @@ function registerIpc() {
       shared: isWin && fs.existsSync(machineSettingsFile()),
       recovery: !!schedule.recoveryEmail,
       netElevated: isElevated(),
+      // גם תהליך רגיל יכול להפעיל את חוק הרשת באמצעות אישור UAC נקודתי.
+      netUac: isWin,
       netActive: netBlockApplied,
       protectedCopy,
       lastTamper: lastTamper()
