@@ -641,10 +641,20 @@ const NET_RULE = 'BenHazmanimNetBlock';
 
 // האם קיים חוק חסימה בשם שלנו? (נקרא בעלייה כדי לסנכרן עם מצב קיים
 // אחרי קריסה/סגירה — חוקי חומת אש נשארים גם אחרי שהתוכנה נסגרת)
+// ערכי החזרה: true = קיים, false = ודאי שאינו קיים, null = לא ניתן לקבוע
+// (פקודת netsh לא הסתיימה בזמן). כל מחזיק מקבל החלטה Fail-Closed על null —
+// כך ש-netsh תקוע לא "משחרר" את לולאת האכיפה עם דיווח שקרי ולא משאיר
+// את האכיפה תקועה לעד (לולאת reconcile חייבת תמיד להסתיים).
 function netRuleExists() {
   return new Promise((resolve) => {
     if (!isWin) return resolve(false);
-    execFile('netsh', ['advfirewall', 'firewall', 'show', 'rule', 'name=' + NET_RULE], (err) => resolve(!err));
+    let settled = false;
+    const finish = (value) => { if (!settled) { settled = true; resolve(value); } };
+    const timer = setTimeout(() => finish(null), 10000);
+    execFile('netsh', ['advfirewall', 'firewall', 'show', 'rule', 'name=' + NET_RULE], { windowsHide: true }, (err) => {
+      clearTimeout(timer);
+      finish(err ? false : true);
+    });
   });
 }
 
@@ -731,7 +741,9 @@ function elevateExe() {
 function runNetsh(args) {
   return new Promise((resolve) => {
     if (isElevated()) {
-      return execFile('netsh', args, { windowsHide: true }, (err, stdout, stderr) => {
+      // גם בהרצה מוגבהת יש timeout: netsh תקוע אסור שיתקע את לולאת האכיפה
+      // לעד (reconcileNetBlock ממתין לתוצאה לפני שהוא משחרר את הלולאה).
+      return execFile('netsh', args, { windowsHide: true, timeout: 30000 }, (err, stdout, stderr) => {
         resolve({ err, stdout, stderr });
       });
     }
@@ -772,34 +784,55 @@ function runNetsh(args) {
 async function netBlockSet(enable) {
   if (!isWin) return { ok: false, error: 'זמין רק בווינדוס' };
   const fail = (msg) => ({ ok: false, error: msg || 'חומת האש אינה זמינה, ההרשאה בוטלה או שהיא מנוהלת על ידי תוכנה אחרת — לא ניתן לשנות את חסימת האינטרנט' });
+  // קירור גם לכשלי אימות (ולא רק לכשלי פקודה): אם netsh הצליח אבל האימות
+  // נכשל — למשל חומת האש כבויה והחוק קיים אך אינו אוכף — אסור שלולאת
+  // האכיפה (כל 5 שניות) תפתח שוב UAC בכל פעם. אחרת מקבלים את "לולאת
+  // החלונות" גם בלי שום שגיאה בפקודה עצמה.
+  const cooling = () => { netElevationRetryAt = Date.now() + 60000; };
   if (enable) {
     const exists = await netRuleExists();
-    const args = exists
+    const args = (exists === true)
       ? ['advfirewall', 'firewall', 'set', 'rule', 'name=' + NET_RULE, 'new', 'enable=yes', 'action=block', 'dir=out', 'protocol=any', 'localip=any', 'remoteip=any', 'profile=any']
       : ['advfirewall', 'firewall', 'add', 'rule', 'name=' + NET_RULE, 'dir=out', 'action=block', 'enable=yes', 'protocol=any', 'localip=any', 'remoteip=any', 'profile=any'];
     await runNetsh(args);
     // מדידת הצלחה לפי המצב בפועל — לא לפי קוד יציאה של תהליך מורם.
+    // present !== true כולל גם null (לא ניתן לאמת) — בשני המקרים Fail-Closed.
     const present = await netRuleExists();
-    if (!present) return fail('חוק חסימת האינטרנט לא נמצא לאחר ההפעלה — ייתכן שחומת האש מנוהלת על ידי תוכנה אחרת');
+    if (present !== true) {
+      cooling();
+      return fail('חוק חסימת האינטרנט לא נמצא לאחר ההפעלה — ייתכן שחומת האש מנוהלת על ידי תוכנה אחרת');
+    }
     const firewallOn = await firewallProfilesEnabled();
-    return firewallOn === false
-      ? fail('חומת האש של Windows כבויה — החוק קיים אך אינו אוכף חסימה')
-      : { ok: true };
+    if (firewallOn === false) {
+      cooling();
+      return fail('חומת האש של Windows כבויה — החוק קיים אך אינו אוכף חסימה');
+    }
+    return { ok: true };
   }
   await runNetsh(['advfirewall', 'firewall', 'delete', 'rule', 'name=' + NET_RULE]);
   // הצלחה = החוק באמת איננו. כך גם אם קוד היציאה של ההרמה אבד בדרך
   // (PowerShell/elevate), ביטול החסימה מתעדכן נכון והלולאה אינה חוזרת.
+  // exists === true או null (לא ניתן לאמת) — בשני המקרים לא מדווחים
+  // "בוטלה" כשהחוק עלול עדיין להיות שם: Fail-Closed.
   const exists = await netRuleExists();
-  return exists
-    ? fail('לא ניתן להסיר את חוק חסימת האינטרנט — ייתכן שהמחשב או חומת האש מנוהלים על ידי תוכנה אחרת')
-    : { ok: true };
+  if (exists === true) {
+    cooling();
+    return fail('לא ניתן להסיר את חוק חסימת האינטרנט — ייתכן שהמחשב או חומת האש מנוהלים על ידי תוכנה אחרת');
+  }
+  if (exists === null) {
+    cooling();
+    return fail('לא ניתן לאמת שהחוק הוסר — נסו שוב בעוד רגע');
+  }
+  return { ok: true };
 }
 
 // סנכרון בעלייה: לדעת אם חוק החסימה נשאר פעיל מסשן קודם (חוקי חומת האש
 // לא נמחקים מעצמם), כדי שהאכיפה תסיר/תפעיל אותו לפי הלוח הנוכחי.
 async function reconcileNetBlockOnStartup() {
   if (!isWin) return;
-  netBlockApplied = await netRuleExists();
+  // null (לא ניתן לקבוע) מטופל כאילו החוק קיים — האכיפה תנסה לסנכרן
+  // ולבדוק מחדש, ולא תשאיר חוק ישן פעיל בשקט (Fail-Closed).
+  netBlockApplied = (await netRuleExists()) !== false;
   netNeedsValidation = netBlockApplied;
   // אם החוק קיים, הוא ייבדק/יופעל מחדש רק כאשר זה היעד הנוכחי; אם היעד
   // פתוח, reconcileNetBlock(false) יסיר אותו באופן סדרתי.
@@ -1399,7 +1432,12 @@ function trayIcon() {
 }
 
 function updateTray(status) {
-  const color = (status.state === 'blocked' || status.manualLock) ? 'חסום' : status.state === 'netblock' ? 'האינטרנט חסום' : 'מותר';
+  // המצב המוצג במגש הוא המצב האמיתי: חסימת אינטרנט שמתוכננת בלוח אך לא
+  // הופעלה בפועל (חומת אש כבויה/הרשאה בוטלה) מוצגת כשגיאה, לא כ"חסום" —
+  // אותו עיקרון כמו במסך הראשי: אין דיווח חסימה כוזב.
+  const color = (status.state === 'blocked' || status.manualLock) ? 'חסום'
+    : status.netBlockFailed ? 'שגיאה — האינטרנט לא נחסם'
+    : status.state === 'netblock' ? 'האינטרנט חסום' : 'מותר';
   const warnTxt = status.warning
     ? (status.next === 'netblock' ? ' • האינטרנט ייחסם בקרוב' : ' • ייחסם בקרוב')
     : '';
@@ -2849,6 +2887,12 @@ async function runWatchdog() {
   }
   // שומר-שער: ללא חלונות וללא מגש — רק מעקב והקפצה
   writeHeartbeat(watchHbFile());
+  // אחרי שינה/הערת מערכת כותבים heartbeat מיד: בלי זה ה-heartbeat של הראשי
+  // (שנכתב לפני השינה) נראה מיושן עם החזרה, והשומר היה הורג ומקפיץ אותו
+  // מחדש בכל פעם — ריסטרט מיותר של התוכנה אחרי כל שינה.
+  if (powerMonitor && typeof powerMonitor.on === 'function') {
+    powerMonitor.on('resume', () => writeHeartbeat(watchHbFile()));
+  }
   const check = () => {
     if (quitFlagExists()) { app.exit(0); return; } // עצירה מוסכמת
     writeHeartbeat(watchHbFile());
@@ -2869,6 +2913,11 @@ let ownWatchdogPid = null; // ה-PID של השומר שהתהליך הזה הק�
 function superviseWatchdog() {
   // בתהליך הראשי: לוודא שהשומר חי, ואם נסגר — להקים אותו מחדש
   writeHeartbeat(mainHbFile());
+  // אחרי שינה/הערת מערכת כותבים heartbeat מיד — אחרת השומר רואה את הראשי
+  // כ"מת" (ה-heartbeat האחרון נכתב לפני השינה) והורג/מקפיץ אותו מחדש.
+  if (powerMonitor && typeof powerMonitor.on === 'function') {
+    powerMonitor.on('resume', () => writeHeartbeat(mainHbFile()));
+  }
   const check = () => {
     writeHeartbeat(mainHbFile());
     recordClockSample();

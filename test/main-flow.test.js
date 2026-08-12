@@ -170,6 +170,11 @@ function makeMock(config) {
     dialog: {
       showSaveDialog: async () => ({ canceled: true }),
       showOpenDialog: async () => ({ canceled: true })
+    },
+    powerMonitor: {
+      listeners: {},
+      on: function (ev, cb) { (this.listeners[ev] = this.listeners[ev] || []).push(cb); },
+      emit: function (ev) { (this.listeners[ev] || []).forEach((cb) => cb()); }
     }
   };
 
@@ -1331,6 +1336,36 @@ test('watchdog: starts cleanly when no quit.flag (writes heartbeat)', async () =
     assert.ok(fs.existsSync(hb), 'השומר צריך לכתוב heartbeat');
     const data = JSON.parse(fs.readFileSync(hb, 'utf8'));
     assert.ok(data.pid > 0, 'heartbeat מכיל PID');
+  });
+});
+
+test('main: powerMonitor resume writes an immediate heartbeat (no spurious restart after sleep)', async () => {
+  // אחרי שינה/הערת מערכת ה-heartbeat של הראשי חייב להיכתב מיד — אחרת
+  // השומר רואה אותו מיושן (נכתב לפני השינה), הורג ומקפיץ את הראשי מחדש
+  // בכל פעם שהמחשב חוזר משינה — ריסטרט מיותר של התוכנה.
+  const m = loadMain({});
+  createAppDir(m);
+  await m.ready();
+
+  const hb = path.join(m.tmpRoot, 'userData', 'main.heartbeat');
+  assert.ok(fs.existsSync(hb), 'הראשי כותב heartbeat');
+  assert.ok(m.electron.powerMonitor.listeners.resume, 'הראשי רשום לאירוע resume');
+  fs.unlinkSync(hb); // מדמי שינה ארוכה — heartbeat ישן נמחק
+  m.electron.powerMonitor.emit('resume');
+  assert.ok(fs.existsSync(hb), 'resume כותב heartbeat מיד (כתיבה סינכרונית)');
+  m.cleanup();
+});
+
+test('watchdog: powerMonitor resume writes an immediate heartbeat', async () => {
+  const m = makeMock({});
+  await withWatchdogArg(m, async () => {
+    await m.ready();
+    const hb = path.join(m.tmpRoot, 'userData', 'watchdog.heartbeat');
+    assert.ok(fs.existsSync(hb), 'השומר כותב heartbeat');
+    assert.ok(m.electron.powerMonitor.listeners.resume, 'השומר רשום לאירוע resume');
+    fs.unlinkSync(hb);
+    m.electron.powerMonitor.emit('resume');
+    assert.ok(fs.existsSync(hb), 'resume כותב heartbeat מיד');
   });
 });
 
