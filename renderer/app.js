@@ -593,7 +593,7 @@ function updateCountdown(st) {
   const el = $('countdownBig');
   if (!el) return;
   const blocked = st.state === 'blocked' || !!st.manualLock;
-  const netblocked = st.state === 'netblock' && !st.manualLock;
+  const netblocked = st.state === 'netblock' && !st.manualLock && st.netBlockFailed !== true;
   const label = el.closest('.countdown-row').querySelector('.countdown-label');
   if (st.secondsUntilNext != null && st.nextAt) {
     el.textContent = fmtCountdown(st.secondsUntilNext);
@@ -610,10 +610,11 @@ function applyStatus(st) {
   status = st;
   const card = $('statusCard');
   const blocked = st.state === 'blocked' || !!st.manualLock;
-  const netblocked = st.state === 'netblock' && !st.manualLock;
+  const netFailed = st.state === 'netblock' && !st.manualLock && st.netBlockFailed === true;
+  const netblocked = st.state === 'netblock' && !st.manualLock && !netFailed;
   card.classList.toggle('blocked', blocked);
-  card.classList.toggle('netblock', netblocked);
-  card.classList.toggle('allowed', !blocked && !netblocked);
+  card.classList.toggle('netblock', netblocked || netFailed);
+  card.classList.toggle('allowed', !blocked && !netblocked && !netFailed);
   renderRing(st);
   updateCountdown(st);
 
@@ -630,16 +631,18 @@ function applyStatus(st) {
     $('warnCount').textContent = fmtCountdown(st.warningSeconds);
   }
 
-  $('statusState').textContent = blocked ? 'חסום' : netblocked ? 'האינטרנט חסום' : 'מותר';
+  $('statusState').textContent = blocked ? 'חסום' : netFailed ? 'שגיאה' : netblocked ? 'האינטרנט חסום' : 'מותר';
   // ללא סיסמה — החסימה אינה פעילה (הגנה מפני נעילה בלי מוצא)
   const noPin = !st.pinSet;
   $('statusTitle').textContent = blocked
     ? (st.manualLock ? 'המחשב חסום (נעילה ידנית)' : (noPin ? 'החסימה אינה פעילה — אין סיסמה' : 'המחשב חסום בשעה זו'))
-    : netblocked
-      ? (noPin ? 'חסימת האינטרנט אינה פעילה — אין סיסמה' : 'המחשב פתוח — האינטרנט חסום')
-      : st.enabled === false
-        ? 'האכיפה מושבתת'
-        : 'המחשב פתוח לשימוש';
+    : netFailed
+      ? 'חסימת האינטרנט לא הופעלה בפועל'
+      : netblocked
+        ? (noPin ? 'חסימת האינטרנט אינה פעילה — אין סיסמה' : 'המחשב פתוח — האינטרנט חסום')
+        : st.enabled === false
+          ? 'האכיפה מושבתת'
+          : 'המחשב פתוח לשימוש';
 
   const atLabel = st.nextAtLabel || (st.nextAt ? T.formatDate(new Date(st.nextAt)) : '');
   const inLabel = st.secondsUntilLabel || (st.secondsUntilNext != null ? T.formatDuration(st.secondsUntilNext) : '');
@@ -649,6 +652,8 @@ function applyStatus(st) {
       : noPin
         ? 'המחשב לא ננעל בפועל — הגדירו סיסמה כדי שהחסימה תופעל'
         : 'הגישה תיפתח ' + atLabel + ' • בעוד ' + inLabel;
+  } else if (netFailed) {
+    $('statusDetail').textContent = st.netBlockError || 'נדרש אישור מנהל או שחומת האש אינה זמינה — בדקו את ההודעה והפעילו מחדש את הבדיקה';
   } else if (netblocked) {
     $('statusDetail').textContent = noPin
       ? 'האינטרנט לא נחסם בפועל — הגדירו סיסמה כדי שחסימת האינטרנט תופעל'
@@ -1183,7 +1188,7 @@ async function renderSecurity() {
     { ok: sec.pin, label: 'סיסמה מוגדרת', hint: 'מגנה על ההגדרות ועל מסך החסימה' },
     { ok: sec.enabled, label: 'האכיפה פעילה', hint: 'המתג הראשי דלוק' },
     { ok: sec.elevated, label: 'הרצה עם הרשאות מנהל', hint: 'מאפשרת חסימת כל המשתמשים' },
-    { ok: sec.netElevated, label: 'חסימת אינטרנט בלבד זמינה', hint: 'חוק חומת אש ייעודי — דורש הרצה כמנהל' },
+    { ok: sec.netElevated || sec.netUac, label: 'חסימת אינטרנט בלבד זמינה', hint: sec.netElevated ? 'חוק חומת אש ייעודי — הרשאת מנהל פעילה' : 'בעת ההפעלה תופיע בקשת אישור מנהל (UAC)' },
     { ok: sec.shared, label: 'הגדרות משותפות לכל המשתמשים', hint: 'כל חשבון במחשב נחסם לפי אותו לוח' },
     { ok: sec.protectedCopy, label: 'הגנה על קבצי התוכנה', hint: tamperHint },
     { ok: sec.recovery, label: 'מייל לשחזור סיסמה', hint: 'לשחזור אם שוכחים את הסיסמה' }

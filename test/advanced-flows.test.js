@@ -300,6 +300,39 @@ test('netblock: rule that already exists is validated on startup', async () => {
   m.cleanup();
 });
 
+test('netblock: non-elevated UI elevates only the firewall command through UAC', async () => {
+  let uacAttempts = 0;
+  let ruleExists = false;
+  const s = S.defaultSchedule();
+  s.pinHash = S.sha256Hex('1234');
+  s.week.forEach((d) => d.slots.push({ start: 0, end: 1440, type: 'netblock' }));
+
+  const m = loadMain({
+    settings: s,
+    elevate: false,
+    exec(cmd, args) {
+      const joined = String(args.join(' '));
+      if (cmd === 'netsh' && joined.includes('show')) {
+        return ruleExists
+          ? { err: null, stdout: 'BenHazmanimNetBlock', stderr: '' }
+          : { err: new Error('no such rule'), stdout: '', stderr: '' };
+      }
+      if (cmd === 'powershell.exe' && joined.includes('Start-Process') && joined.includes('netsh.exe')) {
+        uacAttempts++;
+        ruleExists = true;
+      }
+      return { err: null, stdout: '', stderr: '' };
+    }
+  });
+  createAppDir(m);
+  await m.ready();
+
+  assert.equal(uacAttempts, 1, 'A normal UI process must request UAC for the firewall command');
+  const st = await m.ipcHandlers.get('status:get')();
+  assert.equal(st.netBlockFailed, false, 'Successful UAC elevation must not be reported as a failure');
+  m.cleanup();
+});
+
 test('netblock: firewall rule add failure is detected by the reconcile loop', async () => {
   let addAttempts = 0;
   // Use a schedule with netblock covering the current time so enforce
