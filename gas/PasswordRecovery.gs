@@ -7,70 +7,86 @@
  * איך לפרוס:
  * 1. פתחו גיליון Google Sheets חדש (חינם).
  * 2. תפריט: extensions → Apps Script (הרחבות → אפליקציות סקריפט).
- * 3. הדביקו את הקוד הזה במקום הקוד הקיים, ושנו את SECRET_KEY
- *    לערך ארוך ואקראי שמשמש אתכם בלבד.
+ * 3. הדביקו את הקוד הזה במקום הקוד הקיים.
  * 4. לחצו: Deploy → New deployment (פריסה → פריסה חדשה).
  *    סוג: Web app. הרשאות: "Anyone" (כל אחד) + Execute as: Me (כיוצר).
  * 5. העתיקו את כתובת ה-URL שנוצרה (…/exec) והדביקו אותה בתוכנה
  *    בשדה "כתובת אפליקציית השחזור".
- * 6. בכל פעם שתלחצו "שכחו סיסמה" בתוכנה — הסיסמה תישלח למייל
- *    המוגדר, והבקשה תירשם בגיליון (שעון, מייל, סיסמה, תאריך).
+ * 6. בכל פעם שתלחצו "שכחו סיסמה" בתוכנה — קוד חד-פעמי יישלח למייל
+ *    המוגדר. הסיסמה עצמה לעולם אינה נשלחת או נשמרת בשרת.
  *
  * כתובת הפריסה של אפליקציה זו נקבעה מראש בתוכנה (ב-main.js,
- * הקבוע RECOVERY_URL), כך שכל בקשת שחזור של כל המשתמשים
- * נשלחת לכאן בלבד — וכל הסיסמאות נשמרות בגיליון שלכם.
+ * הקבוע RECOVERY_URL), כך שכל בקשת שחזור נשלחת לכאן בלבד.
  *
- * שימו לב: הגיליון מכיל סיסמאות — שמרו אותו פרטי (לא לשתף!).
+ * שימו לב: הגיליון מכיל כתובות מייל ומטא-נתוני שחזור בלבד — שמרו אותו פרטי.
  * ============================================================
  */
 
-/** סוד משותף — חייב להיות זהה בדיוק לסוד בתוכנה (secret.local.js → RECOVERY_SECRET).
- *  שימו לב: כאן מופיע ערך פלצהולדר! בקובץ הזה שבמאגר הציבורי אין את הסוד האמיתי.
- *  לפני הפריסה (Deploy) — החליפו את הערך למפתח הסודי האמיתי שלכם, אותו אחד
- *  שמוגדר ב-secret.local.js במחשב שלכם. */
-var SECRET_KEY = 'oayrethdmuthmdorehtuiqcmruihdkikhrfiugr';
-
 /** שם הגיליון שבו נרשמות הבקשות */
 var SHEET_NAME = 'RecoveryLog';
+var RATE_LIMIT_MS = 5 * 60 * 1000;
+
+function recoveryEmailKey(email) {
+  var bytes = Utilities.computeDigest(
+    Utilities.DigestAlgorithm.SHA_256,
+    email,
+    Utilities.Charset.UTF_8
+  );
+  return 'recovery-last-' + bytes.map(function (b) {
+    return (b < 0 ? b + 256 : b).toString(16).padStart(2, '0');
+  }).join('');
+}
 
 /**
  * נקודת קצה שמקבלת POST מהתוכנה.
  * גוף הבקשה (JSON):
- *   { secret, email, password, app, time }
+ *   { email, token, app, time }
  */
 function doPost(e) {
   try {
     var body = JSON.parse(e.postData.contents);
-    if (!body.secret || body.secret !== SECRET_KEY) {
-      return jsonResponse({ ok: false, error: 'secret invalid' });
-    }
-    if (!body.email || !body.password) {
-      return jsonResponse({ ok: false, error: 'missing fields' });
+    var email = String(body.email || '').trim().toLowerCase();
+    var token = String(body.token || '');
+    // Require a normal address beginning with an alphanumeric character;
+    // this also prevents spreadsheet formula injection through the log.
+    if (!/^[a-z0-9][^\\s@]*@[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/i.test(email) ||
+        !/^[0-9a-f]{64}$/i.test(token)) {
+      return jsonResponse({ ok: false, error: 'invalid fields' });
     }
 
-    // רישום לגיליון
+    // A public web-app endpoint must not become an email-spam relay. The
+    // timestamp is keyed by a hash, so the script properties do not duplicate
+    // the email address, and no token is ever stored server-side.
+    var lock = LockService.getScriptLock();
+    lock.waitLock(5000);
+    try {
+      var props = PropertiesService.getScriptProperties();
+      var key = recoveryEmailKey(email);
+      var last = Number(props.getProperty(key) || 0);
+      if (Date.now() - last < RATE_LIMIT_MS) {
+        return jsonResponse({ ok: false, error: 'rate limited' });
+      }
+      props.setProperty(key, String(Date.now()));
+    } finally {
+      lock.releaseLock();
+    }
+
+    // רישום מטא-נתונים בלבד — לעולם לא שומרים את הקוד או את הסיסמה.
     var ss = SpreadsheetApp.getActiveSpreadsheet();
     var sheet = ss.getSheetByName(SHEET_NAME) || ss.insertSheet(SHEET_NAME);
-    sheet.appendRow([
-      new Date(),
-      body.app || 'BenHazmanim',
-      body.email,
-      body.password,
-      'sent'
-    ]);
+    sheet.appendRow([new Date(), 'BenHazmanim', email, 'token-sent']);
 
-    // שליחת המייל
     GmailApp.sendEmail(
-      body.email,
-      'בין הזמנים — שחזור סיסמה',
-      'שלום,\n\nזוהי הסיסמה שלכם לאפליקציית "בין הזמנים" לניהול זמן המחשב:\n\n' +
-      body.password +
-      '\n\nמומלץ לשנות את הסיסמה לאחר הכניסה.\n\nבברכה,\nלב טוב דיגיטל — digital.levtov.uk'
+      email,
+      'בין הזמנים — קוד שחזור',
+      'שלום,\n\nקוד השחזור החד-פעמי שלכם הוא:\n\n' +
+      token +
+      '\n\nהקוד תקף לזמן קצר ומשמש להגדרת סיסמה חדשה.\n\nבברכה,\nלב טוב דיגיטל — digital.levtov.uk'
     );
 
     return jsonResponse({ ok: true });
   } catch (err) {
-    return jsonResponse({ ok: false, error: String(err) });
+    return jsonResponse({ ok: false, error: 'recovery service error' });
   }
 }
 

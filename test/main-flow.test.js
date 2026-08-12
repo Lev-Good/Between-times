@@ -2,6 +2,7 @@
 // מריצות את main.js האמיתי עם Electron ממוק — כך נבדקת הלוגיקה עצמה
 // (Registry, משימה מתוזמנת, כלב-שמירה, quit.flag, PIN, עדכונים).
 process.env.TZ = 'Asia/Jerusalem';
+process.env.NODE_TEST_CONTEXT = '1';
 
 const test = require('node:test');
 const assert = require('node:assert');
@@ -109,6 +110,7 @@ function makeMock(config) {
       state.windowsCreated++;
       state.windows.push(this);
       this.title = (opts && opts.title) || null;
+      this.visible = !(opts && opts.show === false);
       this._listeners = {};
       this.webContents = {
         sent: [],
@@ -119,9 +121,9 @@ function makeMock(config) {
     isDestroyed() { return !!this._destroyed; }
     on(ev, cb) { (this._listeners[ev] = this._listeners[ev] || []).push(cb); }
     emit(ev, arg) { (this._listeners[ev] || []).forEach((l) => l(arg)); }
-    show() {}
+    show() { this.visible = true; }
     focus() {}
-    hide() { this.emit('hide'); }
+    hide() { this.visible = false; this.emit('hide'); }
     destroy() { this._destroyed = true; this.emit('closed'); }
     setAlwaysOnTop() {}
     setVisibleOnAllWorkspaces() {}
@@ -738,6 +740,24 @@ test('settings:save requires session unlock when pin is set', async () => {
 function mainWin(m) {
   return m.state.windows.find((w) => w.title === 'בין הזמנים — ניהול זמן מחשב');
 }
+
+test('startup: settings window stays hidden until explicitly opened', async () => {
+  const settings = S.defaultSchedule();
+  settings.pinHash = S.sha256Hex('1234');
+  const m = loadMain({ settings });
+  await m.ready();
+
+  const w = mainWin(m);
+  assert.ok(w, 'חלון ההגדרות נטען כדי לשרת את הממשק');
+  assert.equal(w.visible, false, 'באתחול חלון ההגדרות צריך להישאר מוסתר');
+  const session = await m.ipcHandlers.get('settings:get')();
+  assert.equal(session.sessionUnlocked, false, 'הסשן נשאר מוגן בלי להציג מסך כניסה');
+
+  const opened = await m.ipcHandlers.get('settings:open')();
+  assert.equal(opened.ok, true);
+  assert.equal(w.visible, true, 'פתיחה מפורשת מהמגש מציגה את ההגדרות');
+  m.cleanup();
+});
 
 test('session: closing (hiding) the settings window locks it and notifies the UI', async () => {
   const settings = S.defaultSchedule();

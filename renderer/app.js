@@ -1198,7 +1198,8 @@ async function renderSecurity() {
     { ok: sec.netElevated || sec.netUac, label: 'חסימת אינטרנט בלבד זמינה', hint: sec.netElevated ? 'חוק חומת אש ייעודי — הרשאת מנהל פעילה' : 'בעת ההפעלה תופיע בקשת אישור מנהל (UAC)' },
     { ok: sec.shared, label: 'הגדרות משותפות לכל המשתמשים', hint: 'כל חשבון במחשב נחסם לפי אותו לוח' },
     { ok: sec.protectedCopy, label: 'הגנה על קבצי התוכנה', hint: tamperHint },
-    { ok: sec.recovery, label: 'מייל לשחזור סיסמה', hint: 'לשחזור אם שוכחים את הסיסמה' }
+    { ok: !sec.startupError, label: 'הפעלה עם Windows אומתה', hint: sec.startupError || 'Startup נבדק בפועל' },
+    { ok: sec.recovery, label: 'מייל לשחזור סיסמה', hint: 'קוד חד-פעמי בלבד — הסיסמה אינה נשלחת' }
   ];
   list.innerHTML = '';
   items.forEach((it) => {
@@ -1313,12 +1314,19 @@ function init() {
   $('loginInput').onkeydown = (e) => { if (e.key === 'Enter') doLogin(); };
   $('loginForgot').onclick = async () => {
     if (!API) { toast('שחזור זמין רק בגרסת המחשב המלאה'); return; }
-    const res = await API.sendRecovery();
+    const sent = await API.sendRecovery();
+    if (!sent || !sent.ok) { toast((sent && sent.error) || 'שליחה נכשלה', 'error'); return; }
+    const code = window.prompt('קוד השחזור שנשלח למייל:');
+    if (!code) return;
+    const nextPin = window.prompt('סיסמה חדשה (4–20 תווים ללא רווחים):');
+    const confirm = window.prompt('אימות הסיסמה החדשה:');
+    if (!nextPin || nextPin !== confirm) { toast('הסיסמאות אינן תואמות', 'error'); return; }
+    const res = await API.completeRecovery(code.trim(), nextPin);
     if (res && res.ok) {
-      toast('הסיסמה נשלחה למייל המוגדר', 'success');
-    } else {
-      toast((res && res.error) || 'שליחה נכשלה', 'error');
-    }
+      sessionUnlocked = true;
+      toast('הסיסמה שוחזרה בהצלחה', 'success');
+      applyLoginState();
+    } else toast((res && res.error) || 'שחזור נכשל', 'error');
   };
 
   /* ---------- אירועים ---------- */
@@ -1527,11 +1535,18 @@ function init() {
     if (!(await verifyPinSession())) return;
     await saveSecurity(true);
     toast('שולח את הסיסמה למייל…');
-    const res = await API.sendRecovery();
-    if (res && res.ok) {
-      toast('הסיסמה נשלחה למייל המוגדר', 'success');
+    const sent = await API.sendRecovery();
+    if (sent && sent.ok) {
+      const code = window.prompt('קוד השחזור שנשלח למייל:');
+      const nextPin = code && window.prompt('סיסמה חדשה (4–20 תווים ללא רווחים):');
+      const confirm = nextPin && window.prompt('אימות הסיסמה החדשה:');
+      if (code && nextPin && nextPin === confirm) {
+        const res = await API.completeRecovery(code.trim(), nextPin);
+        if (res && res.ok) toast('הסיסמה שוחזרה בהצלחה', 'success');
+        else toast((res && res.error) || 'שחזור נכשל', 'error');
+      } else if (code) toast('הסיסמאות אינן תואמות', 'error');
     } else {
-      toast((res && res.error) || 'שליחה נכשלה', 'error');
+      toast((sent && sent.error) || 'שליחה נכשלה', 'error');
     }
   };
 

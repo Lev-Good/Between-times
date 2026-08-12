@@ -1146,13 +1146,22 @@
         }
       };
       document.getElementById('forgotBtn').onclick = async () => {
-        lockMsg.textContent = 'שולח את הסיסמה למייל…';
-        const res = await API.sendRecovery();
-        if (res && res.ok) {
-          lockMsg.textContent = 'הסיסמה נשלחה למייל המוגדר';
-          lockMsg.classList.add('ok');
+        lockMsg.textContent = 'שולח קוד חד-פעמי למייל…';
+        const sent = await API.sendRecovery();
+        if (sent && sent.ok) {
+          const code = window.prompt('קוד השחזור שנשלח למייל:');
+          const nextPin = code && window.prompt('סיסמה חדשה (4–20 תווים ללא רווחים):');
+          const confirm = nextPin && window.prompt('אימות הסיסמה החדשה:');
+          if (code && nextPin && nextPin === confirm) {
+            const res = await API.completeRecovery(code.trim(), nextPin);
+            lockMsg.textContent = res && res.ok ? 'הסיסמה שוחזרה — אפשר להיכנס' : ((res && res.error) || 'שחזור נכשל');
+            lockMsg.classList.toggle('ok', !!(res && res.ok));
+          } else if (code) {
+            lockMsg.textContent = 'הסיסמאות אינן תואמות';
+            lockMsg.classList.remove('ok');
+          }
         } else {
-          lockMsg.textContent = (res && res.error) || 'שליחה נכשלה — נדרשת גישה לאינטרנט';
+          lockMsg.textContent = (sent && sent.error) || 'שליחה נכשלה — נדרשת גישה לאינטרנט';
           lockMsg.classList.remove('ok');
         }
       };

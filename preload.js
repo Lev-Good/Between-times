@@ -20,6 +20,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   lockSession: () => ipcRenderer.invoke('session:lock'),
 
   sendRecovery: () => ipcRenderer.invoke('recovery:send'),
+  completeRecovery: (code, newPin) => ipcRenderer.invoke('recovery:complete', code, newPin),
   checkUpdate: () => ipcRenderer.invoke('update:check'),
   downloadUpdate: () => ipcRenderer.invoke('update:download'),
   openExternal: (url) => ipcRenderer.invoke('shell:open', url),

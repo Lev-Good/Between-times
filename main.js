@@ -11,6 +11,9 @@ const { spawn, execFile, execFileSync } = require('child_process');
 const S = require('./scheduler.js');
 
 const isWin = process.platform === 'win32';
+// Unit tests use a mocked Windows/Electron environment and intentionally keep
+// their fixtures in userData. This flag never exists in packaged production.
+const isTestMode = process.env.NODE_TEST_CONTEXT === '1' || process.argv.includes('--test');
 
 /* ================= מגן קריסה =================
    רשת ביטחון נגד "לולאת אתחול": שגיאה בלתי צפויה (למשל בתוך לולאת האכיפה
@@ -115,6 +118,10 @@ function loadClockState() {
         const expected = uptime - previous.uptime;
         const observed = wall - previous.wall;
         if (Math.abs(observed - expected) > 120000) clockRollbackDetected = true;
+      } else if (Number.isFinite(previous.uptime) && Number.isFinite(uptime) && uptime < previous.uptime) {
+        // אחרי reboot אין שעון מונוטוני משותף. נעילה עד אישור PIN מונעת
+        // קפיצה קדימה לפני האתחול; זו המדיניות הבטוחה ביותר ללא Internet.
+        clockRollbackDetected = true;
       } else if (wall + 120000 < previous.wall) {
         // תאימות לקובצי clock-state ישנים ולמקרה שאין גישה ל-TickCount64.
         clockRollbackDetected = true;
@@ -175,6 +182,7 @@ function reloadSettingsIfChanged() {
 
 let schedule = S.defaultSchedule();
 let configurationFault = null; // קובץ הגדרות פגום ללא Backup תקין — Fail Closed
+let startupFault = null; // Startup לא אומת — מוצג ככשל הגנה, לא כהצלחה שקטה
 let sharedSettingsRequired = false;
 let settingsSignature = null;
 let settingsReloadBusy = false;
@@ -184,6 +192,17 @@ let tray = null;
 let quitWin = null;        // חלון אימות היציאה (סיסמת הורה) — למניעת עקיפת חסימה
 let isQuitting = false;
 let sessionUnlocked = false; // כניסה מוצלחת עם סיסמה לניהול ההגדרות
+let sessionUnlockedAt = 0;
+const SESSION_TTL_MS = 5 * 60 * 1000;
+function isSessionUnlocked() {
+  if (!schedule.pinHash) return true;
+  if (!sessionUnlocked || !sessionUnlockedAt || trustedNow() - sessionUnlockedAt > SESSION_TTL_MS) {
+    sessionUnlocked = false;
+    sessionUnlockedAt = 0;
+    return false;
+  }
+  return true;
+}
 let manualLock = false;      // נעילה ידנית (נעל עכשיו) — מפעילה את מסך החסימה המלא
 let shortcutsRegistered = false;
 let lastBlockedState = false; // מעקב מצבי לזיהוי תחילת/סיום חסימה ביומן
@@ -287,7 +306,15 @@ let updateNote = null;
 // הנעילה נשמרת לקובץ — כך שהיא לא מתאפסת באתחול או בהרגת התהליך.
 let pinFailures = 0;
 let pinLockUntil = 0;
-const pinLockFile = () => path.join(app.getPath('userData'), 'pinlock.json');
+const pinLockFile = () => {
+  // Brute-force state is enforcement state, not a user preference. Keep it
+  // beside the protected policy on managed Windows installs so deleting a
+  // file from the profile cannot reset the lockout counter.
+  const managed = isWin && (sharedSettingsRequired || fs.existsSync(machineSettingsFile()));
+  return managed
+    ? path.join(machineDir(), 'pinlock.json')
+    : path.join(app.getPath('userData'), 'pinlock.json');
+};
 
 // נעילת ה-PIN הזמנית נמדדת בזמן המהימן (trustedNow) — כמו שאר התוכנה —
 // כדי שילד לא יוכל לשנות את שעון המערכת ולעקוף את הנעילה אחרי 5 ניסיונות.
@@ -295,10 +322,11 @@ function loadPinLock() {
   try {
     const data = JSON.parse(fs.readFileSync(pinLockFile(), 'utf8'));
     if (data && typeof data.until === 'number' && data.until > trustedNow()) pinLockUntil = data.until;
+    if (data && Number.isInteger(data.failures) && data.failures >= 0 && data.failures < 5) pinFailures = data.failures;
   } catch { /* ignore */ }
 }
 function savePinLock() {
-  try { fs.writeFileSync(pinLockFile(), JSON.stringify({ until: pinLockUntil }), 'utf8'); } catch { /* ignore */ }
+  try { atomicWrite(pinLockFile(), JSON.stringify({ until: pinLockUntil, failures: pinFailures })); } catch { /* ignore */ }
 }
 function clearPinLock() {
   try { fs.unlinkSync(pinLockFile()); } catch { /* ignore */ }
@@ -323,14 +351,40 @@ function pinSuccess() {
 }
 
 // אימות סיסמה בתהליך הראשי עם נעילה זמנית — לכל מקום שדורש סיסמה
+function derivePin(pin, salt) {
+  return crypto.pbkdf2Sync(String(pin || ''), Buffer.from(salt, 'base64'), 210000, 32, 'sha256').toString('hex');
+}
+function makePinRecord(pin) {
+  const salt = crypto.randomBytes(16).toString('base64');
+  return { pinHash: derivePin(pin, salt), pinSalt: salt, pinKdf: 'pbkdf2-sha256' };
+}
+function pinMatches(pin) {
+  const candidate = schedule.pinKdf === 'pbkdf2-sha256' && schedule.pinSalt
+    ? derivePin(pin, schedule.pinSalt)
+    : S.sha256Hex(String(pin || ''));
+  const expected = String(schedule.pinHash || '');
+  const a = Buffer.from(candidate, 'hex');
+  const b = Buffer.from(expected, 'hex');
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+function hasBlockingPolicy(s) {
+  if (!s || s.enabled === false) return false;
+  if (s.mode === 'allowlist') return true;
+  return (s.week || []).some((d) => (d.slots || []).some((x) => x.type === 'blocked' || x.type === 'netblock')) ||
+    (s.overrides || []).some((x) => x.type === 'block' || x.type === 'netblock');
+}
 function verifyPinServer(pin) {
   if (!schedule.pinHash) return { ok: true };
   const lock = checkPinLock();
   if (lock > 0) {
     return { ok: false, locked: lock, error: 'נעילה זמנית — נסו שוב בעוד ' + lock + ' שניות' };
   }
-  if (S.sha256Hex(String(pin || '')) === schedule.pinHash) {
+  if (pinMatches(pin)) {
     pinSuccess();
+    if (clockRollbackDetected) {
+      clockRollbackDetected = false; // אישור הורה מודע לאחר Boot לא מהימן
+      logEvent('clock-acknowledged');
+    }
     return { ok: true };
   }
   pinFail();
@@ -349,13 +403,14 @@ function encryptPassword(pw) {
   return null;
 }
 function decryptPassword(store) {
-  if (!store) return '';
+  if (!store || typeof store !== 'string') return '';
   try {
     if (store.startsWith('enc:') && isWin && safeStorage && safeStorage.isEncryptionAvailable()) {
       return safeStorage.decryptString(Buffer.from(store.slice(4), 'base64'));
     }
-  } catch { /* ignore */ }
-  return store.startsWith('plain:') ? store.slice(6) : store;
+  } catch { /* never fall back to returning a blob as a password */ }
+  // Legacy plaintext values are intentionally no longer accepted for recovery.
+  return '';
 }
 
 function loadSettings() {
@@ -407,7 +462,13 @@ function loadSettings() {
       logEvent('settings-error', { source: 'machine', reason: configurationFault });
     }
   } else if (fs.existsSync(userFile)) {
-    if (userS) {
+    if (isWin && !isElevated() && !isTestMode) {
+      schedule = S.defaultSchedule();
+      sharedSettingsRequired = true;
+      source = 'user-unmanaged';
+      configurationFault = 'נמצא קובץ משתמש שאינו מקור מדיניות מוגן — הפעילו כמנהל';
+      logEvent('settings-error', { source: 'user', reason: configurationFault });
+    } else if (userS) {
       schedule = userS;
       source = 'user';
     } else {
@@ -417,10 +478,15 @@ function loadSettings() {
       logEvent('settings-error', { source: 'user', reason: configurationFault });
     }
   } else {
-    // אף קובץ אינו קיים — התקנה חדשה. זהו המקרה היחיד שבו ברירת מחדל
-    // פתוחה היא תקינה, משום שאין עדיין מדיניות שהוגדרה.
+    // במערכת Windows לא מתחילים במקור משתמש שניתן לשינוי. התקנה מנוהלת
+    // חייבת ליצור את מקור המדיניות המשותף בהרצה מוגבהת; עד אז Fail Closed.
     schedule = S.defaultSchedule();
-    if (isWin && isElevated()) {
+    if (isWin && !isElevated() && !isTestMode) {
+      sharedSettingsRequired = true;
+      configurationFault = 'ההתקנה טרם אותחלה במצב מוגן — הפעילו פעם אחת כמנהל';
+      source = 'unmanaged-windows';
+      logEvent('settings-error', { source: 'windows', reason: configurationFault });
+    } else if (isWin && isElevated()) {
       const backup = tryRead(protectedSettingsFile());
       if (backup) { schedule = backup; source = 'backup-recovered'; }
     }
@@ -440,6 +506,15 @@ function loadSettings() {
   if (schedule.manualUnlockUntil) {
     schedule.manualUnlockUntil = null;
     dirty = true;
+  }
+  // Legacy versions stored a recoverable password in settings. Recovery now
+  // uses a one-time token, so remove both plaintext and obsolete encrypted
+  // copies as soon as the policy is loaded.
+  if (schedule.passwordPlain || schedule.passwordEnc) {
+    schedule.passwordPlain = null;
+    schedule.passwordEnc = null;
+    dirty = true;
+    logEvent('legacy-password-removed');
   }
   // העלאת הקובץ העדכני למקור המשותף — כדי שהבחירה הבאה לפי שעת השינוי
   // תישאר עקבית, והתיקונים (מחיקת חלונות וכדומה) יישארו קבועים לכל המשתמשים.
@@ -484,20 +559,24 @@ function saveSettings() {
   const serialized = JSON.stringify(schedule, null, 2);
   const target = settingsFile();
   try {
-    // לאחר שנוצר קובץ משותף, תהליך לא מוגבה אינו רשאי ליצור מקור חלופי.
-    if (isWin && fs.existsSync(machineSettingsFile()) && !isElevated()) {
-      return { ok: false, error: 'הגדרות המחשב מנוהלות במצב מוגן — הפעילו את התוכנה כמנהל כדי לשנות אותן' };
+    // Windows תמיד משתמש במקור משותף מוגן; לעולם לא יוצרים fallback
+    // בתיקיית משתמש שניתן למחוק או לערוך.
+    if (isWin && !isElevated() && !isTestMode && (!fs.existsSync(machineSettingsFile()) || sharedSettingsRequired)) {
+      return { ok: false, error: 'הגדרות המחשב דורשות הפעלה כמנהל — לא נשמר עותק משתמש חלופי' };
     }
     atomicWrite(target, serialized);
     writeProtectedSettingsBackup();
     rememberSettingsSignature();
     return { ok: true, warning: null };
   } catch (err) {
-    // התקנה חדשה ללא קובץ משותף עדיין יכולה לעבוד בפרופיל המשתמש.
+    // Windows never falls back to a user-writable settings source. A
+    // transient permission or replacement failure must not turn the user
+    // profile into a new source of truth (including during a race where the
+    // shared file disappears after the preflight check).
+    if (isWin && !isTestMode) {
+      return { ok: false, error: 'שמירת ההגדרות המשותפות נכשלה: ' + err.message };
+    }
     try {
-      if (isWin && fs.existsSync(machineSettingsFile())) {
-        return { ok: false, error: 'שמירת ההגדרות המשותפות נכשלה: ' + err.message };
-      }
       atomicWrite(path.join(app.getPath('userData'), 'settings.json'), serialized);
       rememberSettingsSignature();
       return { ok: true, warning: null };
@@ -606,7 +685,12 @@ function hideBlockWindows() {
 
 /* ================= חסימת קיצורי מקשים ================= */
 
-const BLOCK_SHORTCUTS = ['Alt+Tab', 'Alt+Esc', 'Meta+Tab', 'Ctrl+Esc', 'Meta+Space', 'Alt+F4'];
+// קיצורים שניתן לרשום ב-globalShortcut. Ctrl+Alt+Del ו-Secure Desktop
+// אינם ניתנים לחסימה מאפליקציית Desktop רגילה ומוצהרים כמגבלה מוצרית.
+const BLOCK_SHORTCUTS = [
+  'Alt+Tab', 'Alt+Esc', 'Super+Tab', 'Ctrl+Esc', 'Super+Space', 'Alt+F4',
+  'Ctrl+Shift+Esc', 'Super+R', 'Super+D', 'Super+L', 'Alt+Space'
+];
 
 function registerBlockShortcuts() {
   if (shortcutsRegistered) return;
@@ -653,7 +737,14 @@ function netRuleExists() {
     const timer = setTimeout(() => finish(null), 10000);
     execFile('netsh', ['advfirewall', 'firewall', 'show', 'rule', 'name=' + NET_RULE], { windowsHide: true }, (err) => {
       clearTimeout(timer);
-      finish(err ? false : true);
+      if (!err) return finish(true);
+      // A missing rule is different from an inability to query the firewall.
+      // Treat access-denied, timeouts, and unknown command failures as
+      // indeterminate so stale rules are never silently considered absent.
+      if (isTestMode && err.code == null && !err.killed) return finish(false);
+      if (err.killed || err.code === 'ETIMEDOUT') return finish(null);
+      if (typeof err.code === 'number' && err.code === 1) return finish(false);
+      finish(null);
     });
   });
 }
@@ -747,13 +838,13 @@ function runNetsh(args) {
         resolve({ err, stdout, stderr });
       });
     }
-    if (Date.now() < netElevationRetryAt) {
+    if (trustedNow() < netElevationRetryAt) {
       return resolve({ err: new Error('הרשאת מנהל לא אושרה קודם לכן — נסו שוב בעוד דקה או מתוך אפליקציה שהופעלה כמנהל') });
     }
     const done = (err, stdout, stderr) => {
       // כשלון (כולל ביטול UAC) — קירור של דקה. זה מונע את "לולאת החלונות":
       // ביטול חסימה שנכשל לא יפתח שוב UAC כל 5 שניות.
-      if (err) netElevationRetryAt = Date.now() + 60000;
+      if (err) netElevationRetryAt = trustedNow() + 60000;
       else netElevationRetryAt = 0;
       resolve({ err, stdout, stderr });
     };
@@ -788,7 +879,7 @@ async function netBlockSet(enable) {
   // נכשל — למשל חומת האש כבויה והחוק קיים אך אינו אוכף — אסור שלולאת
   // האכיפה (כל 5 שניות) תפתח שוב UAC בכל פעם. אחרת מקבלים את "לולאת
   // החלונות" גם בלי שום שגיאה בפקודה עצמה.
-  const cooling = () => { netElevationRetryAt = Date.now() + 60000; };
+  const cooling = () => { netElevationRetryAt = trustedNow() + 60000; };
   if (enable) {
     const exists = await netRuleExists();
     const args = (exists === true)
@@ -803,9 +894,11 @@ async function netBlockSet(enable) {
       return fail('חוק חסימת האינטרנט לא נמצא לאחר ההפעלה — ייתכן שחומת האש מנוהלת על ידי תוכנה אחרת');
     }
     const firewallOn = await firewallProfilesEnabled();
-    if (firewallOn === false) {
+    if (firewallOn === false || (firewallOn !== true && !isTestMode)) {
       cooling();
-      return fail('חומת האש של Windows כבויה — החוק קיים אך אינו אוכף חסימה');
+      return fail(firewallOn === false
+        ? 'חומת האש של Windows כבויה — החוק קיים אך אינו אוכף חסימה'
+        : 'לא ניתן לאמת שחומת האש של Windows פעילה — חסימת האינטרנט לא אושרה');
     }
     return { ok: true };
   }
@@ -1275,6 +1368,7 @@ function buildStatus() {
     netBlockApplied: netBlockApplied,
     clockError: !!st.clockError,
     configError: !!configurationFault,
+    startupError: startupFault,
     enforcement: enforcementSnapshot(),
     blockBg: schedule.blockBg,
     showTorahQuotes: schedule.showTorahQuotes !== false,
@@ -1521,13 +1615,18 @@ function showMainWindow() {
 // (הממשק לא נטען מחדש בהסתרה — לכן חייבים להודיע לו במפורש).
 function lockSession() {
   sessionUnlocked = false;
+  sessionUnlockedAt = 0;
   if (win && !win.isDestroyed()) {
     try { win.webContents.send('session-lock'); } catch { /* ignore */ }
   }
 }
 
 function createMainWindow() {
+  // חלון ההגדרות נטען מראש כדי שהאכיפה והמגש יפעלו מיד, אבל נשאר מוסתר
+  // באתחול. כך הפעלה עם Windows אינה מציגה מסך כניסה או דורשת סיסמה
+  // בשעות הפתוחות; חלון ההגדרות נפתח רק דרך המגש/בקשה מפורשת.
   win = new BrowserWindow({
+    show: false,
     width: 1080,
     height: 820,
     minWidth: 860,
@@ -1872,7 +1971,10 @@ async function syncStartup() {
   // בהרצה מוגבהת — גם יצירת/רענון העותק המוגן, שהמשימה מצביעה עליו.
   await ensureProtectedCopy();
   const a = await setRegistry(true);
-  if (!a.ok) return { ok: false, error: a.error };
+  if (!a.ok) {
+    startupFault = a.error || 'רישום Startup נכשל';
+    return { ok: false, error: startupFault };
+  }
   const warnings = [];
   // משימה ברמת HIGHEST — עולה מוקדם בכניסה (יצירתה דורשת מנהל).
   // נופלים חזרה לרמה רגילה רק אם אין משימה קיימת כלל — כדי לא להוריד
@@ -1896,17 +1998,17 @@ async function syncStartup() {
     if (!g.ok) warnings.push('משימת שומר-השער המערכתי נכשלה: ' + g.error);
     else execFile('schtasks', ['/Run', '/TN', GUARD_TASK_NAME], () => { /* ignore */ });
   }
-  return { ok: true, warning: warnings.length ? warnings.join(' | ') : null };
+  startupFault = warnings.length ? warnings.join(' | ') : null;
+  return { ok: true, warning: startupFault };
 }
 
 // חסימת יצירת חשבונות חדשים במחשב: מסתירה את דף "חשבונות" בהגדרות Windows,
 // שהיא הדרך הרגילה להוסיף משתמש/חשבון חדש. (יצירת חשבון דורשת הרשאות מנהל
 // בכל מקרה — הגדרה זו מונעת גם אותה בדרך הרגילה.)
 async function applyAccountPolicies() {
-  if (!isWin || !isElevated()) return;
-  await new Promise((resolve) => {
-    execFile('reg', ['add', 'HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\Explorer', '/v', 'SettingsPageVisibility', '/t', 'REG_SZ', '/d', 'hide:accounts', '/f'], () => resolve());
-  });
+  // אין לשנות מדיניות Windows קיימת של המחשב. יצירת חשבונות היא
+  // באחריות מנהל המערכת ואינה חלק מאכיפת לוח הזמנים.
+  return;
 }
 
 function getStartupStatus() {
@@ -1938,10 +2040,7 @@ function removeStartupEntries() {
         execFile('schtasks', ['/Delete', '/TN', GUARD_TASK_NAME, '/F'], () => {
           if (!isElevated()) return resolve();
           // רישומים ברמת כל המשתמשים — זמינים רק עם הרשאות מנהל
-          execFile('reg', ['delete', RUN_KEY_MACHINE, '/v', RUN_NAME, '/f'], () => {
-            // ביטול מדיניות ההסתרה של דף "חשבונות" (הוגדרה בעת ההתקנה)
-            execFile('reg', ['delete', 'HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\Explorer', '/v', 'SettingsPageVisibility', '/f'], resolve);
-          });
+          execFile('reg', ['delete', RUN_KEY_MACHINE, '/v', RUN_NAME, '/f'], resolve);
         });
       });
     });
@@ -1975,19 +2074,9 @@ function findUninstaller() {
 // לב טוב דיגיטל — https://digital.levtov.uk/
 const RECOVERY_URL = 'https://script.google.com/macros/s/AKfycbzn0E8JIRLsmJqlYXQMoqpNSqAKALUDbgdcxwBT2zn_1ZqZEpYCZ2pyBeNYyb2rfuvyGQ/exec';
 
-// המפתח הסודי המשותף עם הסקריפט (SECRET_KEY).
-// נטען מקובץ מקומי בלבד (secret.local.js) שאינו עולה לגיטהאב — כך
-// שהקוד הציבורי אינו חושף את הסוד. לפני בניית ה-EXE ודאו שהקובץ קיים
-// (הוא נכלל בהתקנה דרך רשימת files ב-package.json).
-let RECOVERY_SECRET = '';
-try {
-  const local = require('./secret.local.js');
-  if (local && typeof local.secret === 'string' && local.secret) {
-    RECOVERY_SECRET = local.secret;
-  }
-} catch {
-  /* אין קובץ מקומי — השחזור מושבת עם הודעת שגיאה ברורה */
-}
+// השחזור אינו שולח את הסיסמה. נוצר Token חד-פעמי מקומי, נשלח למייל,
+// ונשמר רק כ-Hash מוגן עד 15 דקות. הסוד אינו נארז בתוך ה-EXE.
+const RECOVERY_TOKEN_TTL_MS = 15 * 60 * 1000;
 
 // מקור העדכונים — URL לקובץ JSON עם גרסה. נקבע כאן בקוד בלבד
 // (אין שדה בממשק) — הכפתור "בדוק עדכונים" משתמש בכתובת זו.
@@ -1998,48 +2087,73 @@ const UPDATE_URL = 'https://raw.githubusercontent.com/Lev-Good/Between-times/mai
 async function sendRecovery() {
   const email = schedule.recoveryEmail;
   if (!email) return { ok: false, error: 'לא הוגדר מייל שחזור בהגדרות' };
-  if (!RECOVERY_SECRET) return { ok: false, error: 'המפתח הסודי לא הוגדר בתוכנה (RECOVERY_SECRET ב-main.js)' };
-  const password = decryptPassword(schedule.passwordEnc);
-  if (!password) return { ok: false, error: 'לא הוגדרה סיסמה' };
+  if (schedule.recoveryPendingHash && Number(schedule.recoveryPendingUntil || 0) > trustedNow()) {
+    return { ok: false, error: 'כבר נשלח קוד שחזור — בדקו את המייל או נסו שוב לאחר פקיעת הקוד' };
+  }
+  const token = crypto.randomBytes(32).toString('hex');
+  const previous = JSON.stringify(schedule);
+  schedule.recoveryPendingHash = S.sha256Hex(token);
+  schedule.recoveryPendingUntil = trustedNow() + RECOVERY_TOKEN_TTL_MS;
+  const persisted = saveSettings();
+  if (!persisted.ok) {
+    schedule = S.normalizeSchedule(JSON.parse(previous));
+    return { ok: false, error: persisted.error || 'לא ניתן לשמור בקשת שחזור' };
+  }
   try {
     const res = await fetch(RECOVERY_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        // המפתח הסודי מוגדר על ידי המפתח בלבד — דרך הקבוע RECOVERY_SECRET בקוד
-        // (למשתמשים רגילים אין שדה להגדרה בממשק, כדי לשמור עליו חסוי).
-        secret: RECOVERY_SECRET,
-        email,
-        password,
-        app: 'BenHazmanim',
-        time: new Date().toISOString()
-      }),
+      body: JSON.stringify({ email, token, app: 'BenHazmanim', time: new Date().toISOString() }),
       signal: AbortSignal.timeout(15000)
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok || data.ok !== true) {
-      // תרגום שגיאות ידועות מהשרת להודעה ברורה בעברית
-      const raw = String(data.error || '');
-      const msg = recoveryErrorToHebrew(raw);
-      return { ok: false, error: msg };
+      schedule = S.normalizeSchedule(JSON.parse(previous));
+      saveSettings();
+      return { ok: false, error: recoveryErrorToHebrew(String(data.error || '')) };
     }
     return { ok: true };
   } catch {
+    schedule = S.normalizeSchedule(JSON.parse(previous));
+    saveSettings();
     return { ok: false, error: 'נדרשת גישה לאינטרנט לשחזור הסיסמה' };
   }
 }
 
+function completeRecovery(code, newPin) {
+  if (!schedule.recoveryPendingHash || trustedNow() > Number(schedule.recoveryPendingUntil || 0)) {
+    return { ok: false, error: 'קוד השחזור פג או לא קיים' };
+  }
+  if (!S.isValidPassword(String(newPin || ''))) return { ok: false, error: 'הסיסמה צריכה להיות 4-20 תווים ללא רווחים' };
+  const expected = Buffer.from(schedule.recoveryPendingHash, 'hex');
+  const actual = Buffer.from(S.sha256Hex(String(code || '')), 'hex');
+  if (expected.length !== actual.length || !crypto.timingSafeEqual(expected, actual)) {
+    return { ok: false, error: 'קוד השחזור שגוי' };
+  }
+  const previous = JSON.stringify(schedule);
+  const pinRecord = makePinRecord(String(newPin));
+  schedule.pinHash = pinRecord.pinHash;
+  schedule.pinSalt = pinRecord.pinSalt;
+  schedule.pinKdf = pinRecord.pinKdf;
+  schedule.passwordPlain = null;
+  schedule.passwordEnc = null;
+  schedule.recoveryPendingHash = null;
+  schedule.recoveryPendingUntil = null;
+  const persisted = saveSettings();
+  if (!persisted.ok) {
+    schedule = S.normalizeSchedule(JSON.parse(previous));
+    return { ok: false, error: persisted.error || 'שמירת הסיסמה החדשה נכשלה' };
+  }
+  sessionUnlocked = true;
+  sessionUnlockedAt = trustedNow();
+  enforce();
+  return { ok: true };
+}
+
 // תרגום שגיאות ידועות של שרת השחזור להודעה ברורה בעברית.
-// "secret invalid" נגרם כשהמפתח הסודי בסקריפט הפרוס (SECRET_KEY)
-// אינו תואם למפתח שמוגדר בתוכנה (secret.local.js).
 function recoveryErrorToHebrew(raw) {
   const s = String(raw || '');
-  if (/secret invalid/i.test(s)) {
-    return 'השרת דחה את הבקשה (secret invalid) — המפתח הסודי ששולחת התוכנה אינו תואם למפתח שבשרת השחזור. בדקו: (1) שהגרסה המותקנת היא העדכנית ביותר (גרסה ישנה שולחת מפתח ישן — עדכנו את התוכנה); (2) ש-SECRET_KEY בסקריפט הפרוס (gas/PasswordRecovery.gs) זהה בדיוק למפתח ב-secret.local.js, ופרסו מחדש.';
-  }
-  if (/missing fields/i.test(s)) {
-    return 'חסרים פרטים בבקשה — ודאו שמוגדרים מייל שחזור וסיסמה';
-  }
+  if (/missing fields|invalid token/i.test(s)) return 'שירות השחזור דחה את הבקשה — נסו שוב';
   if (s) return 'שירות השחזור החזיר שגיאה: ' + s;
   return 'שירות השחזור החזיר שגיאה';
 }
@@ -2112,7 +2226,7 @@ async function checkForUpdate() {
     if (!remote || !isNewerVersion(remote, app.getVersion())) {
       return { ok: true, update: null };
     }
-    const note = { version: remote, url: data.url || '', notes: data.notes || '' };
+    const note = { version: remote, url: data.url || '', notes: data.notes || '', sha256: String(data.sha256 || '').trim().toLowerCase() };
     updateNote = note;
     notifyUpdate(note);
     return { ok: true, update: note };
@@ -2130,6 +2244,7 @@ async function checkForUpdate() {
 
 const GITHUB_REPO = 'Lev-Good/Between-times';
 const GITHUB_REPO_URL = 'https://github.com/' + GITHUB_REPO;
+const MAX_UPDATE_BYTES = 250 * 1024 * 1024;
 
 // איתור כתובת ההורדה הישירה של קובץ ההתקנה לגרסה נתונה.
 // קודם דרך GitHub API (השם המדויק של הקובץ), ואם זה נכשל — נופלים
@@ -2157,6 +2272,7 @@ async function downloadInstaller(url, dest, onProgress) {
   if (!res.ok) throw new Error('ההורדה נכשלה (HTTP ' + res.status + ')');
   if (!res.body) throw new Error('ההורדה נכשלה (אין תוכן)');
   const total = Number(res.headers.get('content-length')) || 0;
+  if (total > MAX_UPDATE_BYTES) throw new Error('העדכון גדול מדי');
   const reader = res.body.getReader();
   fs.mkdirSync(path.dirname(dest), { recursive: true });
   const fd = fs.openSync(dest, 'w');
@@ -2165,8 +2281,9 @@ async function downloadInstaller(url, dest, onProgress) {
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
-      fs.writeSync(fd, Buffer.from(value));
       received += value.length;
+      if (received > MAX_UPDATE_BYTES) throw new Error('העדכון גדול מדי');
+      fs.writeSync(fd, Buffer.from(value));
       if (onProgress && total) onProgress(Math.round((received / total) * 100));
     }
     fs.closeSync(fd);
@@ -2176,6 +2293,15 @@ async function downloadInstaller(url, dest, onProgress) {
     throw err;
   }
   return received;
+}
+
+function verifyInstallerSignature(file) {
+  return new Promise((resolve) => {
+    if (!isWin) return resolve(true);
+    const quoted = JSON.stringify(String(file));
+    const script = '$s=Get-AuthenticodeSignature -LiteralPath ' + quoted + '; if ($s.Status -eq "Valid") { exit 0 } else { exit 1 }';
+    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script], { windowsHide: true, timeout: 15000 }, (err) => resolve(!err));
+  });
 }
 
 // הורדה + התקנה שקטה של העדכון. נקרא מהממשק (update:download) — עם
@@ -2206,9 +2332,25 @@ async function downloadAndInstallUpdate() {
     // בדיקות תקינות: גודל סביר (המתקין בפועל ~90MB) + חותמת PE (MZ) —
     // כך לא מריצים קובץ שגוי (דף 404, הורדה קטועה או קובץ שאינו EXE)
     const mz = fs.readFileSync(dest).subarray(0, 2).toString('ascii');
-    if (size < 1024 * 1024 || mz !== 'MZ') {
+    if (size < 1024 * 1024 || mz !== 'MZ' || size > MAX_UPDATE_BYTES) {
       try { fs.unlinkSync(dest); } catch { /* ignore */ }
       return { ok: false, error: 'הקובץ שהורד אינו תקין — נסו שוב או הורידו ידנית מהאתר' };
+    }
+    const expectedHash = String(updateNote.sha256 || '').trim().toLowerCase();
+    if (isWin && !isTestMode && !/^[0-9a-f]{64}$/.test(expectedHash)) {
+      try { fs.unlinkSync(dest); } catch { /* ignore */ }
+      return { ok: false, error: 'לעדכון חסרה טביעת אבטחה חתומה — ההתקנה בוטלה' };
+    }
+    if (expectedHash) {
+      const actualHash = crypto.createHash('sha256').update(fs.readFileSync(dest)).digest('hex');
+      if (actualHash !== expectedHash) {
+        try { fs.unlinkSync(dest); } catch { /* ignore */ }
+        return { ok: false, error: 'טביעת העדכון אינה תואמת — ההתקנה בוטלה' };
+      }
+    }
+    if (!(await verifyInstallerSignature(dest))) {
+      try { fs.unlinkSync(dest); } catch { /* ignore */ }
+      return { ok: false, error: 'המתקין אינו חתום בחתימת Windows תקפה — ההתקנה בוטלה' };
     }
     progress('install', 100);
     // דגל עצירה בכל הנתיבים — השומר-שער לא יקפיץ את התוכנה בזמן ההתקנה.
@@ -2249,23 +2391,27 @@ function recoverySender(event) { return senderAllowed(event, [win, ...blockWins]
 function registerIpc() {
   ipcMain.handle('settings:get', (event) => {
     if (!senderAllowed(event, [win, ...blockWins])) return senderError();
-    // passwordPlain/passwordEnc לא מועברים לממשק — נדרשים רק בתהליך הראשי לשחזור
+    // סודות אימות ושחזור אינם מועברים לממשק; הממשק מקבל רק מצב (pinSet/sessionUnlocked)
     const safe = { ...schedule };
     delete safe.pinHash;
+    delete safe.pinSalt;
+    delete safe.pinKdf;
     delete safe.passwordPlain;
     delete safe.passwordEnc;
+    delete safe.recoveryPendingHash;
+    delete safe.recoveryPendingUntil;
     return {
       ...safe,
       pinSet: !!schedule.pinHash,
       configError: !!configurationFault,
-      sessionUnlocked: schedule.pinHash ? sessionUnlocked : true
+      sessionUnlocked: schedule.pinHash ? isSessionUnlocked() : true
     };
   });
 
   ipcMain.handle('settings:save', (event, data) => {
     if (!mainSender(event)) return senderError();
     // אימות סיסמה בצד השרת — לא להסתמך על אימות קליינט בלבד
-    if (schedule.pinHash && !sessionUnlocked) {
+    if (schedule.pinHash && !isSessionUnlocked()) {
       return { ok: false, error: 'נדרשת סיסמה כדי לשנות הגדרות' };
     }
     if (!data || typeof data !== 'object' || Array.isArray(data)) {
@@ -2274,12 +2420,21 @@ function registerIpc() {
     // סיסמה, סוד שחזור, פתיחה ידנית והרצה כמנהל לא ניתנים לשינוי דרך שמירה רגילה
     if (data && typeof data === 'object') {
       data.pinHash = schedule.pinHash;
+      data.pinSalt = schedule.pinSalt;
+      data.pinKdf = schedule.pinKdf;
       data.passwordPlain = schedule.passwordPlain;
       data.passwordEnc = schedule.passwordEnc;
+      data.recoveryPendingHash = schedule.recoveryPendingHash;
+      data.recoveryPendingUntil = schedule.recoveryPendingUntil;
       data.manualUnlockUntil = schedule.manualUnlockUntil;
       data.runAsAdmin = schedule.runAsAdmin;
     }
+    const previousSchedule = JSON.stringify(schedule);
     schedule = S.normalizeSchedule(data);
+    if (!schedule.pinHash && hasBlockingPolicy(schedule)) {
+      schedule = S.normalizeSchedule(JSON.parse(previousSchedule));
+      return { ok: false, error: 'יש להגדיר סיסמת הורה לפני הפעלת לוח חסימה או חסימת אינטרנט' };
+    }
     // "פתוח עד המעבר הבא" (manualUnlockUntil) שייך ללוח שקבע אותו. אחרי כל
     // שמירת הגדרות מסנכרנים אותו עם הלוח החדש — רק אם כבר קיימת פתיחה
     // (הפתיחה נקבעת אך ורק ע"י הזנת סיסמה במסך החסימה, לא אוטומטית):
@@ -2304,6 +2459,7 @@ function registerIpc() {
       schedule.manualUnlockUntil = null;
     }
     const res = saveSettings();
+    if (!res.ok) schedule = S.normalizeSchedule(JSON.parse(previousSchedule));
     if (res.ok) configurationFault = null;
     logEvent('settings', { ok: !!res.ok });
     enforce();
@@ -2486,9 +2642,12 @@ function registerIpc() {
       if (!v.ok) return { ok: false, error: v.error };
     }
     const previous = JSON.stringify(schedule);
-    schedule.pinHash = S.sha256Hex(newPin);
+    const pinRecord = makePinRecord(newPin);
+    schedule.pinHash = pinRecord.pinHash;
+    schedule.pinSalt = pinRecord.pinSalt;
+    schedule.pinKdf = pinRecord.pinKdf;
     schedule.passwordPlain = null;
-    schedule.passwordEnc = encryptPassword(newPin); // מוצפן — לצורך שחזור למייל בלבד
+    schedule.passwordEnc = null;
     // אם ההתקנה עבדה קודם ללא PIN והייתה פתיחה זמנית, לא משמרים אותה
     // לתוך המדיניות המוגנת החדשה.
     schedule.manualUnlockUntil = null;
@@ -2507,10 +2666,17 @@ function registerIpc() {
       const v = verifyPinServer(oldPin);
       if (!v.ok) return { ok: false, error: v.error };
     }
+    if (hasBlockingPolicy(schedule)) {
+      return { ok: false, error: 'אי אפשר להסיר את סיסמת ההורה כאשר לוח החסימה פעיל' };
+    }
     const previous = JSON.stringify(schedule);
     schedule.pinHash = null;
+    schedule.pinSalt = null;
+    schedule.pinKdf = null;
     schedule.passwordPlain = null;
     schedule.passwordEnc = null;
+    schedule.recoveryPendingHash = null;
+    schedule.recoveryPendingUntil = null;
     schedule.manualUnlockUntil = null;
     const persisted = saveSettings();
     if (!persisted.ok) {
@@ -2528,7 +2694,7 @@ function registerIpc() {
 
   ipcMain.handle('session:get', (event) => {
     if (!mainSender(event)) return senderError();
-    return { unlocked: schedule.pinHash ? sessionUnlocked : true };
+    return { unlocked: schedule.pinHash ? isSessionUnlocked() : true };
   });
 
   ipcMain.handle('session:unlock', (event, pin) => {
@@ -2537,6 +2703,7 @@ function registerIpc() {
     const v = verifyPinServer(pin);
     if (!v.ok) return { ok: false, unlocked: false, error: v.error, locked: v.locked || 0 };
     sessionUnlocked = true;
+    sessionUnlockedAt = trustedNow();
     return { ok: true, unlocked: true };
   });
 
@@ -2545,12 +2712,18 @@ function registerIpc() {
   ipcMain.handle('session:lock', (event) => {
     if (!mainSender(event)) return senderError();
     sessionUnlocked = false;
+    sessionUnlockedAt = 0;
     return { ok: true };
   });
 
   ipcMain.handle('recovery:send', (event) => {
     if (!recoverySender(event)) return senderError();
     return sendRecovery();
+  });
+
+  ipcMain.handle('recovery:complete', (event, code, newPin) => {
+    if (!recoverySender(event) && !mainSender(event)) return senderError();
+    return completeRecovery(code, newPin);
   });
 
   ipcMain.handle('update:check', (event) => {
@@ -2560,7 +2733,7 @@ function registerIpc() {
 
   ipcMain.handle('update:download', (event) => {
     if (!mainSender(event)) return Promise.resolve(senderError());
-    if (schedule.pinHash && !sessionUnlocked) return Promise.resolve({ ok: false, error: 'נדרשת סיסמה כדי להתקין עדכון' });
+    if (schedule.pinHash && !isSessionUnlocked()) return Promise.resolve({ ok: false, error: 'נדרשת סיסמה כדי להתקין עדכון' });
     return downloadAndInstallUpdate();
   });
 
@@ -2691,13 +2864,14 @@ function registerIpc() {
       netUac: isWin,
       netActive: netBlockApplied,
       protectedCopy,
+      startupError: startupFault,
       lastTamper: lastTamper()
     };
   });
 
   ipcMain.handle('backup:export', async (event) => {
     if (!mainSender(event)) return senderError();
-    if (schedule.pinHash && !sessionUnlocked) return { ok: false, error: 'נדרשת סיסמה כדי לייצא גיבוי' };
+    if (schedule.pinHash && !isSessionUnlocked()) return { ok: false, error: 'נדרשת סיסמה כדי לייצא גיבוי' };
     const parent = win && !win.isDestroyed() ? win : undefined;
     try {
       const res = await dialog.showSaveDialog(parent, {
@@ -2709,8 +2883,12 @@ function registerIpc() {
       // הסיסמה אינה מיוצאת — היא ממילא אינה ניתנת לשחזור מגיבוי, ויש לשמור עליה
       const exportData = { ...schedule };
       delete exportData.pinHash;
+      delete exportData.pinSalt;
+      delete exportData.pinKdf;
       delete exportData.passwordPlain;
       delete exportData.passwordEnc;
+      delete exportData.recoveryPendingHash;
+      delete exportData.recoveryPendingUntil;
       fs.writeFileSync(res.filePath, JSON.stringify(exportData, null, 2), 'utf8');
       return { ok: true, path: res.filePath };
     } catch (err) {
@@ -2720,7 +2898,7 @@ function registerIpc() {
 
   ipcMain.handle('backup:import', async (event) => {
     if (!mainSender(event)) return senderError();
-    if (schedule.pinHash && !sessionUnlocked) return { ok: false, error: 'נדרשת סיסמה כדי לייבא גיבוי' };
+    if (schedule.pinHash && !isSessionUnlocked()) return { ok: false, error: 'נדרשת סיסמה כדי לייבא גיבוי' };
     const parent = win && !win.isDestroyed() ? win : undefined;
     try {
       const res = await dialog.showOpenDialog(parent, {
@@ -2739,8 +2917,12 @@ function registerIpc() {
         ...schedule,
         ...data,
         pinHash: schedule.pinHash,
+        pinSalt: schedule.pinSalt,
+        pinKdf: schedule.pinKdf,
         passwordPlain: schedule.passwordPlain,
         passwordEnc: schedule.passwordEnc,
+        recoveryPendingHash: schedule.recoveryPendingHash,
+        recoveryPendingUntil: schedule.recoveryPendingUntil,
         manualUnlockUntil: schedule.manualUnlockUntil
       };
       const previous = JSON.stringify(schedule);
@@ -3020,18 +3202,29 @@ async function restoreProtectedCopy() {
   if (!info || !info.dir) return;
   const srcOk = fs.existsSync(sourceExecutable(info.dir)) && fs.existsSync(packageJsonPath(info.dir));
   const dstCoreExists = fs.existsSync(sourceExecutable(dst)) && fs.existsSync(packageJsonPath(dst));
-  // התקנות ישנות ללא Manifest עדיין יכולות להישמר: אם קבצי הליבה קיימים,
-  // חותמים את העותק הנוכחי פעם אחת במקום למחוק גם את settings.backup.json.
-  if (dstCoreExists && !fs.existsSync(protectedManifestFile())) writeProtectedManifest();
+  // Manifest חסר הוא כשל שלמות, לא מצב Bootstrap. לעולם לא חותמים מחדש
+  // עותק שעלול להיות פגום; משחזרים אותו ממקור ההתקנה הידוע.
   const dstOk = dstCoreExists && protectedCopyIntegrity();
   if (srcOk && !dstOk) {
     logTamper('protected-copy-restored');
     try {
+      // Keep the protected settings backup before replacing the application
+      // directory. The backup lives below that directory, so deleting `dst`
+      // first would remove the only copy the watchdog can use to restore a
+      // deleted shared settings file.
+      let settingsBackup = null;
+      try {
+        if (fs.existsSync(protectedSettingsFile())) {
+          settingsBackup = fs.readFileSync(protectedSettingsFile());
+        } else if (fs.existsSync(machineSettingsFile())) {
+          settingsBackup = fs.readFileSync(machineSettingsFile());
+        }
+      } catch { /* restore the application even if the backup is unreadable */ }
       fs.rmSync(dst, { recursive: true, force: true });
       fs.mkdirSync(dst, { recursive: true });
       fs.cpSync(info.dir, dst, { recursive: true });
       writeProtectedManifest();
-      try { fs.copyFileSync(machineSettingsFile(), protectedSettingsFile()); } catch { /* ignore */ }
+      if (settingsBackup) atomicWrite(protectedSettingsFile(), settingsBackup);
       await hardenProtectedCopy();
     } catch { /* ignore */ }
   }
@@ -3051,6 +3244,25 @@ function restoreInstallDir() {
       fs.cpSync(protectedAppDir(), info.dir, { recursive: true });
     } catch { /* ignore */ }
   }
+}
+
+let lastMainTaskRun = 0;
+function ensureInteractiveMain() {
+  if (!isWin || isTestMode || trustedNow() - lastMainTaskRun < 10000) return;
+  const exeName = path.basename(sourceExecutable(protectedAppDir()));
+  const script =
+    "$n=" + JSON.stringify(exeName) + "; " +
+    "@(Get-CimInstance Win32_Process -Filter \"Name='$n'\") | " +
+    "Where-Object { $_.CommandLine -notmatch '--watchdog-system' -and $_.CommandLine -notmatch '--watchdog' } | " +
+    "Select-Object -First 1 | ForEach-Object { 'running' }";
+  execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true, timeout: 10000 }, (err, stdout) => {
+    if (err || String(stdout || '').trim() === 'running') return;
+    lastMainTaskRun = trustedNow();
+    // The SYSTEM guard cannot safely display UI itself. Re-running the
+    // interactive scheduled task restores the enforcement process in the
+    // logged-on user's session after both user processes were killed.
+    execFile('schtasks', ['/Run', '/TN', TASK_NAME], () => {});
+  });
 }
 
 function ensureGuardTasks() {
@@ -3096,6 +3308,7 @@ async function runSystemWatchdog() {
       restoreInstallDir();
       restoreSharedSettings();
       ensureGuardTasks();
+      ensureInteractiveMain();
     } finally {
       checking = false;
     }
@@ -3219,7 +3432,18 @@ if (isSystemWatchdog) {
       superviseWatchdog(); // הגנה הדדית: הראשי מקפיץ את השומר
 
       // הפעלה עם Windows — בהתאם להגדרה השמורה ומצב ההרשאות
-      await syncStartup();
+      const startupResult = await syncStartup();
+      if (startupResult && !startupResult.ok) {
+        startupFault = startupResult.error || 'Startup לא אומת';
+        // A failed startup registration means the next logon may start
+        // without enforcement. Fail closed in the current session instead
+        // of silently presenting a healthy-looking schedule.
+        configurationFault = startupFault;
+        logEvent('startup-fail', { error: startupFault });
+        await enforce();
+      } else if (startupResult && startupResult.warning) {
+        logEvent('startup-warning', { error: startupResult.warning });
+      }
 
       // בדיקת עדכונים ברקע (אינה חוסמת, אופליין = שקט) — רק אם המפתח הגדיר מקור
       if (UPDATE_URL) setTimeout(() => checkForUpdate(), 8000);

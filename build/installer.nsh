@@ -108,7 +108,7 @@
   ; so uninstalling never leaves the machine with no internet
   nsExec::Exec 'netsh advfirewall firewall delete rule name=BenHazmanimNetBlock'
   ; undo the "hide accounts page" policy applied at runtime when elevated
-  DeleteRegValue HKLM "SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer" "SettingsPageVisibility"
+  ; The application no longer changes Windows account-page policy.
   ; clean up the quit flags we wrote (and any stale ones)
   Delete "$APPDATA\BenHazmanim\quit.flag"
   Delete "$APPDATA\בין הזמנים - ניהול זמן מחשב\quit.flag"
@@ -140,6 +140,16 @@
   IfFileExists "$R1\BenHazmanim\relaunch.flag" 0 RelaunchCheckDone
     StrCpy $R0 "1"
   RelaunchCheckDone:
+  ; preInit writes quit.flag so the running copy can exit. Remove it before
+  ; relaunching; a normal user cannot delete the protected ProgramData copy.
+  Delete "$APPDATA\BenHazmanim\quit.flag"
+  Delete "$APPDATA\בין הזמנים - ניהול זמן מחשב\quit.flag"
+  Delete "$APPDATA\${PRODUCT_NAME}\quit.flag"
+  Delete "$R1\BenHazmanim\quit.flag"
+  ; An elevated update may also have set the SYSTEM guard's registry stop flag.
+  ; Leaving it behind would make the new guard exit immediately after update.
+  DeleteRegValue HKLM "Software\BenHazmanim" "Quit"
+  nsExec::Exec 'schtasks /Run /TN BenHazmanimGuard'
   ${If} $R0 == "0"
     Goto relaunchDone
   ${EndIf}

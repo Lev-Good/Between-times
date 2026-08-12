@@ -133,6 +133,8 @@
         ? 5 // ברירת מחדל: 5 דקות
         : Math.max(0, Math.min(60, Math.round(Number(s.warnMinutes) || 0))), // 0 = ללא אזהרה
       pinHash: s.pinHash || null,
+      pinSalt: s.pinSalt || null,
+      pinKdf: s.pinKdf === 'pbkdf2-sha256' ? 'pbkdf2-sha256' : null,
       passwordPlain: s.passwordPlain || null,
       passwordEnc: s.passwordEnc || null,
       theme: ['system', 'light', 'dark'].includes(s.theme) ? s.theme : 'system',
@@ -143,7 +145,8 @@
       manualUnlockUntil: s.manualUnlockUntil !== null && s.manualUnlockUntil !== undefined && s.manualUnlockUntil !== '' && Number.isFinite(Number(s.manualUnlockUntil))
         ? Number(s.manualUnlockUntil) : null,
       recoveryEmail: String(s.recoveryEmail || '').trim(),
-      recoverySecret: String(s.recoverySecret || '').trim(),
+      recoveryPendingHash: /^[0-9a-f]{64}$/.test(String(s.recoveryPendingHash || '').trim().toLowerCase()) ? String(s.recoveryPendingHash).trim().toLowerCase() : null,
+      recoveryPendingUntil: Number.isFinite(Number(s.recoveryPendingUntil)) ? Number(s.recoveryPendingUntil) : null,
       updateUrl: String(s.updateUrl || '').trim(),
       showNetIcon: s.showNetIcon !== false,
       blockBg: ['blobs', 'fluid', 'particles', 'aurora'].includes(s.blockBg) ? s.blockBg : 'blobs',

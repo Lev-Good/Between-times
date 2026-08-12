@@ -1,6 +1,7 @@
 // Advanced edge-case and concurrency tests for main.js flows
 // Covers: netblock reconciliation, clock integrity, edge-case IPC, error recovery
 process.env.TZ = 'Asia/Jerusalem';
+process.env.NODE_TEST_CONTEXT = '1';
 
 const test = require('node:test');
 const assert = require('node:assert');
