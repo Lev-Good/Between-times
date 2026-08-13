@@ -1246,6 +1246,65 @@ test('startup: stale relaunch flags are cleared on launch', async () => {
   m.cleanup();
 });
 
+test('startup: quit.flag תקוע תחת איסור מחיקה ב-machineDir מוסר בכוח — האפליקציה לא נסגרת על דגל ישן', async () => {
+  // רגרסיה לבאג קריטי: דגל עצירה שנכתב ל-PROGRAMDATA המוקשח (איסור מחיקה
+  // לכולם, כולל מנהלים) לא ניתן היה למחיקה ע"י האפליקציה — ולכן האתחול
+  // הבא ראה את הדגל הישן וסגר את עצמו תוך 3 שניות (gracefulQuit). כל יציאה
+  // מסודרת השאירה דגל כזה, וכל משתמש היה נתקע ב"התוכנה לא נדלקת בכלל".
+  // המדמה את חסימת המחיקה: אטריבוט read-only (ב-Windows מחיקת קובץ כזה
+  // נחסמת ב-EPERM — כמו איסור המחיקה). ה-icacls במוק "מרים" את החסימה
+  // (מבטל read-only), ואז ה-unlink השני חייב להצליח.
+  const m = loadMain({
+    elevate: true,
+    execSync(cmd, args) {
+      if (cmd === 'net') return ''; // מוגבה
+      if (cmd === 'icacls' && args[0]) {
+        // המדמה את הרמת הירושה/האיסור: הקובץ הופך לכתוב ומחיקתו מותרת
+        try { fs.chmodSync(args[0], 0o666); } catch { /* ignore */ }
+        return '';
+      }
+      if (cmd === 'reg' && args.includes('query')) {
+        return 'HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\com.levtov.benhazmanim\r\n    UninstallString    REG_SZ    "C:\\uninst.exe"\r\n';
+      }
+      throw new Error('unknown execSync: ' + cmd);
+    }
+  });
+  const machineDir = path.join(process.env.PROGRAMDATA, 'BenHazmanim');
+  fs.mkdirSync(machineDir, { recursive: true });
+  const stuck = path.join(machineDir, 'quit.flag');
+  fs.writeFileSync(stuck, String(Date.now()));
+  try { fs.chmodSync(stuck, 0o444); } catch { /* ignore */ } // דגל "תקוע" — מחיקה חסומה
+
+  await m.ready();
+
+  assert.equal(fs.existsSync(stuck), false, 'הדגל התקוע הוסר בכוח באתחול (forceUnlinkFlag)');
+  assert.equal(m.state.quitCalled, false, 'האפליקציה לא נסגרה על דגל עצירה ישן');
+  m.cleanup();
+});
+
+test('uninstall: quit.flag בנתיב המשותף מוחרג מאיסור המחיקה בעת הכתיבה (מוגבה)', async () => {
+  // מניעה ראשונית של הבאג: הדגל המשותף נכתב לתוך PROGRAMDATA מוקשח
+  // (איסור מחיקה לכולם). בלי החרגה של הקובץ עצמו מיד עם הכתיבה, האתחול
+  // הבא לא יכול למחוק אותו — והאפליקציה נסגרת על דגל ישן. ההחרגה חייבת
+  // להשתמש בדפוס הבטוח (בלי סימוני ירושה), כמו settings.backup.json.
+  const uninstallerPath = path.join(os.tmpdir(), 'bhz-uninst-excl.exe');
+  fs.writeFileSync(uninstallerPath, '');
+  try {
+    const m = loadMain({ elevate: true, uninstallerPath });
+    await m.ready();
+    await m.ipcHandlers.get('app:uninstall')({}, undefined);
+    const exclude = m.state.execCalls.find((c) => c.cmd === 'icacls'
+      && c.args.some((a) => a.includes('quit.flag'))
+      && c.args.includes('/inheritance:r'));
+    assert.ok(exclude, 'הדגל המשותף מוחרג מאיסור המחיקה בעת הכתיבה');
+    assert.ok(!exclude.args.some((a) => a.includes('(OI)') || a.includes('(CI)')),
+      'ההחרגה בלי סימוני ירושה (התבנית שמשחיתה קבצים): ' + JSON.stringify(exclude.args));
+    m.cleanup();
+  } finally {
+    try { fs.unlinkSync(uninstallerPath); } catch { /* ignore */ }
+  }
+});
+
 test('update:download refuses corrupt/tiny downloads (no install, no quit)', async () => {
   const installer = fakeInstallerBytes();
   const installerHash = fakeInstallerHash(installer);

@@ -3189,12 +3189,38 @@ const flagPaths = (name) => {
 };
 const quitFlagPaths = () => flagPaths('quit.flag');
 const quitFlagExists = () => quitFlagPaths().some(fs.existsSync);
+
+// מחיקת דגל עצירה/הפעלה מחדש גם כשהקובץ תקוע תחת איסור מחיקה. הדגל המשותף
+// (PROGRAMDATA) נכתב לתוך תיקייה מוקשחת — איסור המחיקה (Deny Delete לכולם,
+// כולל מנהלים) חוסם גם את ה-unlink של האפליקציה עצמה. התוצאה הייתה קטלנית:
+// דגל ישן שנשאר חוסם את האתחול הבא לנצח (האפליקציה רואה דגל ויוצאת מיד).
+// הפתרון: אם המחיקה נחסמה — מרימים את הירושה על הקובץ (מסיר את האיסור המורש)
+// ומנסים שוב. (בדומה להחרגה של settings.backup.json — אותו דפוס icacls).
+function forceUnlinkFlag(p) {
+  try { fs.unlinkSync(p); return; } catch { /* חסום ע"י איסור המחיקה */ }
+  if (!fs.existsSync(p)) return; // לא קיים — אין מה לחסל
+  if (!isWin || !isElevated()) return;
+  try {
+    execFileSync('icacls', [p, '/inheritance:r',
+      '/grant:r', '*S-1-5-32-545:R',
+      '/grant:r', '*S-1-5-32-544:F',
+      '/grant:r', '*S-1-5-18:F'], { stdio: 'pipe', windowsHide: true });
+  } catch { return; }
+  try { fs.unlinkSync(p); } catch { /* ignore */ }
+}
+
 function writeQuitFlag() {
   for (const p of quitFlagPaths()) {
     try {
       fs.mkdirSync(path.dirname(p), { recursive: true });
       fs.writeFileSync(p, String(Date.now()));
     } catch { /* ignore */ }
+  }
+  // הדגל המשותף נכתב לתוך תיקייה מוקשחת (איסור מחיקה לכולם) — מוציאים אותו
+  // מתחולת האיסור מיד עם הכתיבה, כדי שהאתחול הבא יוכל למחוק אותו. בלי זה
+  // כל יציאה מסודרת (סגירה/עדכון) הייתה משאירה דגל שנועל את האפליקציה לנצח.
+  if (isWin && isElevated()) {
+    try { excludeFileFromDeny(machineQuitFlag()); } catch { /* ignore */ }
   }
   if (isWin && isElevated()) {
     try {
@@ -3203,12 +3229,10 @@ function writeQuitFlag() {
   }
 }
 function clearQuitFlags() {
-  for (const p of quitFlagPaths()) {
-    try { fs.unlinkSync(p); } catch { /* ignore */ }
-  }
+  for (const p of quitFlagPaths()) forceUnlinkFlag(p);
   // דגל עצירה של השומר-השער המערכתי (קובץ + Registry) — מתנקה באתחול חדש,
   // כדי שהשומר לא ייצא על דגל ישן מתקינה/עדכון קודמים.
-  try { fs.unlinkSync(machineQuitFlag()); } catch { /* ignore */ }
+  forceUnlinkFlag(machineQuitFlag());
   if (isWin && isElevated()) {
     try { execFile('reg', ['delete', GUARD_REG_KEY, '/v', 'Quit', '/f'], () => {}); } catch { /* ignore */ }
   }
@@ -3228,9 +3252,7 @@ function writeRelaunchFlag() {
   }
 }
 function clearRelaunchFlags() {
-  for (const p of relaunchFlagPaths()) {
-    try { fs.unlinkSync(p); } catch { /* ignore */ }
-  }
+  for (const p of relaunchFlagPaths()) forceUnlinkFlag(p);
 }
 
 function writeHeartbeat(file) {
