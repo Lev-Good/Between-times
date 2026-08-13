@@ -1,6 +1,6 @@
 {
-  "version": "1.5.7",
+  "version": "1.5.8",
   "url": "https://github.com/Lev-Good/Between-times/releases/latest",
-  "sha256": "0c698b6defc028d12ad87356142b8261a41da1aed2de5a21863f6dc7aef760f3",
-  "notes": "גרסה 1.5.7: חיזוקי הגנה, שחזור ועדכונים; חיזוקי עמידות לחסימת האינטרנט ומניעת חלונות UAC חוזרים."
+  "sha256": "a6261f25621883d77dfc07301b4864d204361de656af175fd7e62fd2381c0cff",
+  "notes": "גרסה 1.5.8: עדכון אוטומטי ללא צורך בחתימת Authenticode; האפליקציה מאמתת מקור GitHub רשמי, גרסה, מבנה EXE ו-SHA-256 לפני ההתקנה. נוספו בדיקות regression למדיניות זו."
 }

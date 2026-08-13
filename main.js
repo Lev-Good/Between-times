@@ -2163,29 +2163,16 @@ function recoveryErrorToHebrew(raw) {
 // שמירת ההודעה במודול: בלי התייחסות פעילה האובייקט עלול להיאסף לאשפה (GC),
 // ואז אירוע הלחיצה לא מגיע אלינו כשהמשתמש לוחץ על ההודעה — מצב תיעודי בווינדוס.
 let updateNotification = null;
-let lastOpenedUpdateUrl = null;
-let lastOpenedUpdateAt = 0;
 
-// פתיחת דף ההורדה מההודעה: קודם מנסים את הדפדפן; אם זה נכשל — פותחים את
-// חלון התוכנה שבו יש באנר עדכון עם כפתור הורדה (רשת ביטחון).
-function openUpdatePage(note) {
-  const url = (note && note.url && /^https?:\/\//.test(note.url)) ? note.url : null;
-  if (!url) {
-    // אין כתובת (למשל לחיצה על הודעה ישנה אחרי הפעלה מחדש) — לפחות לפתוח את התוכנה
-    if (win && !win.isDestroyed()) showMainWindow();
-    return;
-  }
-  // הגנה מפני פתיחה כפולה (כמה הודעות עדכון באותו URL או אירוע OS כפול)
-  // — לוודא שהדפדפן נפתח פעם אחת בלבד.
-  const now = Date.now();
-  if (url === lastOpenedUpdateUrl && now - lastOpenedUpdateAt < 4000) return;
-  lastOpenedUpdateUrl = url;
-  lastOpenedUpdateAt = now;
-  try {
-    shell.openExternal(url).catch(() => { if (win && !win.isDestroyed()) showMainWindow(); });
-  } catch {
-    if (win && !win.isDestroyed()) showMainWindow();
-  }
+// לחיצה על הודעת עדכון פותחת את חלון התוכנה עם כפתור "הורד והתקן".
+// לא פותחים כתובת שמגיעה מ-metadata בדפדפן: ההורדה עצמה מתבצעת רק דרך
+// resolveInstallerUrl, שמרכיב כתובת מהמאגר הרשמי ומאמת את ה-hash לפני הרצה.
+function openUpdatePage() {
+  if (win && !win.isDestroyed()) showMainWindow();
+}
+
+function isValidUpdateVersion(value) {
+  return /^\d+(?:\.\d+){1,3}$/.test(String(value || '').trim());
 }
 
 function isNewerVersion(remote, current) {
@@ -2206,10 +2193,10 @@ function notifyUpdate(note) {
   try {
     updateNotification = new Notification({
       title: 'עדכון זמין — בין הזמנים',
-      body: 'גרסה ' + note.version + ' זמינה להורדה' + (note.url ? ' — לחצו על ההודעה כדי לפתוח את דף ההורדה' : '')
+      body: 'גרסה ' + note.version + ' זמינה — לחצו כאן כדי לפתוח את חלון העדכון'
     });
-    // לחיצה על ההודעה פותחת את דף ההורדה בדפדפן
-    updateNotification.on('click', () => openUpdatePage(note));
+    // לחיצה על ההודעה פותחת את חלון העדכון בתוך האפליקציה
+    updateNotification.on('click', () => openUpdatePage());
     updateNotification.show();
   } catch { /* ignore */ }
 }
@@ -2222,10 +2209,12 @@ async function checkForUpdate() {
   try {
     const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
     const data = await res.json().catch(() => ({}));
-    const remote = String(data.version || '');
-    if (!remote || !isNewerVersion(remote, app.getVersion())) {
+    const remote = String(data.version || '').trim();
+    if (!isValidUpdateVersion(remote) || !isNewerVersion(remote, app.getVersion())) {
       return { ok: true, update: null };
     }
+    // ה-hash הוא מנגנון האימות של הפצה ללא Authenticode. לא מריצים עדכון
+    // שחסר לו hash מלא, גם אם הכתובת נמצאת ב-GitHub הרשמי.
     const note = { version: remote, url: data.url || '', notes: data.notes || '', sha256: String(data.sha256 || '').trim().toLowerCase() };
     updateNote = note;
     notifyUpdate(note);
@@ -2256,11 +2245,12 @@ async function resolveInstallerUrl(version) {
     });
     if (res.ok) {
       const data = await res.json();
-      const asset = (data.assets || []).find((a) => /^(Setup|.*Setup)[^"]*\.exe$/i.test(a.name));
+      const expectedName = 'Setup.' + version + '.exe';
+      const asset = (data.assets || []).find((a) => String(a.name || '') === expectedName);
       if (asset && asset.browser_download_url) return asset.browser_download_url;
     }
   } catch { /* נופלים לכתובת הקונבנציונלית */ }
-  return GITHUB_REPO_URL + '/releases/latest/download/Setup.' + version + '.exe';
+  return GITHUB_REPO_URL + '/releases/download/v' + version + '/Setup.' + version + '.exe';
 }
 
 // הורדת קובץ לנתיב מקומי עם דיווח התקדמות (אחוזים) — סטרימינג מ-fetch.
@@ -2295,15 +2285,6 @@ async function downloadInstaller(url, dest, onProgress) {
   return received;
 }
 
-function verifyInstallerSignature(file) {
-  return new Promise((resolve) => {
-    if (!isWin) return resolve(true);
-    const quoted = JSON.stringify(String(file));
-    const script = '$s=Get-AuthenticodeSignature -LiteralPath ' + quoted + '; if ($s.Status -eq "Valid") { exit 0 } else { exit 1 }';
-    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script], { windowsHide: true, timeout: 15000 }, (err) => resolve(!err));
-  });
-}
-
 // הורדה + התקנה שקטה של העדכון. נקרא מהממשק (update:download) — עם
 // דיווח התקדמות לכל החלונות, וסגירה נקייה של התוכנה בסוף.
 async function downloadAndInstallUpdate() {
@@ -2323,10 +2304,15 @@ async function downloadAndInstallUpdate() {
   };
   try {
     const url = await resolveInstallerUrl(version);
-    // רק מקבצים של המאגר הרשמי שלנו — הגנה מפני כתובות זדוניות
-    if (!/^https:\/\/github\.com\/Lev-Good\/Between-times\//.test(url)) {
-      return { ok: false, error: 'מקור ההורדה אינו תקין' };
-    }
+    // רק מקבצים מנתיב המאגר הרשמי — ההפניה של GitHub יכולה להמשיך לשרת
+    // assets אחר, אך כתובת המקור חייבת להיות הקישור הרשמי שהתקבל מה-API.
+    let officialUrl = false;
+    try {
+      const parsed = new URL(url);
+      officialUrl = parsed.protocol === 'https:' && parsed.hostname === 'github.com' &&
+        parsed.pathname.startsWith('/' + GITHUB_REPO + '/');
+    } catch { /* כתובת לא תקינה */ }
+    if (!officialUrl) return { ok: false, error: 'מקור ההורדה אינו תקין' };
     progress('download', 0);
     const size = await downloadInstaller(url, dest, (p) => progress('download', p));
     // בדיקות תקינות: גודל סביר (המתקין בפועל ~90MB) + חותמת PE (MZ) —
@@ -2337,21 +2323,18 @@ async function downloadAndInstallUpdate() {
       return { ok: false, error: 'הקובץ שהורד אינו תקין — נסו שוב או הורידו ידנית מהאתר' };
     }
     const expectedHash = String(updateNote.sha256 || '').trim().toLowerCase();
-    if (isWin && !isTestMode && !/^[0-9a-f]{64}$/.test(expectedHash)) {
+    if (!/^[0-9a-f]{64}$/.test(expectedHash)) {
       try { fs.unlinkSync(dest); } catch { /* ignore */ }
-      return { ok: false, error: 'לעדכון חסרה טביעת אבטחה חתומה — ההתקנה בוטלה' };
+      return { ok: false, error: 'לעדכון חסר SHA-256 תקין — ההתקנה בוטלה' };
     }
-    if (expectedHash) {
-      const actualHash = crypto.createHash('sha256').update(fs.readFileSync(dest)).digest('hex');
-      if (actualHash !== expectedHash) {
-        try { fs.unlinkSync(dest); } catch { /* ignore */ }
-        return { ok: false, error: 'טביעת העדכון אינה תואמת — ההתקנה בוטלה' };
-      }
-    }
-    if (!(await verifyInstallerSignature(dest))) {
+    const actualHash = crypto.createHash('sha256').update(fs.readFileSync(dest)).digest('hex');
+    if (actualHash !== expectedHash) {
       try { fs.unlinkSync(dest); } catch { /* ignore */ }
-      return { ok: false, error: 'המתקין אינו חתום בחתימת Windows תקפה — ההתקנה בוטלה' };
+      return { ok: false, error: 'טביעת העדכון אינה תואמת — ההתקנה בוטלה' };
     }
+    // Authenticode אינו חובה במדיניות ההפצה הנוכחית. מקור ההורדה וה-hash
+    // עדיין נבדקים תמיד לפני הפעלה; חתימה תקפה, אם תתווסף בעתיד, היא
+    // שכבת אמון נוספת ולא תנאי שמונע עדכון unsigned.
     progress('install', 100);
     // דגל עצירה בכל הנתיבים — השומר-שער לא יקפיץ את התוכנה בזמן ההתקנה.
     // המתקין החדש (1.2.4+) גם הוא כותב את הדגל ב-preInit וממתין לסגירתנו.
@@ -2733,7 +2716,9 @@ function registerIpc() {
 
   ipcMain.handle('update:download', (event) => {
     if (!mainSender(event)) return Promise.resolve(senderError());
-    if (schedule.pinHash && !isSessionUnlocked()) return Promise.resolve({ ok: false, error: 'נדרשת סיסמה כדי להתקין עדכון' });
+    // עדכון מאומת אינו שינוי מדיניות: מקור, גרסה, מבנה EXE ו-SHA-256
+    // נבדקים בתהליך הראשי. לכן אין לחסום אותו מאחורי Session PIN — אחרת
+    // הודעת עדכון ברקע תוביל את המשתמש למסך הגדרות רק כדי להתעדכן.
     return downloadAndInstallUpdate();
   });
 

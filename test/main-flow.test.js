@@ -9,6 +9,7 @@ const assert = require('node:assert');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const crypto = require('crypto');
 
 const S = require('../scheduler.js');
 
@@ -898,6 +899,16 @@ test('update:check tolerates network failure silently', async () => {
 
 /* ================= הורדה והתקנה אוטומטית של עדכון ================= */
 
+// מתקין דמה חוקי לבדיקות: גם הוא חייב לעבור אימות SHA-256 כמו מתקין אמיתי.
+function fakeInstallerBytes(fill = 7) {
+  const bytes = Buffer.alloc(2 * 1024 * 1024, fill);
+  bytes[0] = 0x4d; bytes[1] = 0x5a;
+  return bytes;
+}
+function fakeInstallerHash(bytes) {
+  return crypto.createHash('sha256').update(bytes).digest('hex');
+}
+
 // זרם פשוט שמדמה את הגוף של תגובת fetch (res.body.getReader())
 function fakeStream(chunks) {
   let i = 0;
@@ -929,16 +940,17 @@ test('update:download downloads installer and starts silent install', async () =
   // 1) version.json (raw.githubusercontent) — מצביע על גרסה חדשה
   // 2) GitHub API — שם הקובץ המדויק
   // 3) כתובת ההורדה — זרם של 2MB
+  const installer = fakeInstallerBytes();
+  const installerHash = fakeInstallerHash(installer);
   fetchMock = async (url) => {
     const api = githubApiRelease(url);
     if (api) return api;
     if (url.includes('raw.githubusercontent.com')) {
-      return { ok: true, json: async () => ({ version: '9.9.9', url: 'https://github.com/Lev-Good/Between-times/releases/latest' }) };
+      return { ok: true, json: async () => ({ version: '9.9.9', url: 'https://github.com/Lev-Good/Between-times/releases/latest', sha256: installerHash }) };
     }
     if (url.includes('releases/download/v9.9.9/Setup.9.9.9.exe')) {
       // 2MB תקין — חייב להתחיל בחותמת PE (MZ) כמו EXE אמיתי
-      const bytes = Buffer.alloc(2 * 1024 * 1024, 7);
-      bytes[0] = 0x4d; bytes[1] = 0x5a; // 'MZ'
+      const bytes = installer; // 'MZ' + SHA-256 תואם ל-metadata
       return { ok: true, headers: { get: () => String(bytes.length) }, body: fakeStream([bytes]) };
     }
     throw new Error('unexpected fetch: ' + url);
@@ -975,15 +987,17 @@ test('update:download downloads installer and starts silent install', async () =
 test('update:download writes relaunch flag so the installer reopens the app', async () => {
   // אותו מהלך כמו בדיקת ההורדה — אבל בודק במפורש שהדגל נכתב בשני הנתיבים
   // ש-NSIS בודק ב-customInstall (BenHazmanim + userData)
+  const installer = fakeInstallerBytes();
+  const installerHash = fakeInstallerHash(installer);
   fetchMock = async (url) => {
     const api = githubApiRelease(url);
     if (api) return api;
     if (url.includes('raw.githubusercontent.com')) {
-      return { ok: true, json: async () => ({ version: '9.9.9' }) };
+      return { ok: true, json: async () => ({ version: '9.9.9', sha256: installerHash }) };
     }
     if (url.includes('releases/download/v9.9.9/Setup.9.9.9.exe')) {
-      const bytes = Buffer.alloc(2 * 1024 * 1024, 7);
-      bytes[0] = 0x4d; bytes[1] = 0x5a;
+      const bytes = installer;
+      // 'MZ' + SHA-256 תואם ל-metadata
       return { ok: true, headers: { get: () => String(bytes.length) }, body: fakeStream([bytes]) };
     }
     throw new Error('unexpected fetch: ' + url);
@@ -1024,15 +1038,18 @@ test('startup: stale relaunch flags are cleared on launch', async () => {
 });
 
 test('update:download refuses corrupt/tiny downloads (no install, no quit)', async () => {
+  const installer = fakeInstallerBytes();
+  const installerHash = fakeInstallerHash(installer);
   fetchMock = async (url) => {
     const api = githubApiRelease(url);
     if (api) return api;
     if (url.includes('raw.githubusercontent.com')) {
-      return { ok: true, json: async () => ({ version: '9.9.9' }) };
+      return { ok: true, json: async () => ({ version: '9.9.9', sha256: installerHash }) };
     }
     if (url.includes('releases/download/v9.9.9/Setup.9.9.9.exe')) {
-      // קובץ גדול מספיק אבל ללא חותמת MZ — לא תקין
-      return { ok: true, headers: { get: () => '2097152' }, body: fakeStream([Buffer.alloc(2 * 1024 * 1024, 1)]) };
+      // קובץ גדול מספיק אבל ללא חותמת MZ — לא תקין; ה-hash שלו תקין
+      const bytes = Buffer.alloc(2 * 1024 * 1024, 1);
+      return { ok: true, headers: { get: () => '2097152' }, body: fakeStream([bytes]) };
     }
     throw new Error('unexpected fetch: ' + url);
   };
@@ -1051,7 +1068,36 @@ test('update:download refuses corrupt/tiny downloads (no install, no quit)', asy
   }
 });
 
+test('update:download rejects metadata without SHA-256', async () => {
+  const installer = fakeInstallerBytes();
+  fetchMock = async (url) => {
+    const api = githubApiRelease(url);
+    if (api) return api;
+    if (url.includes('raw.githubusercontent.com')) {
+      return { ok: true, json: async () => ({ version: '9.9.9' }) };
+    }
+    if (url.includes('releases/download/v9.9.9/Setup.9.9.9.exe')) {
+      return { ok: true, headers: { get: () => String(installer.length) }, body: fakeStream([installer]) };
+    }
+    throw new Error('unexpected fetch: ' + url);
+  };
+  try {
+    const m = loadMain({});
+    await m.ready();
+    const res = await m.ipcHandlers.get('update:download')();
+    assert.equal(res.ok, false);
+    assert.match(res.error || '', /SHA-256/);
+    assert.equal(m.state.quitCalled, false);
+    assert.equal(m.state.spawnCalls.filter((s) => s.args && s.args.includes('/S')).length, 0);
+    m.cleanup();
+  } finally {
+    fetchMock = null;
+  }
+});
+
 test('update:download rejects download URLs outside the official repo', async () => {
+  const installer = fakeInstallerBytes();
+  const installerHash = fakeInstallerHash(installer);
   fetchMock = async (url) => {
     const api = githubApiRelease(url);
     if (api) {
@@ -1064,7 +1110,7 @@ test('update:download rejects download URLs outside the official repo', async ()
       };
     }
     if (url.includes('raw.githubusercontent.com')) {
-      return { ok: true, json: async () => ({ version: '9.9.9' }) };
+      return { ok: true, json: async () => ({ version: '9.9.9', sha256: installerHash }) };
     }
     throw new Error('unexpected fetch: ' + url);
   };
@@ -1085,11 +1131,13 @@ test('update:download rejects download URLs outside the official repo', async ()
 
 test('update:download cleans up partial file when download fails mid-stream', async () => {
   const destPath = null;
+  const installer = fakeInstallerBytes();
+  const installerHash = fakeInstallerHash(installer);
   fetchMock = async (url) => {
     const api = githubApiRelease(url);
     if (api) return api;
     if (url.includes('raw.githubusercontent.com')) {
-      return { ok: true, json: async () => ({ version: '9.9.9' }) };
+      return { ok: true, json: async () => ({ version: '9.9.9', sha256: installerHash }) };
     }
     if (url.includes('releases/download/v9.9.9/Setup.9.9.9.exe')) {
       // זרם שנקטע באמצע — שידור שני מחזיר done מיד
