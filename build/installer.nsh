@@ -21,6 +21,11 @@
 ; NOTE: this file is UTF-8 with BOM so the Hebrew path compiles correctly.
 
 !macro preInit
+  ; The app hardens its install dir with deny-delete ACLs (even for admins).
+  ; The installer replaces files there — lift the deny BEFORE replacing, so
+  ; upgrades keep working. The app re-applies the hardening on its first
+  ; elevated run after the update.
+  nsExec::Exec 'cmd /c icacls "$INSTDIR" /remove:d *S-1-1-0 /T /C'
   ; write quit.flag into every location the app may check, BEFORE
   ; electron-builder tries to close the running app (preInit runs before
   ; allowOnlyOneInstallerInstance).
@@ -72,6 +77,22 @@
 ; has already stopped its watchdog and removed the startup entries - these
 ; lines are the safety net for uninstalls done from Control Panel / Settings.
 !macro customUnInstall
+  ; ---------------------------------------------------------------------------
+  ; Removal is allowed ONLY from inside the app itself. The app verifies the
+  ; parent password and writes a one-time token file right before spawning
+  ; this uninstaller. Without a valid token the uninstaller refuses to run,
+  ; so uninstalling via Control Panel / Settings / double-clicking
+  ; Uninstall.exe is impossible. (The app also removes the "Add/Remove
+  ; Programs" registry entry on every elevated launch, so the app is not
+  ; even listed there.) This check runs FIRST — before any cleanup.
+  ; ---------------------------------------------------------------------------
+  ReadEnvStr $R0 "PROGRAMDATA"
+  IfFileExists "$R0\BenHazmanim\uninstall.token" 0 UninstallBlocked
+  Goto TokenOk
+  UninstallBlocked:
+    MessageBox MB_ICONSTOP|MB_OK "ההסרה אפשרית רק מתוך התוכנה (הגדרות → הסרת התוכנה)."
+    Abort
+  TokenOk:
   ; write quit.flag so the watchdog won't respawn the app during uninstall
   ; (also covers uninstalls done from Control Panel / Settings)
   CreateDirectory "$APPDATA\BenHazmanim"
@@ -92,6 +113,10 @@
   FileOpen $0 "$R0\BenHazmanim\quit.flag" w
   FileWrite $0 "uninstaller"
   FileClose $0
+  ; the app hardens the install dir and the protected copy with deny-delete
+  ; ACLs (even for admins) — lift them so the uninstaller can remove the files
+  nsExec::Exec 'cmd /c icacls "$INSTDIR" /remove:d *S-1-1-0 /T /C'
+  nsExec::Exec 'cmd /c icacls "%PROGRAMDATA%\BenHazmanim\app" /remove:d *S-1-1-0 /T /C'
   ; Stop and remove the SYSTEM guard before deleting its protected copy.
   ; /Delete alone does not reliably terminate an already-running instance.
   nsExec::Exec 'schtasks /End /TN BenHazmanimGuard'

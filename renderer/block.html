@@ -160,7 +160,7 @@
     }
     .no-pin-note { font-size: 22px; font-weight: 800; margin-top: 22px; color: var(--accent-2, #6ee7b7); }
     .no-pin-sub { color: var(--muted, #94a3b8); font-size: 14px; margin-top: 8px; line-height: 1.7; max-width: 380px; margin-inline: auto; }
-    #noPinBox .btn { min-width: 260px; margin-top: 4px; }
+    #noPinBox .btn, #configFaultBox .btn { min-width: 260px; margin-top: 4px; }
     :root[data-theme='light'] .block-msg { color: #a11c2e; }
     /* שלושת השעונים של מסך החסימה: נוכחי / פתיחה / נשאר */
     .clocks {
@@ -603,6 +603,22 @@
       <br />
       <button class="btn btn-ghost btn-sm" id="skipPinBtn">פתח את המחשב עכשיו</button>
     </div>
+    <!-- קובץ הגדרות פגום = מצב Fail Closed: אין כפתור "דלג" שיכול להיראות
+         כמו פתיחה מוצלחת. הדרך החוצה היחידה היא חלון ההגדרות — ולכן חייב
+         להופיע כאן כפתור פתיחה ברור (תיקון הבאג שבו ההודעה אמרה "פתחו את
+         ההגדרות" בלי שום דרך לעשות זאת בפועל). -->
+    <div class="pin-box" id="configFaultBox" style="display:none">
+      <div class="no-pin-note">קובץ ההגדרות פגום</div>
+      <div class="no-pin-sub">המחשב נשאר חסום עד שתוקנו ההגדרות. פתחו את חלון ההגדרות כדי לשחזר גיבוי או להגדיר מחדש — זוהי הדרך היחידה לצאת מהחסימה.</div>
+      <br />
+      <button class="btn btn-primary" id="configFaultSettingsBtn">פתחו את ההגדרות — תיקון ושחזור</button>
+    </div>
+    <!-- כפתור קטן וקבוע לפתיחת ההגדרות — בכל מצב חסימה חייבת להיות דרך
+         לגיטימית להגיע לחלון ההגדרות (שם נדרשת סיסמת ההורה). -->
+    <button class="unlock-toggle" id="settingsFooterBtn" type="button">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      פתחו את ההגדרות
+    </button>
     <div class="lock-msg" id="lockMsg"></div>
     <div class="hint-lock">
       <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
@@ -658,6 +674,8 @@
     const pinToggle = document.getElementById('pinToggle');
     const lockMsg = document.getElementById('lockMsg');
     const blockMsg = document.getElementById('blockMsg');
+    const settingsFooterBtn = document.getElementById('settingsFooterBtn');
+    const configFaultBox = document.getElementById('configFaultBox');
     const blockReason = document.getElementById('blockReason');
     const blockReasonText = document.getElementById('blockReasonText');
 
@@ -1019,20 +1037,30 @@
       // משפטי העידוד מהמקורות — ניתנים להסתרה מההגדרות (showTorahQuotes)
       tqBox.classList.toggle('tq-hidden', status.showTorahQuotes === false);
       // קובץ הגדרות פגום הוא מצב Fail Closed: אין להציג כפתור "דלג"
-      // שיכול להיראות כמו פתיחה מוצלחת. התיקון מתבצע דרך חלון ההגדרות.
+      // שיכול להיראות כמו פתיחה מוצלחת. הדרך החוצה היחידה היא חלון
+      // ההגדרות — ולכן חייב להיות בו כפתור פתיחה ברור (תיקון הבאג שבו
+      // ההודעה אמרה "פתחו את ההגדרות" בלי שום כפתור שאפשר ללחוץ עליו).
       if (status.configError) {
         pinBox.style.display = 'none';
         pinToggle.style.display = 'none';
         noPinBox.style.display = 'none';
+        settingsFooterBtn.style.display = 'none';
+        configFaultBox.style.display = '';
         lockMsg.textContent = 'קובץ ההגדרות פגום — פתחו את ההגדרות כדי לתקן או לשחזר גיבוי';
         lockMsg.classList.remove('ok');
       } else if (status.pinSet === false) {
         pinBox.style.display = 'none';
         pinToggle.style.display = 'none';
         noPinBox.style.display = '';
+        settingsFooterBtn.style.display = 'none';
+        configFaultBox.style.display = 'none';
       } else {
-        // עם סיסמה — שדה הפתיחה מוסתר ומוצג רק בלחיצה על הכפתור
+        // עם סיסמה — שדה הפתיחה מוסתר ומוצג רק בלחיצה על הכפתור.
+        // כפתור ההגדרות הקטן תמיד זמין: כל מסך חסימה חייב לאפשר הגעה
+        // לחלון ההגדרות (שם נדרשת סיסמת ההורה כדי לשנות משהו).
         noPinBox.style.display = 'none';
+        configFaultBox.style.display = 'none';
+        settingsFooterBtn.style.display = '';
         pinToggle.style.display = pinExpanded ? 'none' : '';
         pinBox.style.display = pinExpanded ? '' : 'none';
       }
@@ -1044,8 +1072,10 @@
         blockMsg.style.display = 'none';
       }
       // חסימה לפי ברירת המחדל של "התר" (לוח ריק — חסום תמיד) — להסביר
-      // להורה מיד למה המחשב חסום, כדי שלא ייראה כמו באג.
-      if (status.blockedByDefault && status.state === 'blocked') {
+      // להורה מיד למה המחשב חסום, כדי שלא ייראה כמו באג. במצב קובץ פגום
+      // לא מציגים את ההסבר הזה — שם הסיבה היא תקלת הגדרות ולא ברירת מחדל
+      // של הלוח, וההודעה המתאימה כבר מוצגת למעלה.
+      if (status.blockedByDefault && status.state === 'blocked' && !status.configError) {
         blockReasonText.textContent = 'המחשב חסום לפי ברירת המחדל שנבחרה בהגדרות (מצב "המחשב חסום תמיד") — כדי לפתוח, הוסיפו חלון "מותר" בלוח או חזרו למצב "המחשב פתוח תמיד". פתיחה בסיסמה כאן פותחת לשעה בלבד.';
         blockReason.classList.remove('hidden');
       } else {
@@ -1135,6 +1165,8 @@
         }
       };
       document.getElementById('openSettingsBtn').onclick = () => { if (API) API.openSettings(); };
+      document.getElementById('configFaultSettingsBtn').onclick = () => { if (API) API.openSettings(); };
+      settingsFooterBtn.onclick = () => { if (API) API.openSettings(); };
       document.getElementById('skipPinBtn').onclick = async () => {
         const res = await API.unlockNow('');
         if (res && res.ok) {

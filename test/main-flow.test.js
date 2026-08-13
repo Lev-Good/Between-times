@@ -49,7 +49,8 @@ function makeMock(config) {
     readyCallbacks: [],
     windowsCreated: 0,
     windows: [],        // כל חלונות ה-BrowserWindow שנוצרו (לכידת אירועים)
-    notifications: []
+    notifications: [],
+    focusCalls: []      // קריאות focus() על חלונות — לבדיקת גניבת פוקוס
   };
   let mockNetRuleExists = false;
 
@@ -123,14 +124,15 @@ function makeMock(config) {
     on(ev, cb) { (this._listeners[ev] = this._listeners[ev] || []).push(cb); }
     emit(ev, arg) { (this._listeners[ev] || []).forEach((l) => l(arg)); }
     show() { this.visible = true; }
-    focus() {}
+    focus() { state.focusCalls.push(this); }
     hide() { this.visible = false; this.emit('hide'); }
     destroy() { this._destroyed = true; this.emit('closed'); }
-    setAlwaysOnTop() {}
+    setAlwaysOnTop(flag) { this.alwaysOnTop = !!flag; }
     setVisibleOnAllWorkspaces() {}
     loadFile() {}
     restore() {}
     isMinimized() { return false; }
+    isVisible() { return !!this.visible; }
     setBackgroundColor() {}
   }
 
@@ -343,6 +345,9 @@ const protectedDir = (m) => path.join(process.env.PROGRAMDATA, 'BenHazmanim', 'a
 test('protected copy: elevated run creates hardened copy and task points at it', async () => {
   const m = loadMain({ elevate: true });
   createAppDir(m);
+  // מתקין ההסרה קיים בתיקיית ההתקנה (כמו אחרי התקנה אמיתית)
+  const uninstName = 'Uninstall בין הזמנים.exe';
+  fs.writeFileSync(path.join(m.tmpRoot, 'app', uninstName), 'uninstaller-bytes');
   await m.ready();
 
   // העותק המוגן נוצר בתיקייה המשותפת
@@ -357,6 +362,12 @@ test('protected copy: elevated run creates hardened copy and task points at it',
   assert.ok(fs.existsSync(path.join(pd, 'assets.txt')), 'העותק המוגן כולל את שאר קבצי התוכנה');
   assert.ok(fs.existsSync(path.join(pd, 'integrity.json')), 'העותק המוגן צריך לכלול Manifest של שלמות קבצי הליבה');
 
+  // מתקין ההסרה כלול במניפסט השלמות — כך שמחיקתו לבדה תיחשב פגיעה
+  // ותפעיל שחזור מלא של תיקיית ההתקנה (ובלעדיו ההסרה החוקית נשברת)
+  const manifest = JSON.parse(fs.readFileSync(path.join(pd, 'integrity.json'), 'utf8'));
+  assert.ok(manifest.files.some((f) => String(f.path).endsWith(uninstName)),
+    'מתקין ההסרה חייב להיכלל במניפסט השלמות: ' + JSON.stringify(manifest.files.map((f) => f.path)));
+
   // הקשחת הרשאות: takeown + icacls על העותק המוגן
   const takeown = m.state.execCalls.find((c) => c.cmd === 'takeown' && c.args.includes(pd));
   assert.ok(takeown, 'צריך להריץ takeown על העותק המוגן');
@@ -364,6 +375,45 @@ test('protected copy: elevated run creates hardened copy and task points at it',
   const icacls = m.state.execCalls.find((c) => c.cmd === 'icacls' && c.args.includes(pd));
   assert.ok(icacls, 'צריך להריץ icacls על העותק המוגן');
   assert.ok(icacls.args.includes(pd), 'icacls על תיקיית העותק המוגן');
+
+  // רגרסיה: icacls עם /grant:r וסימוני ירושה (OI)(CI) דרך /T מרוקן את
+  // ה-DACL של כל קובץ (נשאר PAI ללא ACEs) — הקבצים הופכים בלתי קריאים
+  // לכולם, כולל SYSTEM, ולכן השומר המערכתי לא מסוגל אפילו להריץ את עצמו.
+  // ההקשחה חייבת להגדיר את ההרשאות על התיקייה בלבד (בלי /T) ואז לאפס
+  // את הילדים לירושה (icacls dir\* /reset /T).
+  const grants = m.state.execCalls.find((c) => c.cmd === 'icacls' && c.args.includes(pd)
+    && c.args.includes('/grant:r') && c.args.some((a) => a.includes('(OI)(CI)RX')));
+  assert.ok(grants, 'הקשחת הרשאות על תיקיית העותק המוגן');
+  assert.ok(!grants.args.includes('/T'),
+    'אסור להפעיל את הרשאות ה-(OI)(CI) עם /T — זה מרוקן את ה-DACL של הקבצים');
+  const reset = m.state.execCalls.find((c) => c.cmd === 'icacls' && c.args.includes('/reset')
+    && c.args.some((a) => a.includes(pd) && a.endsWith('\\*')));
+  assert.ok(reset, 'אחרי הגדרת הרשאות התיקייה הילדים מאופסים לירושה (icacls dir\\* /reset /T)');
+
+  // איסור מחיקה לכולם (כולל מנהלים) — המטרה של שינוי זה: גם מנהל מערכת
+  // לא יכול פשוט למחוק את העותק המוגן. Deny גובר על Allow, ולכן הרשאת
+  // ה-Full של מנהלים אינה עוקפת את האיסור.
+  const deny = m.state.execCalls.find((c) => c.cmd === 'icacls' && c.args.includes(pd)
+    && c.args.includes('/deny') && c.args.some((a) => a.includes('DE,DC')));
+  assert.ok(deny, 'צריך להריץ icacls עם איסור מחיקה (deny DE,DC) על העותק המוגן');
+  assert.ok(deny.args.some((a) => a.includes('*S-1-1-0')), 'האיסור הוא לכולם, כולל מנהלים');
+
+  // רענון העותק (העתקה מחדש) מרים זמנית את האיסור — אחרת הוא היה נחסם
+  const lift = m.state.execCalls.find((c) => c.cmd === 'icacls' && c.args.includes(pd)
+    && c.args.includes('/remove:d') && c.args.includes('*S-1-1-0'));
+  assert.ok(lift, 'רענון העותק המוגן מרים זמנית את איסור המחיקה');
+
+  // קובץ גיבוי ההגדרות נכתב מחדש בכל שמירה — יוצא מתחולת האיסור
+  const exclude = m.state.execCalls.find((c) => c.cmd === 'icacls'
+    && c.args.some((a) => a.includes('settings.backup.json')));
+  assert.ok(exclude, 'גיבוי ההגדרות מוחרג מאיסור המחיקה (נכתב באטומיות בכל שמירה)');
+
+  // רגרסיה: אסור להעביר סימוני ירושה (OI)(CI) ל-/grant:r כשהמטרה היא קובץ
+  // בודד — התבנית הזו מרוקנת את ה-DACL של הקובץ (נשאר PAI ללא ACEs) ואף
+  // אחד — כולל SYSTEM ומנהלים — לא יכול לקרוא או להחליף אותו (נבדק אמפירית
+  // על ווינדוס 11). לקובץ נותנים הרשאות ישירות, בלי סימוני ירושה.
+  assert.ok(!exclude.args.some((a) => a.includes('(OI)') || a.includes('(CI)')),
+    'החרגת קובץ בודד אסורה עם סימוני ירושה (OI)(CI) — זה משחית את ה-DACL: ' + JSON.stringify(exclude.args));
 
   // המשימה המתוזמנת מצביעה על העותק המוגן
   const taskCreate = m.state.execCalls.filter((c) => c.cmd === 'schtasks' && c.args.includes('/Create'));
@@ -376,6 +426,30 @@ test('protected copy: elevated run creates hardened copy and task points at it',
   // מצב ההגנה מדווח על עותק מוגן פעיל
   const sec = await m.ipcHandlers.get('security:get')();
   assert.equal(sec.protectedCopy, true);
+  m.cleanup();
+});
+
+test('protected copy: verifyAclHealth safety net runs after hardening and leaves readable files untouched', async () => {
+  const m = loadMain({ elevate: true });
+  createAppDir(m);
+  // קבצים כמו קבצי .pak ש-Chromium טוען — הנפגעים הפוטנציאליים של הקשחה
+  // בזמן שהאפליקציה רצה מהתיקייה (פעולה על קובץ נעול נקטעה באמצע והותירה
+  // DACL ריק). רשת הביטחון (verifyAclHealth) רצה אחרי כל הקשחה ובודקת
+  // שכל קובץ נשאר קריא; עץ בריא אמור לעבור בלי שום תיקון ואירוע.
+  fs.writeFileSync(path.join(m.tmpRoot, 'app', 'chrome_100_percent.pak'), 'pak-data');
+  fs.writeFileSync(path.join(m.tmpRoot, 'app', 'resources.pak'), 'pak-data');
+  await m.ready();
+  const pd = protectedDir(m);
+  for (const name of ['package.json', 'chrome_100_percent.pak', 'resources.pak', 'assets.txt']) {
+    const f = path.join(pd, name);
+    assert.ok(fs.existsSync(f), 'העותק המוגן כולל ' + name);
+    assert.doesNotThrow(() => fs.accessSync(f, fs.constants.R_OK), name + ' חייב להישאר קריא אחרי ההקשחה');
+  }
+  // עץ בריא לא אמור להפעיל את תיקון ה-ACL ולא לרשום אירועי חבלה
+  const tamperLog = path.join(process.env.PROGRAMDATA, 'BenHazmanim', 'tamper.log');
+  const log = fs.existsSync(tamperLog) ? fs.readFileSync(tamperLog, 'utf8') : '';
+  assert.ok(!log.includes('acl-unreadable') && !log.includes('acl-repaired'),
+    'עץ קבצים בריא לא צריך להפעיל את תיקון ה-ACL');
   m.cleanup();
 });
 
@@ -393,6 +467,11 @@ test('protected copy: no re-copy when version matches; task still points at copy
   const icacls = m.state.execCalls.filter((c) => c.cmd === 'icacls');
   assert.ok(takeown.length >= 1, 'גם גרסה תואמת צריכה לוודא שהעותק מוגן');
   assert.ok(icacls.length >= 1, 'גם גרסה תואמת צריכה לוודא שהעותק מוגן');
+
+  // איסור המחיקה מוחזר בכל הרצה, גם כשהעותק כבר עדכני (ללא העתקה מחדש)
+  const deny = m.state.execCalls.find((c) => c.cmd === 'icacls'
+    && c.args.includes('/deny') && c.args.some((a) => a.includes('DE,DC')));
+  assert.ok(deny, 'גם גרסה תואמת צריכה להבטיח את איסור המחיקה');
 
   const taskCreate = m.state.execCalls.filter((c) => c.cmd === 'schtasks' && c.args.includes('/Create'));
   assert.ok(taskCreate.length >= 1, 'צריך ליצור משימה מתוזמנת');
@@ -425,6 +504,136 @@ test('protected copy: non-elevated run does NOT create or touch the copy', async
 
   const sec = await m.ipcHandlers.get('security:get')();
   assert.equal(sec.protectedCopy, false);
+  m.cleanup();
+});
+
+test('install dir: elevated run hardens the install dir with deny-delete', async () => {
+  // תרחיש המשתמש שפתח את הנושא: מחיקת כל תיקיית הקבצים עם הרשאות מנהל
+  // "עבדה בלי בעיה". אחרי שינוי זה תיקיית ההתקנה עצמה מקבלת איסור מחיקה
+  // לכולם (כולל מנהלים) — מחיקה פשוטה נכשלת עם Access denied.
+  const m = loadMain({ elevate: true });
+  createAppDir(m);
+  await m.ready();
+  const appDir = path.join(m.tmpRoot, 'app');
+
+  const takeown = m.state.execCalls.filter((c) => c.cmd === 'takeown' && c.args.includes(appDir));
+  assert.ok(takeown.length >= 1, 'takeown על תיקיית ההתקנה');
+  const deny = m.state.execCalls.find((c) => c.cmd === 'icacls' && c.args.includes(appDir)
+    && c.args.includes('/deny') && c.args.some((a) => a.includes('DE,DC')));
+  assert.ok(deny, 'איסור מחיקה (deny DE,DC) על תיקיית ההתקנה');
+
+  // ללא הרשאות מנהל לא נוגעים בהרשאות של תיקיית ההתקנה
+  m.cleanup();
+  const m2 = loadMain({});
+  createAppDir(m2);
+  await m2.ready();
+  const icacls2 = m2.state.execCalls.filter((c) => c.cmd === 'icacls' && c.args.includes(path.join(m2.tmpRoot, 'app')));
+  assert.equal(icacls2.length, 0, 'ללא הרשאות מנהל אין הקשחת תיקיית ההתקנה');
+  m2.cleanup();
+});
+
+test('uninstall: רשומת "התקן והסר תוכניות" מוסרת מהרישום בהרצה מוגבהת', async () => {
+  // ההסרה חייבת להיות אפשרית רק מתוך התוכנה עצמה. הרשומה ש-electron-builder
+  // יוצר (UUID v5 של ה-appId) נמחקת בכל הפעלה מוגבהת — התוכנה לא מופיעה
+  // ברשימת התוכנות של Windows, ולכן אין דרך להסיר אותה משם.
+  const m = loadMain({ elevate: true });
+  createAppDir(m);
+  await m.ready();
+
+  // UUID v5('com.levtov.benhazmanim', ns של electron-builder) — ערך קבוע
+  const key = 'a9bfe962-9f3c-5263-9e95-4def2bc5cb87';
+  const dels = m.state.execCalls.filter((c) => c.cmd === 'reg'
+    && c.args.includes('delete') && c.args.some((a) => a.includes(key)));
+  assert.equal(dels.length, 3, 'שלושת המיקומים נמחקים — ' + JSON.stringify(dels.map((d) => d.args)));
+  assert.ok(dels.some((d) => d.args.some((a) => a.startsWith('HKLM\\') && !a.includes('WOW6432Node'))),
+    'המפתח ב-HKLM');
+  assert.ok(dels.some((d) => d.args.some((a) => a.includes('WOW6432Node'))), 'המפתח ב-WOW6432Node');
+  assert.ok(dels.some((d) => d.args.some((a) => a.startsWith('HKCU\\'))), 'המפתח ב-HKCU');
+
+  // ללא הרשאות מנהל לא נוגעים ברישום
+  m.cleanup();
+  const m2 = loadMain({});
+  createAppDir(m2);
+  await m2.ready();
+  const dels2 = m2.state.execCalls.filter((c) => c.cmd === 'reg' && c.args.includes('delete'));
+  assert.equal(dels2.length, 0, 'ללא הרשאות מנהל אין מחיקת רשומת הסרה');
+  m2.cleanup();
+});
+
+test('uninstall: הסרה כותבת אסימון חד-פעמי ומעבירה אותו ל-Uninstaller', async () => {
+  // ה-Uninstaller מסרב לפעול ללא האסימון — כך שגם הפעלה ישירה של
+  // Uninstall.exe (מחוץ לתוכנה) אינה יכולה להסיר את התוכנה.
+  const uninstallerPath = path.join(os.tmpdir(), 'bhz-uninst-token.exe');
+  fs.writeFileSync(uninstallerPath, '');
+  try {
+    const m = loadMain({ uninstallerPath });
+    await m.ready();
+    const res = await m.ipcHandlers.get('app:uninstall')({}, undefined);
+    assert.ok(res.ok, 'הסרה מתוך התוכנה מותרת: ' + JSON.stringify(res));
+
+    const tokenFile = path.join(process.env.PROGRAMDATA, 'BenHazmanim', 'uninstall.token');
+    assert.ok(fs.existsSync(tokenFile), 'קובץ האסימון נכתב בנתיב המשותף');
+    const token = fs.readFileSync(tokenFile, 'utf8').trim();
+    assert.ok(token.length >= 32, 'אסימון אקראי באורך תקין');
+
+    const spawn = m.state.spawnCalls.find((s) => s.cmd === uninstallerPath);
+    assert.ok(spawn, 'ה-Uninstaller הופעל');
+    assert.ok(spawn.args.includes('/S'), 'הפעלה שקטה');
+    const tokenArg = spawn.args.find((a) => a.startsWith('/TOKEN='));
+    assert.ok(tokenArg, 'האסימון מועבר בשורת הפקודה: ' + JSON.stringify(spawn.args));
+    assert.equal(tokenArg.slice('/TOKEN='.length), token, 'האסימון בשורת הפקודה תואם לקובץ');
+    m.cleanup();
+  } finally {
+    try { fs.unlinkSync(uninstallerPath); } catch { /* ignore */ }
+  }
+});
+
+test('uninstall: ההסרה מסתיימת במלואה גם כשדגל העצירה נכתב בתחילת התהליך (מירוץ מוניטור)', async () => {
+  // ה-handler כותב quit.flag כבר בתחילת ההסרה (עבור השומר המערכתי). בלי
+  // התיקון, מוניטור דגל העצירה של האפליקציה הראשית (כל 3 שניות) היה רואה
+  // את הדגל וסוגר את התהליך באמצע — לפני כתיבת האסימון, הסרת רישומי
+  // ההפעלה והפעלת ה-Uninstaller. התיקון מסמן isQuitting לפני כתיבת הדגל,
+  // כך שהמוניטור מדלג עליו וההסרה רצה עד הסוף.
+  const uninstallerPath = path.join(os.tmpdir(), 'bhz-uninst-race.exe');
+  fs.writeFileSync(uninstallerPath, '');
+  try {
+    const m = loadMain({ uninstallerPath });
+    await m.ready();
+
+    const res = await m.ipcHandlers.get('app:uninstall')({}, undefined);
+    assert.ok(res.ok, 'ההסרה הושלמה: ' + JSON.stringify(res));
+
+    // דגל העצירה אכן נכתב בתחילת התהליך (הוא קיים אחריו) —
+    // ובכל זאת ההסרה המשיכה עד הסוף ולא נקטעה באמצע.
+    const quitFlag = path.join(process.env.PROGRAMDATA, 'BenHazmanim', 'quit.flag');
+    assert.ok(fs.existsSync(quitFlag), 'דגל העצירה נכתב עבור השומר המערכתי');
+
+    // שלבי ההסרה שאחרי כתיבת הדגל — כולם בוצעו:
+    const tokenFile = path.join(process.env.PROGRAMDATA, 'BenHazmanim', 'uninstall.token');
+    assert.ok(fs.existsSync(tokenFile), 'קובץ האסימון נכתב — התהליך לא נקטע לפניו');
+    const spawn = m.state.spawnCalls.find((s) => s.cmd === uninstallerPath);
+    assert.ok(spawn, 'ה-Uninstaller הופעל');
+    const regDels = m.state.execCalls.filter((c) => c.cmd === 'reg' && c.args.includes('delete'));
+    assert.ok(regDels.length > 0, 'רישומי ההפעלה הוסרו מהרישום');
+    const taskDels = m.state.execCalls.filter((c) => c.cmd === 'schtasks' && c.args.includes('/Delete'));
+    assert.ok(taskDels.length >= 2, 'שתי המשימות המתוזמנות נמחקו');
+    // האפליקציה נסגרה על ידי gracefulQuit של סוף התהליך
+    assert.equal(m.state.quitCalled, true, 'האפליקציה נסגרה בסוף ההסרה');
+    m.cleanup();
+  } finally {
+    try { fs.unlinkSync(uninstallerPath); } catch { /* ignore */ }
+  }
+});
+
+test('uninstall: אסימון הסרה ישן מנוקה באתחול הבא', async () => {
+  const m = loadMain({});
+  // אסימון ישן שנותר (למשל מהסרה שבוטלה) — חייב להימחק באתחול,
+  // אחרת כל אחד יוכל להריץ את Uninstall.exe עם קובץ ישן
+  fs.mkdirSync(path.join(process.env.PROGRAMDATA, 'BenHazmanim'), { recursive: true });
+  fs.writeFileSync(path.join(process.env.PROGRAMDATA, 'BenHazmanim', 'uninstall.token'), 'stale-token');
+  await m.ready();
+  assert.equal(fs.existsSync(path.join(process.env.PROGRAMDATA, 'BenHazmanim', 'uninstall.token')), false,
+    'אסימון ישן מנוקה באתחול');
   m.cleanup();
 });
 
@@ -1095,6 +1304,46 @@ test('update:download rejects metadata without SHA-256', async () => {
   }
 });
 
+test('update:download rejects a tampered installer (SHA-256 mismatch)', async () => {
+  // ליבת ההבטחה של גרסה 1.5.8: הקובץ שהורד נבדק מול ה-hash שפורסם
+  // ב-version.json. גם EXE תקין לחלוטין (MZ, גודל סביר) שטביעתו שונה
+  // מהפורסם — חייב להידחות, להימחק מהדיסק, בלי הפעלת מתקין ובלי סגירת
+  // התוכנה. בלעדיו, מתקין שהוחלף בדרך (Man-in-the-Middle / שחרור פגום)
+  // היה מורץ בשקט.
+  const real = fakeInstallerBytes(7);
+  const tampered = fakeInstallerBytes(9); // EXE תקין אחר — טביעה שונה
+  const realHash = fakeInstallerHash(real);
+  assert.notEqual(realHash, fakeInstallerHash(tampered), 'דמה: שני הקבצים שונים');
+  fetchMock = async (url) => {
+    const api = githubApiRelease(url);
+    if (api) return api;
+    if (url.includes('raw.githubusercontent.com')) {
+      return { ok: true, json: async () => ({ version: '9.9.9', sha256: realHash }) };
+    }
+    if (url.includes('releases/download/v9.9.9/Setup.9.9.9.exe')) {
+      // ההורדה חוזרת עם קובץ שונה ממה שה-metadata מבטיח
+      return { ok: true, headers: { get: () => String(tampered.length) }, body: fakeStream([tampered]) };
+    }
+    throw new Error('unexpected fetch: ' + url);
+  };
+  try {
+    const m = loadMain({});
+    await m.ready();
+    const res = await m.ipcHandlers.get('update:download')();
+    assert.equal(res.ok, false, 'מתקין שטביעתו אינה תואמת חייב להידחות: ' + JSON.stringify(res));
+    assert.match(res.error || '', /טביעת העדכון אינה תואמת/);
+    assert.equal(m.state.quitCalled, false, 'אסור לסגור את התוכנה על קובץ מזויף');
+    assert.equal(m.state.spawnCalls.filter((s) => s.args && s.args.includes('/S')).length, 0,
+      'אסור להריץ מתקין שטביעתו אינה תואמת');
+    // הקובץ החלקי נמחק — לא משאירים EXE לא מאומת על הדיסק
+    const dest = path.join(m.tmpRoot, 'app', 'BenHazmanim-Setup-9.9.9.exe');
+    assert.equal(fs.existsSync(dest), false, 'הקובץ שהורד נמחק מהדיסק');
+    m.cleanup();
+  } finally {
+    fetchMock = null;
+  }
+});
+
 test('update:download rejects download URLs outside the official repo', async () => {
   const installer = fakeInstallerBytes();
   const installerHash = fakeInstallerHash(installer);
@@ -1472,6 +1721,35 @@ function guardEnv(m) {
 
 const guardTamperLog = () => path.join(process.env.PROGRAMDATA, 'BenHazmanim', 'tamper.log');
 
+// כתיבת מניפסט שלמות ידני לתיקייה — כמו זה שהתוכנה כותבת (integrity.json).
+// האופציה includeUninstaller מדמה מניפסט "ישן" (מגרסה שקדמה לשינוי) שבו
+// מתקין ההסרה טרם נכלל — התרחיש שבו רק restoreUninstaller הממוקד מזהה
+// את המחיקה.
+function writeGuardManifest(dir, opts) {
+  const crypto = require('crypto');
+  const o = opts || {};
+  const files = [path.join(dir, 'package.json'), path.join(dir, path.basename(process.execPath))];
+  if (o.includeUninstaller !== false) {
+    try {
+      for (const name of fs.readdirSync(dir)) {
+        if (/^Uninstall .*\.exe$/i.test(name)) files.push(path.join(dir, name));
+      }
+    } catch { /* ignore */ }
+  }
+  const entries = [];
+  for (const file of files) {
+    if (!fs.existsSync(file) || !fs.statSync(file).isFile()) continue;
+    const st = fs.statSync(file);
+    entries.push({
+      path: path.relative(dir, file),
+      size: st.size,
+      mtimeMs: st.mtimeMs,
+      sha256: crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex')
+    });
+  }
+  fs.writeFileSync(path.join(dir, 'integrity.json'), JSON.stringify({ version: '9.9.9', files: entries }));
+}
+
 test('system watchdog: restores deleted install dir from protected copy', async () => {
   const m = makeMock({ elevate: true });
   const { appDir } = guardEnv(m);
@@ -1485,7 +1763,71 @@ test('system watchdog: restores deleted install dir from protected copy', async 
     assert.ok(fs.existsSync(path.join(appDir, path.basename(process.execPath))), 'קובץ ההרצה שוחזר');
     const tamper = fs.readFileSync(guardTamperLog(), 'utf8');
     assert.match(tamper, /install-dir-restored/, 'אירוע החבלה נרשם ליומן');
+    // השומר מרים זמנית את איסור המחיקה לפני השחזור, ומחזיר אותו אחריו
+    const lift = m.state.execCalls.find((c) => c.cmd === 'icacls' && c.args.includes('/remove:d')
+      && c.args.some((a) => a.includes(appDir)));
+    assert.ok(lift, 'השומר מרים את איסור המחיקה לפני שחזור תיקיית ההתקנה');
+    const reharden = m.state.execCalls.find((c) => c.cmd === 'icacls' && c.args.includes(appDir)
+      && c.args.includes('/deny') && c.args.some((a) => a.includes('DE,DC')));
+    assert.ok(reharden, 'לאחר השחזור איסור המחיקה מוחזר לתיקיית ההתקנה');
   });
+});
+
+test('system watchdog: restores deleted uninstaller from the protected copy', async () => {
+  // מחיקת מתקין ההסרה בלבד (בלי לגעת בשאר הקבצים) הופכת את ההסרה החוקית
+  // לבלתי אפשרית. השומר המערכתי חייב לשחזר אותו מהעותק המוגן — כך שגם אחרי
+  // ניסיון חבלה כזה ההסרה מהתוכנה ממשיכה לעבוד. המניפסט כאן הוא "ישן"
+  // (ללא ה-Uninstaller) — התרחיש שבו רק השחזור הממוקד מזהה את המחיקה.
+  const m = makeMock({ elevate: true });
+  const { appDir, pd } = guardEnv(m);
+  const uninstName = 'Uninstall בין הזמנים.exe';
+  // מיישרים את קובץ ההרצה בעותק המוגן לזה של תיקיית ההתקנה — כך שהמניפסט
+  // יאומת מול תיקיית ההתקנה, והיחיד שחסר יהיה רק מתקין ההסרה (והנתיב
+  // הממוקד restoreUninstaller הוא שישחזר אותו, לא שחזור מלא).
+  fs.writeFileSync(path.join(pd, path.basename(process.execPath)),
+    fs.readFileSync(path.join(appDir, path.basename(process.execPath))));
+  // המתקין קיים בעותק המוגן (כמו אחרי התקנה) — ונמחק מתיקיית ההתקנה
+  fs.writeFileSync(path.join(pd, uninstName), 'uninstaller-bytes');
+  // מניפסט "ישן" (ללא ה-Uninstaller) — תרחיש השדרוג שבו רק השחזור הממוקד מזהה
+  writeGuardManifest(pd, { includeUninstaller: false });
+  assert.equal(fs.existsSync(path.join(appDir, uninstName)), false, 'המתקין נמחק מתיקיית ההתקנה');
+
+  await withSystemWatchdogArg(m, async () => {
+    await m.ready(); // ה-check() הראשון רץ מיד — משחזר
+    assert.ok(fs.existsSync(path.join(appDir, uninstName)), 'מתקין ההסרה שוחזר מהעותק המוגן');
+    assert.equal(fs.readFileSync(path.join(appDir, uninstName), 'utf8'), 'uninstaller-bytes',
+      'התוכן שוחזר נכון');
+    const tamper = fs.readFileSync(guardTamperLog(), 'utf8');
+    assert.match(tamper, /uninstaller-restored/, 'אירוע השחזור נרשם ליומן החבלה');
+  });
+  m.cleanup();
+});
+
+test('main: מתקין הסרה חסר משוחזר באתחול (שחזור ממוקד)', async () => {
+  // גם האפליקציה עצמה (בהרצה מוגבהת) מוודאת באתחול שמתקין ההסרה קיים —
+  // כך שההסרה החוקית זמינה מיד, לא רק בתוך 10 שניות של השומר.
+  const m = loadMain({ elevate: true });
+  const appDir = createAppDir(m);
+  const pd = protectedDir(m);
+  fs.mkdirSync(pd, { recursive: true });
+  fs.writeFileSync(path.join(pd, 'package.json'), JSON.stringify({ name: 'ben-hazmanim', version: '9.9.9' }), 'utf8');
+  fs.writeFileSync(path.join(pd, path.basename(process.execPath)), 'protected-exe');
+  const uninstName = 'Uninstall בין הזמנים.exe';
+  fs.writeFileSync(path.join(pd, uninstName), 'uninstaller-bytes');
+  // מניפסט תקין (עם ה-Uninstaller) — כך שהעותק המוגן לא ירענן וימחק אותו
+  writeGuardManifest(pd);
+  const machineDir = path.join(process.env.PROGRAMDATA, 'BenHazmanim');
+  fs.mkdirSync(machineDir, { recursive: true });
+  fs.writeFileSync(path.join(machineDir, 'install.json'), JSON.stringify({ exe: 'x', dir: appDir }), 'utf8');
+  fs.writeFileSync(path.join(machineDir, 'settings.json'), '{}', 'utf8');
+
+  assert.equal(fs.existsSync(path.join(appDir, uninstName)), false, 'המתקין חסר באתחול');
+  await m.ready();
+  assert.ok(fs.existsSync(path.join(appDir, uninstName)), 'מתקין ההסרה שוחזר באתחול');
+  assert.equal(fs.readFileSync(path.join(appDir, uninstName), 'utf8'), 'uninstaller-bytes');
+  const tamper = fs.readFileSync(guardTamperLog(), 'utf8');
+  assert.match(tamper, /uninstaller-restored/, 'אירוע השחזור נרשם ליומן החבלה');
+  m.cleanup();
 });
 
 test('system watchdog: restores deleted protected copy from install dir', async () => {

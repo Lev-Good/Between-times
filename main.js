@@ -669,6 +669,11 @@ function showBlockWindows(status) {
 function focusBlockWindows() {
   // בזמן חלון אימות היציאה — לא לגנוב את המיקוד מההורה (אחרת אי אפשר להקליד סיסמה)
   if (quitPromptOpen()) return;
+  // חלון ההגדרות פתוח (למשל כדי לתקן קובץ הגדרות פגום, לשחזר גיבוי או
+  // להגדיר סיסמה בזמן חסימה) — לא לגנוב ממנו את הפוקוס, אחרת אי אפשר
+  // להקליד או ללחוץ בתוכו. מסכי החסימה המלאים נשארים מעל כל שאר המסך;
+  // רק המשתמש בחלון ההגדרות עצמו לא מופרע כל כמה שניות.
+  if (win && !win.isDestroyed() && win.isVisible() && !win.isMinimized()) return;
   blockWins.forEach((bw) => {
     if (bw && !bw.isDestroyed()) {
       bw.show();
@@ -681,6 +686,9 @@ function focusBlockWindows() {
 function hideBlockWindows() {
   blockWins.forEach((bw) => { if (bw && !bw.isDestroyed()) bw.destroy(); });
   blockWins = [];
+  // החסימה הסתיימה — חלון ההגדרות חוזר להיות חלון רגיל (אם הורם מעל
+  // מסכי החסימה בזמן תיקון הגדרות, הוא כבר לא צריך לצוף מעל הכל).
+  if (win && !win.isDestroyed()) { try { win.setAlwaysOnTop(false); } catch { /* ignore */ } }
 }
 
 /* ================= חסימת קיצורי מקשים ================= */
@@ -1604,6 +1612,10 @@ function showQuitPrompt() {
 
 function showMainWindow() {
   if (!win || win.isDestroyed()) createMainWindow();
+  // בזמן חסימה (כולל קובץ הגדרות פגום) חלון ההגדרות חייב להופיע מעל מסכי
+  // החסימה — אחרת אי אפשר לתקן את ההגדרות ולצאת מהחסימה. ברגע שהחסימה
+  // מסתיימת (hideBlockWindows / קריאה הבאה) הוא חוזר להיות חלון רגיל.
+  try { win.setAlwaysOnTop(!!isBlockedNow(), 'screen-saver'); } catch { /* ignore */ }
   if (win.isMinimized()) win.restore();
   win.show();
   win.focus();
@@ -1763,6 +1775,15 @@ function integrityTargets(dir) {
     path.join(dir, 'resources', 'app', 'preload.js'),
     path.join(dir, 'resources', 'app', 'scheduler.js')
   ];
+  // מתקין ההסרה (Uninstall *.exe) חייב להיכלל במניפסט השלמות: בלעדיו ההסרה
+  // החוקית מהתוכנה נשברת. מחיקה/פגיעה שלו לבדה נחשבת לפגיעה בשלמות
+  // תיקיית ההתקנה ומפעילה שחזור מלא — ובנוסף קיים שחזור ממוקד מהיר
+  // (restoreUninstaller) בשומר המערכתי.
+  try {
+    for (const name of fs.readdirSync(dir)) {
+      if (/^Uninstall .*\.exe$/i.test(name)) candidates.push(path.join(dir, name));
+    }
+  } catch { /* ignore */ }
   const seen = new Set();
   return candidates.filter((file) => {
     if (!file || seen.has(file) || !fs.existsSync(file)) return false;
@@ -1839,33 +1860,167 @@ function protectedVersion() {
   } catch { return ''; }
 }
 
-// הרשאות העותק המוגן: בעלות של Administrators, קריאה/הרצה בלבד למשתמשים
-// רגילים (ללא מחיקה וללא כתיבה). משתמשים ב-ALLOW בלבד (ולא DENY) כדי
-// שהמתקין המוגבה יוכל להחליף קבצים בעדכון, והבעלות מועברת למנהלים כדי
-// שמשתמש רגיל לא יוכל להחזיר לעצמו שליטה על התיקייה.
+// הרשאות העותק המוגן ותיקיית ההתקנה: בעלות של Administrators, קריאה/הרצה
+// בלבד למשתמשים רגילים, ואיסור מחיקה/שינוי שם לכולם — כולל למנהלים.
+// כך מחיקה פשוטה של קבצי התוכנה (Explorer, del, סקריפטים) נכשלת עם
+// "Access denied" גם בהרצה מוגבהת.
+//
+// הגבלה כנה: הרשאה זו אינה מוחלטת. מנהל החלטי יכול תמיד להשתלט על התיקייה
+// (Take Ownership) ולאפס את ההרשאות — זו מגבלת Windows עצמה, שנועדה כך
+// כדי שמנהל המערכת יוכל תמיד לתקן את המערכת. על איסור המחיקה נוספת שכבת
+// ההגנה של שומר-השער המערכתי, שמשחזר קבצים שנמחקו בתוך שניות ורושם אירוע
+// חבלה, כך שמחיקה "מצליחה" לא משביתה את האכיפה בפועל.
+//
+// עדכונים, שחזורים והסרה מחליפים קבצים — ולכן הם מרימים זמנית את איסור
+// המחיקה (liftDirProtection) לפני החלפת הקבצים ומחזירים אותו מיד אחריה
+// (harden*). בלי ההרמה הזו עדכון אוטומטי או שחזור של השומר היו נחסמים.
 function runAclCommand(cmd, args) {
   return new Promise((resolve) => {
     try { execFile(cmd, args, () => resolve()); } catch { resolve(); }
   });
 }
+// כמו runAclCommand אבל מחזיר true/false לפי הצלחת הפקודה (קוד יציאה 0)
+function runAclCommandOk(cmd, args) {
+  return new Promise((resolve) => {
+    try { execFile(cmd, args, (err) => resolve(!err)); } catch { resolve(false); }
+  });
+}
+
+// הסרת איסור המחיקה מתיקייה — לפני החלפת קבצים (עדכון/שחזור/הסרה).
+// /remove:d מסיר רק את הרכיבים מסוג Deny של Everyone; ההרשאות הרגילות נשארות.
+function liftDirProtection(dir) {
+  return runAclCommand('icacls', [dir, '/remove:d', '*S-1-1-0', '/T', '/C']);
+}
+
+// איסור מחיקה ושינוי שם (Delete + DeleteChild) לכולם — כולל מנהלים.
+// Deny גובר על Allow ב-Windows, ולכן גם הרשאת Full של מנהלים אינה עוקפת אותו.
+function denyDeleteAcl(dir) {
+  return runAclCommand('icacls', [dir, '/deny', '*S-1-1-0:(OI)(CI)(DE,DC)', '/T', '/C']);
+}
+
+// הוצאת קובץ בודד מתחולת איסור המחיקה. משמשת לגיבוי ההגדרות: הוא נכתב מחדש
+// בכל שמירה ב-rename אטומי (פעולת מחיקה ברמת הקובץ) — בלי החרגה זו שמירת
+// ההגדרות הייתה נחסמת תחת האיסור. רמת ההגנה שלו נשארת כמו קודם (מנהל יכול).
+async function excludeFileFromDeny(file) {
+  if (!isWin || !isElevated() || !file) return;
+  // זהירות: אסור להעביר (OI)(CI) ל-/grant:r כשהמטרה היא קובץ בודד —
+  // הסימונים האלה על קובץ מרוקנים את ה-DACL שלו (נשאר PAI ללא ACEs)
+  // ואף אחד — כולל SYSTEM — לא יכול לקרוא/להחליף את הקובץ. לקובץ
+  // נותנים הרשאות ישירות, בלי סימוני ירושה.
+  await runAclCommand('icacls', [file, '/inheritance:r',
+    '/grant:r', '*S-1-5-32-545:R',
+    '/grant:r', '*S-1-5-32-544:F',
+    '/grant:r', '*S-1-5-18:F']);
+}
+
+// הגדרת הרשאות עץ תיקייה (ללא איסור המחיקה) — בעלות למנהלים + הרשאות.
+//
+// אזהרה חשובה — למה לא משתמשים ב-/T עם /grant:r ו-(OI)(CI): הפעלת
+// icacls עם /grant:r וסימוני ירושה (OI)(CI) על קבצים (דרך /T) מרוקנת את
+// ה-DACL של כל קובץ (נשאר רק PAI ללא ACEs) — והתוצאה היא שאף אחד — כולל
+// SYSTEM ומנהלים — לא יכול לקרוא או להריץ את הקבצים (נבדק אמפירית על
+// ווינדוס 11). לכן מקשחים בשני שלבים: (1) התיקייה עצמה מקבלת הרשאות
+// מורשות (בלי /T), ו-(2) כל מה שבתוכה מאופס לירושה (icacls dir\* /reset /T)
+// כך שהילדים יורשים את ההרשאות מהתיקייה. איסור המחיקה מתווסף בנפרד
+// (denyDeleteAcl) — הוא בטוח עם /T.
+async function hardenAclTree(dir) {
+  if (!dir) return;
+  await runAclCommand('icacls', [dir, '/inheritance:r',
+    '/grant:r', '*S-1-5-32-545:(OI)(CI)RX',
+    '/grant:r', '*S-1-5-32-544:(OI)(CI)F',
+    '/grant:r', '*S-1-5-18:(OI)(CI)F']);
+  await runAclCommand('icacls', [path.join(dir, '*'), '/reset', '/T', '/C']);
+  await verifyAclHealth(dir);
+}
+
+// רשת ביטחון אחרי הקשחה: כל קובץ בעץ חייב להישאר קריא. אם קובץ שהיה נעול בזמן
+// ההקשחה נשאר עם DACL ריק (PAI ללא ACEs — אף אחד לא יכול לקרוא אותו, אפילו לא
+// SYSTEM), מנסים לתקן את ה-DACL שלו ישירות (בלי סימוני ירושה — התבנית שמשחיתה
+// קבצים), ואם גם זה נכשל רושמים אירוע חבלה כדי שלא יעבור בשקט.
+//
+// הבחנה קריטית (נבדקה אמפירית): קבצים שהאפליקציה טוענת תוך כדי ריצה (למשל קבצי
+// .pak ש-Chromium ממפה באתחול) עלולים להיות נעולים לרגע — בדיקת גישה נכשלת על
+// קובץ נעול גם כשההרשאות שלו תקינות לחלוטין. המבדיל בין "נעול" ל"פגום": שאילתת
+// icacls על הקובץ — על קובץ נעול עם DACL תקין icacls מצליח לקרוא את ההרשאות
+// (קוד יציאה 0), בעוד על קובץ עם DACL ריק הוא נכשל. רק כשגם ה-DACL אינו קריא
+// מטפלים ומדווחים — כך לא נוצר רעש ביומן החבלה על קבצים פשוט נעולים.
+async function verifyAclHealth(dir) {
+  if (!dir) return;
+  const readable = (full) => {
+    try { fs.accessSync(full, fs.constants.R_OK); return true; } catch { return false; }
+  };
+  const checkFile = async (full) => {
+    if (readable(full)) return;
+    // לא קריא כרגע — אבל אם ה-DACL עצמו קריא (icacls מצליח), זה קובץ נעול
+    // עם הרשאות תקינות — לא פגיעה, מדלגים בשקט.
+    if (await runAclCommandOk('icacls', [full])) return;
+    // ה-DACL עצמו פגום (לא קריא אפילו ל-icacls) — מנסים לתקן ישירות
+    await runAclCommand('icacls', [full, '/inheritance:r',
+      '/grant:r', '*S-1-5-32-545:R',
+      '/grant:r', '*S-1-5-32-544:F',
+      '/grant:r', '*S-1-5-18:F']);
+    logTamper(readable(full) ? 'acl-repaired' : 'acl-unreadable');
+  };
+  const walk = async (d) => {
+    let entries;
+    try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
+    for (const ent of entries) {
+      const full = path.join(d, ent.name);
+      if (ent.isDirectory()) await walk(full);
+      else if (ent.isFile()) await checkFile(full);
+    }
+  };
+  try { await walk(dir); } catch { /* ignore */ }
+}
+
+// הקשחת עץ תיקייה: בעלות למנהלים + הרשאות + איסור מחיקה לכולם
+async function hardenDirTree(dir) {
+  if (!dir) return;
+  await runAclCommand('takeown', ['/f', dir, '/a', '/r', '/d', 'y']);
+  await hardenAclTree(dir);
+  await denyDeleteAcl(dir);
+}
+
 async function hardenMachineDir() {
   if (!isWin || !isElevated()) return;
   const dir = machineDir();
-  const steps = [
-    ['takeown', ['/f', dir, '/a']],
-    ['icacls', [dir, '/inheritance:r', '/grant:r', '*S-1-5-32-545:(OI)(CI)RX', '/grant:r', '*S-1-5-32-544:(OI)(CI)F', '/grant:r', '*S-1-5-18:(OI)(CI)F', '/T', '/C']]
-  ];
-  for (const [cmd, args] of steps) await runAclCommand(cmd, args);
+  await runAclCommand('takeown', ['/f', dir, '/a']);
+  await hardenAclTree(dir);
+  // התיקייה המשותפת מכילה את העותק המוגן — האיפוס לירושה (dir\* /reset)
+  // מסיר זמנית את איסור המחיקה שלו; מקשחים אותו שוב מיד כדי שלא יישאר
+  // ללא הגנה גם לרגע.
+  if (fs.existsSync(protectedAppDir())) await hardenProtectedCopy();
+}
+
+// הקשחת תיקיית ההתקנה עצמה (התיקייה הגלויה שהורה יכול למחוק) — כולל איסור
+// מחיקה. רצים מהעותק המוגן? תיקיית ההתקנה האמיתית ידועה מתוך install.json.
+async function hardenInstallDir() {
+  if (!isWin || !isElevated()) return;
+  let dir = installSourceDir();
+  if (dir && path.resolve(dir) === path.resolve(protectedAppDir())) {
+    const info = installInfo();
+    dir = (info && info.dir) || null;
+  }
+  await hardenDirTree(dir);
 }
 
 async function hardenProtectedCopy() {
   if (!isWin || !isElevated()) return;
   const dir = protectedAppDir();
-  const steps = [
-    ['takeown', ['/f', dir, '/a', '/r', '/d', 'y']],
-    ['icacls', [dir, '/inheritance:r', '/grant:r', '*S-1-5-32-545:(OI)(CI)RX', '/grant:r', '*S-1-5-32-544:(OI)(CI)F', '/grant:r', '*S-1-5-18:(OI)(CI)F', '/T', '/C']]
-  ];
-  for (const [cmd, args] of steps) await runAclCommand(cmd, args);
+  // לפני איסור המחיקה — לוודא שקובץ גיבוי ההגדרות קיים. הוא נכתב ב-rename
+  // אטומי, וכתיבה כזו תחת איסור מחיקה אינה אפשרית (הוא יוחרג מיד אחר כך).
+  try {
+    if (!fs.existsSync(protectedSettingsFile())) {
+      const mf = machineSettingsFile();
+      if (fs.existsSync(mf)) fs.copyFileSync(mf, protectedSettingsFile());
+      else atomicWrite(protectedSettingsFile(), '{}');
+    }
+  } catch { /* ignore */ }
+  await runAclCommand('takeown', ['/f', dir, '/a', '/r', '/d', 'y']);
+  await hardenAclTree(dir);
+  await denyDeleteAcl(dir);
+  // הגיבוי נכתב מחדש בכל שמירת הגדרות — יוצא מתחולת האיסור
+  await excludeFileFromDeny(protectedSettingsFile());
 }
 
 // יצירה/רענון של העותק המוגן — רק בהרצה מוגבהת ורק כשהגרסה השתנתה.
@@ -1875,16 +2030,24 @@ async function ensureProtectedCopy() {
   const src = installSourceDir();
   try {
     // כשהמשימה כבר מריצה את העותק המוגן — אסור להעתיק אותו לעצמו או
-    // לדרוס את install.json עם הנתיב המוגן במקום הנתיב המקורי.
-    if (isProtectedRuntime()) return fs.existsSync(sourceExecutable(dst));
+    // לדרוס את install.json עם הנתיב המוגן במקום הנתיב המקורי. בכל מקרה
+    // מקפידים שתיקיית ההתקנה הגלויה תישאר מוקשחת (איסור מחיקה).
+    if (isProtectedRuntime()) {
+      await hardenInstallDir();
+      return fs.existsSync(sourceExecutable(dst));
+    }
     if (!fs.existsSync(sourceExecutable(src))) return false;
     if (fs.existsSync(sourceExecutable(dst)) && appVersion() && appVersion() === protectedVersion() && protectedCopyIntegrity()) {
       await hardenMachineDir();
+      await hardenInstallDir();
       await hardenProtectedCopy();
       writeProtectedSettingsBackup();
       saveInstallInfo();
       return true; // העותק עדכני — אין צורך להעתיק שוב
     }
+    // רענון העותק המוגן — להרים זמנית את איסור המחיקה לפני החלפת הקבצים
+    // (ההקשחה שלהלן מחזירה אותו מיד אחרי ההעתקה).
+    await liftDirProtection(dst);
     fs.rmSync(dst, { recursive: true, force: true });
     fs.mkdirSync(dst, { recursive: true });
     // מעתיקים את כל שורש ההתקנה, כולל exe + resources\\app.asar.
@@ -1892,6 +2055,7 @@ async function ensureProtectedCopy() {
     if (!fs.existsSync(sourceExecutable(dst))) throw new Error('קובץ ההרצה לא הועתק');
     writeProtectedManifest();
     await hardenMachineDir();
+    await hardenInstallDir();
     await hardenProtectedCopy();
     writeProtectedSettingsBackup();
     saveInstallInfo();
@@ -2051,6 +2215,47 @@ function removeStartupEntries() {
 // (המיקום שבו electron-builder תמיד מניח אותו, עם נתיב Unicode אמין),
 // ורק אחר כך דרך רישום מרכז התוכניות (פלט reg query הוא ANSI — עלול
 // להשחית תווים עבריים בנתיב, ולכן הוא רק רשת ביטחון נוספת).
+// הסרה מותרת אך ורק מתוך התוכנה עצמה (עם סיסמת הורה) — ולא דרך "התקן והסר
+// תוכניות" / הגדרות Windows. שני מנגנונים אוכפים זאת:
+// 1) רשומת ההסרה מהרישום נמחקת בכל הפעלה מוגבהת — התוכנה כלל אינה מופיעה
+//    ברשימת התוכנות של Windows (המתקין יוצר את הרשומה מחדש בכל עדכון,
+//    וההרצה הראשונה מסירה אותה שוב).
+// 2) ה-Uninstaller של NSIS מסרב לפעול ללא אסימון חד-פעמי שהתוכנה כותבת
+//    רק אחרי אימות סיסמת ההורה (ראה app:uninstall ו-build/installer.nsh) —
+//    כך שגם הפעלה ישירה של Uninstall.exe נחסמת.
+//
+// מגבלה כנה: מנהל החלטי יכול להחזיר את רשומת ההסרה או ליצור אסימון בעצמו
+// (או פשוט למחוק את התיקיות) — זו מגבלת Windows, שמעניקה למנהל תמיד את
+// המילה האחרונה. המנגנונים כאן חוסמים את הנתיבים הפשוטים והרגילים.
+
+// מפתח ההסרה ב"התקן והסר תוכניות" נקבע דטרמיניסטית על ידי electron-builder:
+// UUID v5 של ה-appId מול namespace קבוע שלו (ראה NsisTarget.js).
+const UNINSTALL_NS_UUID = '50e065bc-3134-11e6-9bab-38c9862bdaf3';
+const APP_ID = 'com.levtov.benhazmanim';
+const uninstallTokenFile = () => path.join(machineDir(), 'uninstall.token');
+
+function uninstallRegistryKey() {
+  const h = crypto.createHash('sha1');
+  h.update(Buffer.from(UNINSTALL_NS_UUID.replace(/-/g, ''), 'hex'));
+  h.update(Buffer.from(APP_ID, 'utf8'));
+  const b = h.digest().subarray(0, 16);
+  b[6] = (b[6] & 0x0f) | 0x50; // גרסה 5 (SHA-1)
+  b[8] = (b[8] & 0x3f) | 0x80; // Variant RFC 4122
+  const hex = b.toString('hex');
+  return hex.slice(0, 8) + '-' + hex.slice(8, 12) + '-' + hex.slice(12, 16) + '-' + hex.slice(16, 20) + '-' + hex.slice(20, 32);
+}
+
+function removeUninstallRegistryEntries() {
+  if (!isWin || !isElevated()) return;
+  const key = uninstallRegistryKey();
+  const paths = [
+    'HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\' + key,
+    'HKLM\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\' + key,
+    'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\' + key
+  ];
+  for (const p of paths) execFile('reg', ['delete', p, '/f'], () => { /* ignore */ });
+}
+
 function findUninstaller() {
   const candidates = [];
   try {
@@ -2752,6 +2957,13 @@ function registerIpc() {
     if (!uninstaller) {
       return { ok: false, error: 'לא נמצא מתקין ההסרה — הסירו את התוכנה דרך "התקן והסר תוכניות" בלוח הבקרה' };
     }
+    // מסמנים שהתהליך "יוצא" כבר כאן — לפני כתיבת דגל העצירה. בלי זה,
+    // המוניטור הפנימי של האפליקציה (בודק כל 3 שניות) רואה את דגל העצירה
+    // שזה עתה נכתב וסוגר את התהליך (gracefulQuit) באמצע תהליך ההסרה —
+    // לפני שהאסימון נכתב, רישומי ההפעלה הוסרו וה-Uninstaller הופעל.
+    // עם isQuitting=true המוניטור מדלג על דגל העצירה וההסרה מסתיימת
+    // במלואה (gracefulQuit בסוף התהליך סוגר את האפליקציה כרגיל).
+    isQuitting = true;
     // דגל עצירה לשומר-השער המערכתי (רץ כ-SYSTEM) — כדי שלא ישחזר
     // קבצים ומשימות בזמן שה-Uninstaller מסיר אותם. נכתב במיקום המשותף
     // שהוא בודק, לפני שמתחילה ההסרה בפועל.
@@ -2762,6 +2974,26 @@ function registerIpc() {
     // לעצור את תהליך השומר בפועל לפני מחיקת התיקייה המוגנת. מחיקת המשימה
     // בלבד אינה מבטיחה שתהליך שכבר רץ יסתיים.
     await stopGuardTask();
+    // הרמת איסור המחיקה (שמוחל על תיקיית ההתקנה והעותק המוגן) — אחרת
+    // ה-Uninstaller לא יוכל למחוק את הקבצים. ההסרה היא פעולה חד-פעמית
+    // שאושרה בסיסמת הורה, ולכן אין צורך להחזיר את האיסור אחריה.
+    try {
+      const uninstallDir = (() => {
+        const info = installInfo();
+        return (info && info.dir) ? info.dir : path.dirname(uninstaller);
+      })();
+      await liftDirProtection(uninstallDir);
+      await liftDirProtection(protectedAppDir());
+    } catch { /* ignore */ }
+    // אסימון חד-פעמי להסרה: ה-Uninstaller של NSIS מסרב לפעול בלעדיו —
+    // כך שהסרה אפשרית רק מתוך התוכנה עצמה (אחרי אימות סיסמת ההורה), לא
+    // דרך "התקן והסר תוכניות" או הפעלה ישירה של Uninstall.exe. האסימון
+    // נכתב בנתיב המשותף ומועבר גם בשורת הפקודה, וניקה באתחול הבא.
+    const uninstallToken = crypto.randomBytes(16).toString('hex');
+    try {
+      fs.mkdirSync(machineDir(), { recursive: true });
+      fs.writeFileSync(uninstallTokenFile(), uninstallToken);
+    } catch { /* ignore */ }
     // 1) הסרת רישומי ההפעלה עם Windows (Registry + משימה מתוזמנת) —
     //    לפני הפעלת ה-Uninstaller, כדי שלא יישארו רישומים לאחר ההסרה.
     await removeStartupEntries();
@@ -2769,8 +3001,9 @@ function registerIpc() {
     await reconcileNetBlock(false);
     // 2) הפעלת ה-Uninstaller בשקט (מסיר קבצים, קיצורים ונתונים) —
     //    בתהליך נפרד (detached) כך שהוא ממשיך גם אחרי שהתוכנה נסגרת.
+    //    האסימון מועבר בשורת הפקודה — ה-Uninstaller משווה אותו לקובץ.
     try {
-      const child = spawn(uninstaller, ['/S'], { detached: true, stdio: 'ignore', windowsHide: true });
+      const child = spawn(uninstaller, ['/S', '/TOKEN=' + uninstallToken], { detached: true, stdio: 'ignore', windowsHide: true });
       child.on('error', () => { /* ignore */ });
       child.unref();
     } catch { /* ignore */ }
@@ -3205,6 +3438,9 @@ async function restoreProtectedCopy() {
           settingsBackup = fs.readFileSync(machineSettingsFile());
         }
       } catch { /* restore the application even if the backup is unreadable */ }
+      // הרמה זמנית של איסור המחיקה — אחרת השומר עצמו (מנהל) לא יוכל
+      // להחליף את הקבצים; ההקשחה שלהלן מחזירה את האיסור מיד.
+      await liftDirProtection(dst);
       fs.rmSync(dst, { recursive: true, force: true });
       fs.mkdirSync(dst, { recursive: true });
       fs.cpSync(info.dir, dst, { recursive: true });
@@ -3215,7 +3451,7 @@ async function restoreProtectedCopy() {
   }
 }
 
-function restoreInstallDir() {
+async function restoreInstallDir() {
   // תיקיית ההתקנה המקורית נמחקה — לשחזר מהעותק המוגן
   const info = installInfo();
   if (!info || !info.dir) return;
@@ -3224,11 +3460,45 @@ function restoreInstallDir() {
   if (srcOk && !dstOk) {
     logTamper('install-dir-restored');
     try {
+      // הרמה זמנית של איסור המחיקה — אחרת השומר (מנהל) לא יוכל להחליף
+      // את הקבצים; מיד אחרי ההעתקה מחזירים את ההקשחה.
+      await liftDirProtection(info.dir);
       fs.rmSync(info.dir, { recursive: true, force: true });
       fs.mkdirSync(info.dir, { recursive: true });
       fs.cpSync(protectedAppDir(), info.dir, { recursive: true });
+      await hardenDirTree(info.dir);
     } catch { /* ignore */ }
   }
+}
+
+// מתקין ההסרה (Uninstall *.exe) נמחק/נפגם מתיקיית ההתקנה — שחזור ממוקד
+// ומהיר מהעותק המוגן, כך שההסרה החוקית מהתוכנה תמשיך לעבוד גם אחרי ניסיון
+// חבלה. השומר המערכתי רץ כל 10 שניות; בנוסף המתקין כלול במניפסט השלמות,
+// כך שמחיקה שלו לבדה מפעילה גם שחזור מלא (restoreInstallDir). הכתיבה
+// מתבצעת במקום (אין צורך בהרמת איסור המחיקה — האיסור חל על מחיקה/שינוי
+// שם, לא על כתיבה; הקובץ החדש יורש את האיסור מהתיקייה).
+async function restoreUninstaller() {
+  if (!isWin || !isElevated()) return;
+  const info = installInfo();
+  if (!info || !info.dir) return;
+  const src = protectedAppDir();
+  const dst = info.dir;
+  if (!fs.existsSync(src) || !fs.existsSync(dst)) return;
+  try {
+    let restored = false;
+    for (const name of fs.readdirSync(src)) {
+      if (!/^Uninstall .*\.exe$/i.test(name)) continue;
+      const s = path.join(src, name);
+      const d = path.join(dst, name);
+      try {
+        if (!fs.existsSync(d) || fs.statSync(d).size !== fs.statSync(s).size) {
+          fs.copyFileSync(s, d);
+          restored = true;
+        }
+      } catch { /* קובץ נעול/תפוס — ינוסה שוב בסבב הבא */ }
+    }
+    if (restored) logTamper('uninstaller-restored');
+  } catch { /* ignore */ }
 }
 
 let lastMainTaskRun = 0;
@@ -3290,7 +3560,8 @@ async function runSystemWatchdog() {
       // קודם משחזרים את העותק שממנו השומר עצמו יכול להמשיך לעבוד,
       // ורק אחר כך את ההתקנה/ההגדרות התלויות בו.
       await restoreProtectedCopy();
-      restoreInstallDir();
+      await restoreInstallDir();
+      await restoreUninstaller();
       restoreSharedSettings();
       ensureGuardTasks();
       ensureInteractiveMain();
@@ -3367,6 +3638,16 @@ if (isSystemWatchdog) {
 
       // חסימת יצירת חשבונות חדשים במחשב (כשהתוכנה רצה עם הרשאות מנהל)
       applyAccountPolicies();
+
+      // הסרה מתוך "התקן והסר תוכניות" אינה רצויה — ההסרה היחידה היא מתוך
+      // התוכנה עצמה. למחוק את רשומת ההסרה מהרישום בכל הפעלה מוגבהת.
+      removeUninstallRegistryEntries();
+      // לוודא שמתקין ההסרה קיים (אם נמחק/נפגם — שחזור מהעותק המוגן), כדי
+      // שההסרה החוקית מהתוכנה תישאר זמינה. השומר המערכתי עושה זאת גם כל 10
+      // שניות; כאן זה מיידי עם האתחול.
+      await restoreUninstaller();
+      // ניקוי אסימון הסרה ישן מסשן קודם — האסימון תקף רק בזמן ההסרה עצמה
+      try { if (fs.existsSync(uninstallTokenFile())) fs.unlinkSync(uninstallTokenFile()); } catch { /* ignore */ }
 
       const isSmokeTest = process.argv.includes('--smoke-test');
       const isVerifyStartup = process.argv.includes('--verify-startup');

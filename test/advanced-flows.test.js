@@ -49,7 +49,8 @@ function makeMock(config) {
     windowsCreated: 0,
     windows: [],
     notifications: [],
-    tooltips: []
+    tooltips: [],
+    focusCalls: []      // קריאות focus() על חלונות — לבדיקת גניבת פוקוס
   };
 
   const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'bhz-adv-'));
@@ -105,6 +106,7 @@ function makeMock(config) {
       state.windowsCreated++;
       state.windows.push(this);
       this.title = (opts && opts.title) || null;
+      this.visible = !(opts && opts.show === false);
       this._listeners = {};
       this.webContents = {
         sent: [],
@@ -115,15 +117,16 @@ function makeMock(config) {
     isDestroyed() { return !!this._destroyed; }
     on(ev, cb) { (this._listeners[ev] = this._listeners[ev] || []).push(cb); }
     emit(ev, arg) { (this._listeners[ev] || []).forEach((l) => l(arg)); }
-    show() {}
-    focus() {}
-    hide() {}
+    show() { this.visible = true; }
+    focus() { state.focusCalls.push(this); }
+    hide() { this.visible = false; }
     destroy() { this._destroyed = true; this.emit('closed'); }
-    setAlwaysOnTop() {}
+    setAlwaysOnTop(flag) { this.alwaysOnTop = !!flag; }
     setVisibleOnAllWorkspaces() {}
     loadFile() {}
     restore() {}
     isMinimized() { return false; }
+    isVisible() { return !!this.visible; }
     setBackgroundColor() {}
   }
 
@@ -582,6 +585,230 @@ test('clock: configurationFault is reported on settings:get with configError fla
   const safe = await m.ipcHandlers.get('settings:get')();
   assert.equal(safe.configError, true, 'Settings should reflect configuration fault — got: ' + JSON.stringify(safe));
   assert.ok(safe.week && safe.week.length === 7);
+  m.cleanup();
+});
+
+test('clock: on config error the settings window can always be opened from the block screen (no PIN gate)', async () => {
+  // הבאג הקריטי שתוקן: מסך החסימה אמר "פתחו את ההגדרות כדי לתקן או לשחזר
+  // גיבוי" אבל הסתיר את כל הכפתורים — לא היה שום דרך לפתוח את ההגדרות.
+  const m = loadMain({});
+  const machineDir = path.join(process.env.PROGRAMDATA, 'BenHazmanim');
+  fs.mkdirSync(machineDir, { recursive: true });
+  fs.writeFileSync(path.join(machineDir, 'settings.json'), '{broken-json', 'utf8');
+  fs.writeFileSync(path.join(machineDir, 'install.json'), JSON.stringify({ dir: 'C:\\test' }), 'utf8');
+  await m.ready();
+
+  const st = await m.ipcHandlers.get('status:get')();
+  assert.equal(st.configError, true, 'Configuration fault should be flagged');
+  assert.equal(st.state, 'blocked', 'Configuration fault fails closed');
+
+  // הפעולה שהכפתור החדש במסך החסימה מבצע — חייבת להצליח תמיד
+  const opened = await m.ipcHandlers.get('settings:open')();
+  assert.equal(opened.ok, true, 'settings:open must work from the block screen on config error');
+
+  // בקובץ פגום אין PIN תקין — חלון ההגדרות חייב להיפתח בלי מסך כניסה,
+  // אחרת זו הייתה עוד דרך תקועה בלי מוצא.
+  const safe = await m.ipcHandlers.get('settings:get')();
+  assert.equal(safe.configError, true);
+  assert.equal(safe.pinSet, false);
+  assert.equal(safe.sessionUnlocked, true, 'no PIN gate when settings are broken');
+  const sess = await m.ipcHandlers.get('session:get')();
+  assert.equal(sess.unlocked, true, 'session must be open when there is no PIN');
+  m.cleanup();
+});
+
+test('clock: opening settings while blocked raises it above the block windows', async () => {
+  const m = loadMain({});
+  const machineDir = path.join(process.env.PROGRAMDATA, 'BenHazmanim');
+  fs.mkdirSync(machineDir, { recursive: true });
+  fs.writeFileSync(path.join(machineDir, 'settings.json'), '{broken-json', 'utf8');
+  fs.writeFileSync(path.join(machineDir, 'install.json'), JSON.stringify({ dir: 'C:\\test' }), 'utf8');
+  await m.ready();
+
+  await m.ipcHandlers.get('settings:open')();
+  const win = m.state.windows.find((w) => !w.blockDisplayId);
+  assert.ok(win, 'main window should exist');
+  assert.equal(win.alwaysOnTop, true, 'settings window must be raised while blocked');
+
+  // תיקון ההגדרות מסיים את החסימה — והחלון חייב לרדת מיד מהמצב הצף
+  // (hideBlockWindows מחזיר אותו להיות חלון רגיל, אחרת הוא היה מרחף
+  // מעל כל המסך גם כשהמחשב כבר פתוח).
+  const fixed = S.defaultSchedule();
+  fixed.enabled = false;
+  const saved = await m.ipcHandlers.get('settings:save')({}, fixed);
+  assert.equal(saved.ok, true, 'fixing the settings must succeed: ' + JSON.stringify(saved));
+  await new Promise((r) => setTimeout(r, 20)); // שהאכיפה האסינכרונית תסתיים
+  assert.equal(win.alwaysOnTop, false, 'settings window returns to normal once unblocked');
+  const remaining = m.state.windows.filter((w) => w.blockDisplayId && !w._destroyed);
+  assert.equal(remaining.length, 0, 'block windows are gone after the unblock');
+
+  // במצב רגיל (ללא חסימה) החלון לא נשאר צף מעל הכל
+  m.cleanup();
+  const m2 = loadMain({});
+  await m2.ready();
+  await m2.ipcHandlers.get('settings:open')();
+  const win2 = m2.state.windows.find((w) => !w.blockDisplayId);
+  assert.equal(win2.alwaysOnTop, false, 'settings window stays normal when not blocked');
+  m2.cleanup();
+});
+
+test('clock: block windows do not steal focus while the settings window is open', async () => {
+  const m = loadMain({});
+  const machineDir = path.join(process.env.PROGRAMDATA, 'BenHazmanim');
+  fs.mkdirSync(machineDir, { recursive: true });
+  fs.writeFileSync(path.join(machineDir, 'settings.json'), '{broken-json', 'utf8');
+  fs.writeFileSync(path.join(machineDir, 'install.json'), JSON.stringify({ dir: 'C:\\test' }), 'utf8');
+  await m.ready();
+  await new Promise((r) => setTimeout(r, 10)); // תנו לאכיפה הראשונית להסתיים
+
+  const st = await m.ipcHandlers.get('status:get')();
+  assert.equal(st.configError, true);
+  const blockWins = m.state.windows.filter((w) => w.blockDisplayId);
+  assert.ok(blockWins.length > 0, 'block windows should exist during config error');
+
+  // פתיחת חלון ההגדרות — מעכשיו אסור לגנוב ממנו את הפוקוס
+  await m.ipcHandlers.get('settings:open')();
+  m.state.focusCalls = [];
+
+  // block:set-bg מפעיל את לולאת האכיפה (enforce) — זה הרגע שבו מסכי
+  // החסימה היו חוזרים וגונבים את הפוקוס ממי שמתקן את ההגדרות.
+  await m.ipcHandlers.get('block:set-bg')('', 'blobs');
+  await new Promise((r) => setTimeout(r, 10));
+  const stolen = m.state.focusCalls.filter((w) => blockWins.includes(w));
+  assert.equal(stolen.length, 0, 'block windows must not steal focus while settings is open');
+  m.cleanup();
+});
+
+test('clock: fixing the settings from the block screen clears the fault and unblocks', async () => {
+  // התרחיש המלא: קובץ משותף פגום -> Fail Closed -> פותחים את ההגדרות מהמסך,
+  // משחזרים לוח תקין ושומרים -> השגיאה מתנקה והמחשב נפתח. בלי התיקון הזה
+  // המשתמש היה תקוע לנצח מאחורי מסך חסימה שאומר "פתחו את ההגדרות" בלי דרך.
+  const m = loadMain({ elevate: true });
+  const machineDir = path.join(process.env.PROGRAMDATA, 'BenHazmanim');
+  fs.mkdirSync(machineDir, { recursive: true });
+  fs.writeFileSync(path.join(machineDir, 'settings.json'), '{broken-json', 'utf8');
+  fs.writeFileSync(path.join(machineDir, 'install.json'), JSON.stringify({ dir: 'C:\\test' }), 'utf8');
+  await m.ready();
+
+  let st = await m.ipcHandlers.get('status:get')();
+  assert.equal(st.configError, true, 'Broken settings must fail closed');
+  assert.equal(st.state, 'blocked');
+
+  // המשתמש לוחץ על כפתור "פתחו את ההגדרות" במסך החסימה
+  const opened = await m.ipcHandlers.get('settings:open')();
+  assert.equal(opened.ok, true, 'settings:open must succeed from the block screen');
+
+  // בהגדרות אין PIN תקין (הקובץ נפגם) — הכניסה חופשית ומאפשרת תיקון
+  const safe = await m.ipcHandlers.get('settings:get')();
+  assert.equal(safe.configError, true);
+  assert.equal(safe.pinSet, false);
+
+  // שמירת לוח תקין (מצב לא חסום) מתקנת את הקובץ ומסירה את החסימה
+  const fixed = S.defaultSchedule();
+  fixed.enabled = false;
+  const saved = await m.ipcHandlers.get('settings:save')({}, fixed);
+  assert.equal(saved.ok, true, 'Valid save must be accepted — ' + JSON.stringify(saved));
+
+  st = await m.ipcHandlers.get('status:get')();
+  assert.equal(st.configError, false, 'configError must clear after a valid save');
+  assert.equal(st.state, 'allowed', 'machine must unblock once the settings are fixed');
+  const onDisk = JSON.parse(fs.readFileSync(path.join(machineDir, 'settings.json'), 'utf8'));
+  assert.equal(onDisk.enabled, false, 'fixed schedule must be persisted to the shared file');
+  m.cleanup();
+});
+
+test('clock: broken shared settings are recovered from the protected backup (no fail-closed)', async () => {
+  // הצד השני של Fail Closed: כשקיים עותק מוגן תקין (settings.backup.json),
+  // קובץ משותף פגום לא חוסם את המחשב — המדיניות משוחזרת מהגיבוי והאפליקציה
+  // ממשיכה לעבוד. בלי התיקון הזה כל נזק קל לקובץ היה נועל את המחשב
+  // למרות שיש עותק תקין זמין.
+  const m = loadMain({});
+  const machineDir = path.join(process.env.PROGRAMDATA, 'BenHazmanim');
+  fs.mkdirSync(machineDir, { recursive: true });
+  fs.writeFileSync(path.join(machineDir, 'settings.json'), '{broken-json', 'utf8');
+  fs.writeFileSync(path.join(machineDir, 'install.json'), JSON.stringify({ dir: 'C:\\test' }), 'utf8');
+  // גיבוי מוגן תקין — מדיניות פתוחה (enabled:false) עם PIN מוגדר
+  const backup = S.defaultSchedule();
+  backup.enabled = false;
+  backup.pinHash = S.sha256Hex('1234');
+  fs.mkdirSync(path.join(machineDir, 'app'), { recursive: true });
+  fs.writeFileSync(path.join(machineDir, 'app', 'settings.backup.json'), JSON.stringify(backup), 'utf8');
+  await m.ready();
+
+  const st = await m.ipcHandlers.get('status:get')();
+  assert.equal(st.configError, false, 'valid protected backup must prevent fail-closed: ' + JSON.stringify(st));
+  assert.equal(st.state, 'allowed', 'the machine runs on the recovered backup policy');
+  const safe = await m.ipcHandlers.get('settings:get')();
+  assert.equal(safe.configError, false);
+  assert.equal(safe.enabled, false, 'the recovered policy is the backup policy, not the default');
+  assert.equal(safe.pinSet, true, 'the recovered policy keeps its PIN');
+  m.cleanup();
+});
+
+test('clock: elevated run repairs the broken shared file from the protected backup (full recovery)', async () => {
+  // התרחיש המלא: קובץ משותף פגום + גיבוי מוגן תקין. בהרצה מוגבהת האפליקציה
+  // לא רק משחזרת את המדיניות מהגיבוי — היא גם כותבת בחזרה קובץ משותף
+  // מתוקן (saveSettings ב-loadSettings), כך שכל אתחול הבא קורא ישירות
+  // מקובץ תקין ולא נשען עוד על הגיבוי. בהרצה לא מוגבהת הקובץ נשאר פגום
+  // — כפי שבודקת הבדיקה הקודמת.
+  const m = loadMain({ elevate: true });
+  const machineDir = path.join(process.env.PROGRAMDATA, 'BenHazmanim');
+  fs.mkdirSync(machineDir, { recursive: true });
+  fs.writeFileSync(path.join(machineDir, 'settings.json'), '{broken-json', 'utf8');
+  fs.writeFileSync(path.join(machineDir, 'install.json'), JSON.stringify({ dir: 'C:\\test' }), 'utf8');
+  // גיבוי מוגן עם מדיניות מזוהה — כדי להוכיח שמה שנכתב בחזרה הוא הגיבוי,
+  // לא ברירת מחדל ולא שום מקור אחר.
+  const backup = S.defaultSchedule();
+  backup.enabled = false;
+  backup.pinHash = S.sha256Hex('1234');
+  backup.blockMessage = 'מדיניות משוחזרת מהגיבוי';
+  fs.mkdirSync(path.join(machineDir, 'app'), { recursive: true });
+  fs.writeFileSync(path.join(machineDir, 'app', 'settings.backup.json'), JSON.stringify(backup), 'utf8');
+  await m.ready();
+
+  // אפס שגיאות — האפליקציה רצה על המדיניות המשוחזרת מהגיבוי
+  const st = await m.ipcHandlers.get('status:get')();
+  assert.equal(st.configError, false, 'recovery must prevent fail-closed: ' + JSON.stringify(st));
+  assert.equal(st.state, 'allowed');
+  const safe = await m.ipcHandlers.get('settings:get')();
+  assert.equal(safe.configError, false);
+  assert.equal(safe.blockMessage, 'מדיניות משוחזרת מהגיבוי', 'the app runs the recovered backup policy');
+
+  // הקובץ המשותף תוקן על הדיסק — התוכן הוא הגיבוי עצמו
+  const repaired = JSON.parse(fs.readFileSync(path.join(machineDir, 'settings.json'), 'utf8'));
+  assert.equal(repaired.blockMessage, 'מדיניות משוחזרת מהגיבוי', 'repaired file carries the backup policy');
+  assert.equal(repaired.enabled, false, 'repaired file keeps the backup enabled flag');
+  assert.equal(repaired.pinHash, backup.pinHash, 'repaired file keeps the backup PIN');
+
+  // הגיבוי המוגן עצמו עודכן מהקובץ המתוקן ונשאר תקין
+  const backupAfter = JSON.parse(fs.readFileSync(path.join(machineDir, 'app', 'settings.backup.json'), 'utf8'));
+  assert.equal(backupAfter.enabled, false, 'the protected backup stays intact after repair');
+
+  // אירוע השחזור תועד ביומן הפעילות
+  const log = fs.readFileSync(path.join(m.tmpRoot, 'userData', 'activity.log'), 'utf8');
+  assert.ok(/settings-recovered/.test(log), 'recovery event must be logged: ' + log);
+  m.cleanup();
+});
+
+test('clock: deleted shared settings with install.json present fail closed (no fallback to a user file)', async () => {
+  // הקובץ המשותף נמחק לגמרי (לא רק פגום) — אבל ההתקנה עדיין מנוהלת
+  // (install.json קיים) ואין גיבוי מוגן: Fail Closed. גם קובץ משתמש תקין
+  // לא הופך למקור אמת — אחרת ילד היה יכול לעקוף את החסימה במחיקת הקובץ.
+  const user = S.defaultSchedule();
+  user.enabled = false; // אם קובץ המשתמש היה בשימוש, המחשב היה נפתח — אסור
+  const m = loadMain({ settings: user });
+  const machineDir = path.join(process.env.PROGRAMDATA, 'BenHazmanim');
+  fs.mkdirSync(machineDir, { recursive: true });
+  fs.writeFileSync(path.join(machineDir, 'install.json'), JSON.stringify({ dir: 'C:\\test' }), 'utf8');
+  // בכוונה אין כאן settings.json וגם לא settings.backup.json
+  await m.ready();
+
+  const st = await m.ipcHandlers.get('status:get')();
+  assert.equal(st.configError, true, 'deleted shared file must fail closed: ' + JSON.stringify(st));
+  assert.equal(st.state, 'blocked', 'deleted shared file must fail closed');
+  const safe = await m.ipcHandlers.get('settings:get')();
+  assert.equal(safe.configError, true);
+  assert.equal(safe.enabled, true, 'the user file was NOT adopted as the policy source');
   m.cleanup();
 });
 
