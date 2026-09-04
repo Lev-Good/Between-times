@@ -199,7 +199,15 @@ async function persist() {
   }
   try {
     if (API) {
-      const res = await API.saveSettings(schedule);
+      let res = await API.saveSettings(schedule);
+      if (res && !res.ok && res.needPartnerApproval && API.requestUnlockApproval) {
+        toast('שולח קוד אישור לשותף האחריות…');
+        const sent = await API.requestUnlockApproval('settings-change');
+        if (!sent || !sent.ok) throw new Error((sent && sent.error) || 'שליחת קוד האישור נכשלה');
+        const code = window.prompt('הזינו את קוד האישור שקיבל שותף האחריות:');
+        if (!code) throw new Error('השינוי בוטל — נדרש אישור שותף');
+        res = await API.saveSettings(schedule, code.trim());
+      }
       if (!res || !res.ok) throw new Error((res && res.error) || 'שמירה נכשלה');
       if (res.warning) toast(res.warning);
     } else {
@@ -706,11 +714,26 @@ function applySettingsToUI() {
   $('netIconToggle').checked = schedule.showNetIcon !== false;
   $('torahQuotesToggle').checked = schedule.showTorahQuotes !== false;
   $('allowedAppsToggle').checked = schedule.allowedAppsEnabled !== false;
+  if ($('accountabilityToggle')) $('accountabilityToggle').checked = schedule.accountabilityEnabled === true;
+  if ($('accountabilityEmail')) $('accountabilityEmail').value = schedule.accountabilityEmail || '';
+  if ($('accountabilityRequireApproval')) $('accountabilityRequireApproval').checked = schedule.accountabilityRequireApproval === true;
+  if ($('coolOffInput')) $('coolOffInput').value = schedule.coolOffMinutes || 0;
+  if ($('studyModeToggle')) $('studyModeToggle').checked = !!(schedule.studyMode && schedule.studyMode.enabled);
+  if ($('studyModeScope')) $('studyModeScope').value = (schedule.studyMode && schedule.studyMode.scope === 'always') ? 'always' : 'blocked';
+  updateStudyModeWarning();
+  const fe = schedule.fileExplorer || {};
+  if ($('fileExplorerToggle')) $('fileExplorerToggle').checked = fe.enabled === true;
+  if ($('fileExplorerReadonly')) $('fileExplorerReadonly').checked = fe.readonlyLibrary !== false;
+  if ($('fileExplorerLibraryPath')) $('fileExplorerLibraryPath').value = fe.libraryPath || '';
+  if ($('fileExplorerHidden')) $('fileExplorerHidden').value = (fe.hiddenTypes || []).join(', ');
+  renderFeRoots();
   updateMasterLabel();
   setModeUI();
   applyTheme();
   renderOverrides();
   renderAllowedApps();
+  renderWebsiteApps();
+  renderProfiles();
   updateSetupBanner();
 }
 
@@ -718,6 +741,14 @@ function updateMasterLabel() {
   const label = $('masterLabel');
   label.textContent = schedule.enabled ? 'האכיפה פעילה' : 'האכיפה מושבתת';
   label.classList.toggle('off', !schedule.enabled);
+}
+
+// אזהרת מצב "רק תוכנות מאושרות" — בולטת כשהמצב פעיל תמיד (סוגר הכל).
+function updateStudyModeWarning() {
+  const warn = $('studyModeWarning');
+  if (!warn) return;
+  const sm = schedule.studyMode || {};
+  warn.classList.toggle('hidden', !(sm.enabled && sm.scope === 'always'));
 }
 
 function setModeUI() {
@@ -1179,11 +1210,161 @@ function renderDetectedApps(apps) {
   });
 }
 
+/* ---------- אתרים מאושרים (אתר נעול) ---------- */
+function renderWebsiteApps() {
+  const list = $('websiteAppsList');
+  if (!list) return;
+  list.innerHTML = '';
+  const apps = schedule.websiteApps || [];
+  if (apps.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'override-empty';
+    empty.textContent = 'לא הוגדרו אתרים מאושרים — הוסיפו אתר כדי לפתוח אותו בדפדפן נעול';
+    list.appendChild(empty);
+    return;
+  }
+  apps.forEach((app, i) => {
+    const row = document.createElement('div');
+    row.className = 'override-row allowed-app-row';
+    const info = document.createElement('div');
+    info.className = 'override-info';
+    const name = document.createElement('strong');
+    name.textContent = app.name;
+    info.appendChild(name);
+    (app.urls || []).forEach((u) => {
+      const url = document.createElement('span');
+      url.className = 'app-exe';
+      url.textContent = u;
+      info.appendChild(url);
+    });
+
+    const openBtn = document.createElement('button');
+    openBtn.className = 'btn btn-ghost btn-sm';
+    openBtn.textContent = 'פתח';
+    openBtn.title = 'פתיחת האתר בדפדפן נעול';
+    openBtn.onclick = async () => {
+      if (!API || !API.openWebsiteApp) { toast('פתיחה זמינה רק בגרסת המחשב המלאה'); return; }
+      const r = await API.openWebsiteApp(app.name);
+      if (r && !r.ok) toast(r.error || 'פתיחת האתר נכשלה', 'error');
+    };
+
+    const addUrlBtn = document.createElement('button');
+    addUrlBtn.className = 'btn btn-ghost btn-sm';
+    addUrlBtn.textContent = 'הוסף כתובת';
+    addUrlBtn.onclick = async () => {
+      if (!(await verifyPinSession())) return;
+      const raw = window.prompt('כתובת נוספת מותרת לאתר זה:');
+      if (!raw) return;
+      const nu = T.normalizeUrl ? T.normalizeUrl(raw) : raw;
+      if (!nu) { toast('כתובת לא תקינה', 'error'); return; }
+      if (!app.urls) app.urls = [];
+      if (!app.urls.includes(nu)) app.urls.push(nu);
+      renderWebsiteApps();
+      persist();
+    };
+
+    const del = document.createElement('button');
+    del.className = 'del-btn';
+    del.innerHTML = ICONS.close;
+    del.title = 'הסר אתר';
+    del.onclick = async () => {
+      if (!(await verifyPinSession())) { renderWebsiteApps(); return; }
+      schedule.websiteApps.splice(i, 1);
+      renderWebsiteApps();
+      persist();
+    };
+
+    row.append(info, openBtn, addUrlBtn, del);
+    list.appendChild(row);
+  });
+}
+
+/* ---------- פרופילים (לפי משתמש Windows) ---------- */
+function renderProfiles() {
+  const list = $('profilesList');
+  if (!list) return;
+  list.innerHTML = '';
+  const profiles = schedule.profiles || [];
+  if (!profiles.length) {
+    const empty = document.createElement('div');
+    empty.className = 'override-empty';
+    empty.textContent = 'לא הוגדרו פרופילים — הלוח הבסיסי חל על כל המשתמשים';
+    list.appendChild(empty);
+    return;
+  }
+  profiles.forEach((p, i) => {
+    const row = document.createElement('div');
+    row.className = 'override-row allowed-app-row';
+    const info = document.createElement('div');
+    info.className = 'override-info';
+    const name = document.createElement('strong');
+    name.textContent = p.name + (p.user ? ' — משתמש: ' + p.user : ' (ידני)');
+    info.appendChild(name);
+    if (schedule.defaultProfile === p.id) {
+      const badge = document.createElement('span');
+      badge.className = 'app-badge secure';
+      badge.textContent = 'ברירת מחדל';
+      info.appendChild(badge);
+    }
+    const defBtn = document.createElement('button');
+    defBtn.className = 'btn btn-ghost btn-sm';
+    defBtn.textContent = schedule.defaultProfile === p.id ? 'בטל ברירת מחדל' : 'קבע כברירת מחדל';
+    defBtn.title = 'פרופיל ברירת המחדל חל כשאין פרופיל תואם למשתמש המחובר';
+    defBtn.onclick = async () => {
+      if (!(await verifyPinSession())) { renderProfiles(); return; }
+      schedule.defaultProfile = schedule.defaultProfile === p.id ? null : p.id;
+      renderProfiles();
+      persist();
+    };
+    const del = document.createElement('button');
+    del.className = 'del-btn';
+    del.innerHTML = ICONS.close;
+    del.title = 'הסר פרופיל';
+    del.onclick = async () => {
+      if (!(await verifyPinSession())) { renderProfiles(); return; }
+      if (schedule.defaultProfile === p.id) schedule.defaultProfile = null;
+      schedule.profiles.splice(i, 1);
+      renderProfiles();
+      persist();
+    };
+    row.append(info, defBtn, del);
+    list.appendChild(row);
+  });
+}
+
+/* ---------- סייר קבצים מוגבל ---------- */
+const FE_ROOT_LABELS = { documents: 'מסמכים', downloads: 'הורדות', desktop: 'שולחן עבודה', pictures: 'תמונות', music: 'מוזיקה', videos: 'סרטונים', library: 'ספרייה' };
+function renderFeRoots() {
+  const box = $('feRoots');
+  if (!box) return;
+  box.innerHTML = '';
+  const fe = schedule.fileExplorer || {};
+  const selected = new Set(fe.roots || []);
+  Object.keys(FE_ROOT_LABELS).forEach((id) => {
+    const lbl = document.createElement('label');
+    lbl.style.cssText = 'display:inline-flex;align-items:center;gap:6px;margin:0 4px 6px 0;font-size:14px';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = selected.has(id);
+    cb.onchange = async () => {
+      if (!(await verifyPinSession())) { renderFeRoots(); return; }
+      if (!schedule.fileExplorer) schedule.fileExplorer = {};
+      const cur = new Set(schedule.fileExplorer.roots || []);
+      if (cb.checked) cur.add(id); else cur.delete(id);
+      schedule.fileExplorer.roots = Array.from(cur);
+      await persist();
+    };
+    const span = document.createElement('span');
+    span.textContent = FE_ROOT_LABELS[id];
+    lbl.append(cb, span);
+    box.appendChild(lbl);
+  });
+}
+
 /* ---------- מצב ההגנה ---------- */
 async function renderSecurity() {
   const list = $('securityList');
-  if (!list) return;
-  if (!API) {
+  if (!list) return;  if (!API) {
     list.innerHTML = '<div class="check-item pending">זמין רק בגרסת המחשב המלאה</div>';
     return;
   }
@@ -1223,8 +1404,34 @@ async function renderSecurity() {
     setupPinBtn.onclick = () => {
       const settingsTab = document.querySelector('.tab-btn[data-tab="settings"]');
       if (settingsTab) settingsTab.click();
+      if (typeof window.switchSettingsSubtab === 'function') {
+        window.switchSettingsSubtab('security');
+      }
       setTimeout(() => { const pi = $('pinInput'); if (pi) pi.focus(); }, 180);
     };
+  }
+
+  /* ---------- תת-לשוניות הגדרות ---------- */
+  function switchSettingsSubtab(name) {
+    const buttons = document.querySelectorAll('.settings-subtab-btn');
+    const subpanels = document.querySelectorAll('.settings-subpanel');
+    buttons.forEach((b) => {
+      const on = b.dataset.subtab === name;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+    subpanels.forEach((p) => {
+      const on = p.dataset.subpanel === name;
+      p.classList.toggle('hidden', !on);
+    });
+  }
+  window.switchSettingsSubtab = switchSettingsSubtab;
+
+  function initSettingsSubtabs() {
+    const buttons = document.querySelectorAll('.settings-subtab-btn');
+    buttons.forEach((b) => {
+      b.addEventListener('click', () => switchSettingsSubtab(b.dataset.subtab));
+    });
   }
 
   /* ---------- לשוניות ---------- */
@@ -1252,6 +1459,7 @@ async function renderSecurity() {
 /* ---------- אתחול ---------- */
 function init() {
   initTabs();
+  initSettingsSubtabs();
   const load = async () => {
     if (API) {
       const data = await API.getSettings();
@@ -1523,12 +1731,161 @@ function init() {
     // אימות סיסמה לפני שינוי המצב — כדי לא להשאיר ערכים לא שמורים בממשק
     if (!(await verifyPinSession())) { applySettingsToUI(); return; }
     schedule.recoveryEmail = $('recoveryEmail').value.trim();
+    if ($('accountabilityEmail')) schedule.accountabilityEmail = $('accountabilityEmail').value.trim();
     await persist();
     if (!silent) toast('הגדרות האבטחה נשמרו', 'success');
   };
-  ['recoveryEmail'].forEach((id) => {
-    $(id).addEventListener('change', () => saveSecurity(false));
+  ['recoveryEmail', 'accountabilityEmail'].forEach((id) => {
+    if ($(id)) $(id).addEventListener('change', () => saveSecurity(false));
   });
+
+  /* ---------- שותף אחריות ---------- */
+  if ($('accountabilityToggle')) {
+    $('accountabilityToggle').onchange = async () => {
+      if (!(await verifyPinSession())) { $('accountabilityToggle').checked = schedule.accountabilityEnabled === true; return; }
+      schedule.accountabilityEnabled = $('accountabilityToggle').checked;
+      await persist();
+      toast(schedule.accountabilityEnabled ? 'שותף אחריות הופעל' : 'שותף אחריות כובה', 'success');
+    };
+  }
+  if ($('accountabilityRequireApproval')) {
+    $('accountabilityRequireApproval').onchange = async () => {
+      if (!(await verifyPinSession())) { $('accountabilityRequireApproval').checked = schedule.accountabilityRequireApproval === true; return; }
+      schedule.accountabilityRequireApproval = $('accountabilityRequireApproval').checked;
+      await persist();
+    };
+  }
+  if ($('coolOffInput')) {
+    $('coolOffInput').onchange = async () => {
+      const val = Math.max(0, Math.min(120, Math.round(Number($('coolOffInput').value) || 0)));
+      if (!(await verifyPinSession())) { $('coolOffInput').value = schedule.coolOffMinutes || 0; return; }
+      schedule.coolOffMinutes = val;
+      $('coolOffInput').value = val;
+      await persist();
+    };
+  }
+
+  /* ---------- מצב "רק תוכנות מאושרות" (Process Governor) ---------- */
+  if ($('studyModeToggle')) {
+    $('studyModeToggle').onchange = async () => {
+      const desired = $('studyModeToggle').checked;
+      if (!(await verifyPinSession())) { $('studyModeToggle').checked = !!(schedule.studyMode && schedule.studyMode.enabled); return; }
+      if (!schedule.studyMode) schedule.studyMode = { enabled: false, scope: 'blocked' };
+      schedule.studyMode.enabled = desired;
+      updateStudyModeWarning();
+      await persist();
+      refreshStatus();
+      toast(desired ? 'מצב "רק תוכנות מאושרות" הופעל' : 'מצב "רק תוכנות מאושרות" כובה', 'success');
+    };
+  }
+  if ($('studyModeScope')) {
+    $('studyModeScope').onchange = async () => {
+      const desired = $('studyModeScope').value === 'always' ? 'always' : 'blocked';
+      if (!(await verifyPinSession())) { $('studyModeScope').value = (schedule.studyMode && schedule.studyMode.scope === 'always') ? 'always' : 'blocked'; return; }
+      if (!schedule.studyMode) schedule.studyMode = { enabled: false, scope: 'blocked' };
+      schedule.studyMode.scope = desired;
+      updateStudyModeWarning();
+      await persist();
+      refreshStatus();
+    };
+  }
+
+  /* ---------- אתרים מאושרים (אתר נעול) ---------- */
+  if ($('addWebsiteAppBtn')) {
+    $('addWebsiteAppBtn').onclick = async () => {
+      if (!(await verifyPinSession())) return;
+      const nameEl = $('websiteAppName');
+      const urlEl = $('websiteAppUrl');
+      const rawUrl = urlEl.value.trim();
+      const url = T.normalizeUrl ? T.normalizeUrl(rawUrl) : rawUrl;
+      if (!url) { toast('כתובת לא תקינה — הזינו כתובת אתר מלאה (למשל example.com)', 'error'); return; }
+      const name = nameEl.value.trim();
+      if (!schedule.websiteApps) schedule.websiteApps = [];
+      schedule.websiteApps.push({ name: name || url, urls: [url] });
+      nameEl.value = '';
+      urlEl.value = '';
+      renderWebsiteApps();
+      await persist();
+      toast('האתר נוסף לרשימת האתרים המאושרים', 'success');
+    };
+  }
+
+  /* ---------- פרופילים (לפי משתמש Windows) ---------- */
+  if ($('addProfileBtn')) {
+    $('addProfileBtn').onclick = async () => {
+      if (!(await verifyPinSession())) return;
+      const name = $('profileName').value.trim();
+      const user = $('profileUser').value.trim().toLowerCase();
+      if (!name && !user) { toast('הזינו שם פרופיל או שם משתמש Windows', 'error'); return; }
+      const id = user ? 'user:' + user : 'name:' + name.toLowerCase();
+      if ((schedule.profiles || []).some((p) => p.id === id || (user && p.user === user))) {
+        toast('כבר קיים פרופיל עבור שם המשתמש הזה', 'error');
+        return;
+      }
+      // צילום המדיניות הנוכחית כדריסות הפרופיל (לוח, תוכנות, אתרים וכו')
+      const clone = (v) => JSON.parse(JSON.stringify(v == null ? null : v));
+      const overrides = {
+        enabled: schedule.enabled,
+        mode: schedule.mode,
+        warnMinutes: schedule.warnMinutes,
+        blockMessage: schedule.blockMessage || '',
+        week: clone(schedule.week || []),
+        allowedApps: clone(schedule.allowedApps || []),
+        allowedAppsEnabled: schedule.allowedAppsEnabled !== false,
+        studyMode: clone(schedule.studyMode || { enabled: false, scope: 'blocked' }),
+        websiteApps: clone(schedule.websiteApps || []),
+        fileExplorer: clone(schedule.fileExplorer || {})
+      };
+      if (!schedule.profiles) schedule.profiles = [];
+      schedule.profiles.push({ id, name: name || user, user, overrides });
+      $('profileName').value = '';
+      $('profileUser').value = '';
+      renderProfiles();
+      await persist();
+      toast('הפרופיל נשמר — הלוח הנוכחי יחול על המשתמש שהוגדר', 'success');
+    };
+  }
+
+  /* ---------- סייר קבצים מוגבל ---------- */
+  if ($('fileExplorerToggle')) {
+    $('fileExplorerToggle').onchange = async () => {
+      if (!(await verifyPinSession())) { $('fileExplorerToggle').checked = !!(schedule.fileExplorer && schedule.fileExplorer.enabled); return; }
+      if (!schedule.fileExplorer) schedule.fileExplorer = {};
+      schedule.fileExplorer.enabled = $('fileExplorerToggle').checked;
+      await persist();
+    };
+  }
+  if ($('fileExplorerReadonly')) {
+    $('fileExplorerReadonly').onchange = async () => {
+      if (!(await verifyPinSession())) { $('fileExplorerReadonly').checked = !(schedule.fileExplorer && schedule.fileExplorer.readonlyLibrary === false); return; }
+      if (!schedule.fileExplorer) schedule.fileExplorer = {};
+      schedule.fileExplorer.readonlyLibrary = $('fileExplorerReadonly').checked;
+      await persist();
+    };
+  }
+  if ($('fileExplorerLibraryPath')) {
+    $('fileExplorerLibraryPath').addEventListener('change', async () => {
+      if (!(await verifyPinSession())) { $('fileExplorerLibraryPath').value = (schedule.fileExplorer && schedule.fileExplorer.libraryPath) || ''; return; }
+      if (!schedule.fileExplorer) schedule.fileExplorer = {};
+      schedule.fileExplorer.libraryPath = $('fileExplorerLibraryPath').value.trim();
+      await persist();
+    });
+  }
+  if ($('fileExplorerHidden')) {
+    $('fileExplorerHidden').addEventListener('change', async () => {
+      if (!(await verifyPinSession())) { $('fileExplorerHidden').value = ((schedule.fileExplorer && schedule.fileExplorer.hiddenTypes) || []).join(', '); return; }
+      if (!schedule.fileExplorer) schedule.fileExplorer = {};
+      schedule.fileExplorer.hiddenTypes = $('fileExplorerHidden').value.split(',').map((s) => s.trim()).filter(Boolean);
+      await persist();
+    });
+  }
+  if ($('openFileExplorerBtn')) {
+    $('openFileExplorerBtn').onclick = async () => {
+      if (!API || !API.openFileExplorer) { toast('זמין רק בגרסת המחשב המלאה'); return; }
+      const r = await API.openFileExplorer();
+      if (r && !r.ok) toast(r.error || 'לא ניתן לפתוח את הסייר', 'error');
+    };
+  }
 
   $('testRecoveryBtn').onclick = async () => {
     if (!API) { toast('שליחה זמינה רק בגרסת המחשב המלאה'); return; }
@@ -1688,11 +2045,39 @@ function init() {
     if (API) API.openExternal('mailto:mytovmail@gmail.com');
   };
 
+  /* ---------- מדריך ועזרה / המלווה האישי ---------- */
+  const helpBtn = $('openHelpBtn');
+  if (helpBtn) {
+    helpBtn.onclick = () => {
+      if (window.BenHazmanimTour) window.BenHazmanimTour.openHelpModal();
+    };
+  }
+
+  if (window.BenHazmanimTour) {
+    window.BenHazmanimTour.init();
+  }
+
   if (API) {
     API.getVersion().then((v) => {
       $('version').textContent = v;
       $('version2').textContent = v;
     });
+    if (API.getLicense) {
+      API.getLicense().then((lic) => {
+        const userText = $('licenseUserText');
+        const badge = $('licenseBadge');
+        if (!userText || !badge) return;
+        if (lic && lic.isLicensed) {
+          userText.textContent = `רשום על שם: ${lic.userName}`;
+          badge.textContent = 'פעיל ומאומת';
+          badge.style.background = '#16a34a';
+        } else {
+          userText.textContent = 'רישיון לא זוהה במחשב זה';
+          badge.textContent = 'לא מאומת';
+          badge.style.background = '#eab308';
+        }
+      }).catch(() => {});
+    }
   }
 }
 

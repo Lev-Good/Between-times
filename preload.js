@@ -4,10 +4,11 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('electronAPI', {
   getSettings: () => ipcRenderer.invoke('settings:get'),
-  saveSettings: (s) => ipcRenderer.invoke('settings:save', s),
+  saveSettings: (s, approvalCode) => ipcRenderer.invoke('settings:save', s, approvalCode),
   getStatus: () => ipcRenderer.invoke('status:get'),
   lockNow: () => ipcRenderer.invoke('lock:now'),
-  unlockNow: (pin) => ipcRenderer.invoke('unlock:now', pin),
+  unlockNow: (pin, approvalCode) => ipcRenderer.invoke('unlock:now', pin, approvalCode),
+  requestUnlockApproval: (purpose) => ipcRenderer.invoke('accountability:request-approval', purpose),
   openSettings: () => ipcRenderer.invoke('settings:open'),
   setBlockBg: (bg) => ipcRenderer.invoke('block:set-bg', bg),
 
@@ -34,6 +35,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   detectAllowedApps: () => ipcRenderer.invoke('allowed-apps:detect'),
   inspectAllowedAppPath: (p) => ipcRenderer.invoke('allowed-apps:inspect-path', p),
   launchAllowedApp: (app) => ipcRenderer.invoke('allowed-apps:launch', app),
+  openWebsiteApp: (nameOrIndex) => ipcRenderer.invoke('website-apps:open', nameOrIndex),
+  openFileExplorer: () => ipcRenderer.invoke('file-explorer:open-window'),
+  fileExplorerRoots: () => ipcRenderer.invoke('file-explorer:roots'),
+  fileExplorerList: (rootId, rel) => ipcRenderer.invoke('file-explorer:list', rootId, rel),
+  fileExplorerOpen: (rootId, rel) => ipcRenderer.invoke('file-explorer:open', rootId, rel),
 
   quitApp: (pin) => ipcRenderer.invoke('app:quit', pin),
   uninstallApp: (pin) => ipcRenderer.invoke('app:uninstall', pin),
@@ -41,6 +47,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   fitQuitWindow: (w, h) => ipcRenderer.invoke('quit:fit', w, h),
   hideWindow: () => ipcRenderer.invoke('app:hide'),
   getVersion: () => ipcRenderer.invoke('app:version'),
+  getLicense: () => ipcRenderer.invoke('license:get'),
   applyTheme: (resolved) => ipcRenderer.invoke('theme:apply', resolved),
 
   onStatus: (cb) => {

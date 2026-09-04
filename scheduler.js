@@ -8,6 +8,12 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
+  // גרסת הסכימה. מוגדל כאשר נוספים שדות חדשים למבנה ההגדרות. המיגרציה
+  // "שקטה": normalizeSchedule ממלא ערכי ברירת מחדל לכל שדה חסר, כך שקובץ
+  // הגדרות ישן (v1.5.10, ללא schemaVersion) נטען ומקבל את השדות החדשים בלי
+  // איבוד הגדרות קיימות. שדה נפרד מ-`version` (שהוא גרסת פורמט הלוח הפנימי).
+  var SCHEMA_VERSION = 2;
+
   /* ---------- עזרי זמן ---------- */
 
   function parseHM(str) {
@@ -50,6 +56,7 @@
     for (let d = 0; d < 7; d++) week.push({ day: d, slots: [] });
     return {
       version: 1,
+      schemaVersion: SCHEMA_VERSION,
       enabled: true,
       mode: 'blocklist',          // blocklist = חסום רק את החלונות; allowlist = התר רק את החלונות
       warnMinutes: 5,             // דקות אזהרה לפני תחילת החסימה (0 = ללא אזהרה)
@@ -65,6 +72,24 @@
       showTorahQuotes: true,    // משפטי עידוד מהמקורות במסך החסימה
       allowedAppsEnabled: true, // תוכנות תורניות מותרות בזמן חסימה — הפעלה/כיבוי
       allowedApps: [],          // רשימת התוכנות: [{name, exe}]
+
+      /* ---------- תוספות סכימה v2 ---------- */
+      // מצב "רק תוכנות מאושרות" (Process Governor). scope: 'always' = תמיד |
+      // 'blocked' = רק בחלונות חסימה. כבוי כברירת מחדל (בטוח).
+      studyMode: { enabled: false, scope: 'blocked' },
+      // "אתר נעול" — רשימת אתרים מאושרים שההורה בוחר, כל אחד עם רשימת כתובות.
+      websiteApps: [],          // [{ name, urls: [...] }]
+      // סייר קבצים מוגבל + ספרייה לקריאה בלבד. כבוי כברירת מחדל.
+      fileExplorer: { enabled: false, roots: ['documents', 'downloads'], readonlyLibrary: true, hiddenTypes: [], libraryPath: '' },
+      // שותף אחריות (Accountability) — כבוי כברירת מחדל.
+      accountabilityEmail: '',
+      accountabilityEnabled: false,
+      accountabilityRequireApproval: false, // חייב אישור שותף לפתיחה מוקדמת
+      // "תקופת צינון" — עיכוב (בדקות) לפני שפתיחה מוקדמת נכנסת לתוקף. 0 = מושבת.
+      coolOffMinutes: 0,
+      // פרופילים: בחירה אוטומטית לפי משתמש Windows + פרופילים ידניים בעלי שם.
+      profiles: [],             // [{ id, name, user, overrides:{...} }]
+      defaultProfile: null,     // מזהה הפרופיל שישמש כברירת מחדל (או null)
       week
     };
   }
@@ -104,6 +129,253 @@
     return out;
   }
 
+  /* ---------- נורמליזציה של שדות סכימה v2 ---------- */
+
+  // מצב "רק תוכנות מאושרות". enabled כבוי כברירת מחדל; scope בין 'always'
+  // (תמיד) ל-'blocked' (רק בחלונות חסימה, ברירת המחדל).
+  function normalizeStudyMode(v) {
+    const o = (v && typeof v === 'object') ? v : {};
+    return {
+      enabled: o.enabled === true,
+      scope: o.scope === 'always' ? 'always' : 'blocked'
+    };
+  }
+
+  // נורמליזציה של כתובת אתר יחידה. מקבלת http/https (או שם דומיין ללא סכימה),
+  // דורשת מארח מלא (עם נקודה), ומחזירה צורה קנונית — או null אם לא תקינה.
+  // כתובת קנונית מנרמלת לעצמה (idempotent), חיוני לבדיקות roundtrip.
+  function normalizeUrl(u) {
+    const raw = String(u == null ? '' : u).trim();
+    if (!raw) return null;
+    let parsed;
+    try { parsed = new URL(raw.indexOf('://') >= 0 ? raw : 'https://' + raw); } catch (e) { return null; }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+    const host = String(parsed.hostname || '').toLowerCase();
+    if (!host || host.indexOf('.') < 0) return null; // חייב להיות דומיין מלא
+    let out = parsed.protocol + '//' + host;
+    const defaultPort = (parsed.protocol === 'https:' && parsed.port === '443') ||
+      (parsed.protocol === 'http:' && parsed.port === '80');
+    if (parsed.port && !defaultPort) out += ':' + parsed.port;
+    const pathPart = (parsed.pathname && parsed.pathname !== '/') ? parsed.pathname : '';
+    out += pathPart + (parsed.search || '');
+    return out;
+  }
+
+  function normalizeUrlList(list) {
+    const out = [];
+    const seen = new Set();
+    (Array.isArray(list) ? list : []).forEach((u) => {
+      const n = normalizeUrl(u);
+      if (!n) return;
+      const key = n.toLowerCase();
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push(n);
+    });
+    return out;
+  }
+
+  // "אתר נעול": רשימת אתרים שההורה בוחר, כל אחד עם שם ורשימת כתובות מאושרות.
+  // רשומה ללא אף כתובת תקינה נמחקת; כפילויות שם (case-insensitive) מוסרות.
+  function normalizeWebsiteApps(list) {
+    const out = [];
+    const seen = new Set();
+    (Array.isArray(list) ? list : []).forEach((a) => {
+      if (!a || typeof a !== 'object') return;
+      const urls = normalizeUrlList(a.urls);
+      if (!urls.length) return;
+      let name = String(a.name || '').trim().slice(0, 80);
+      if (!name) { try { name = new URL(urls[0]).hostname; } catch (e) { name = urls[0]; } }
+      const key = name.toLowerCase();
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push({ name, urls });
+    });
+    return out;
+  }
+
+  // האם המארח המבוקש תואם למארח מאושר (התאמה מדויקת או תת-דומיין)?
+  function hostMatches(allowedHost, candidateHost, allowSubdomains) {
+    const a = String(allowedHost || '').toLowerCase();
+    const c = String(candidateHost || '').toLowerCase();
+    if (!a || !c) return false;
+    if (a === c) return true;
+    if (allowSubdomains !== false && c.length > a.length && c.slice(-(a.length + 1)) === '.' + a) return true;
+    return false;
+  }
+
+  function urlHost(u) {
+    try { return new URL(String(u)).hostname.toLowerCase(); } catch (e) { return ''; }
+  }
+
+  // האם כתובת יעד מותרת לפי רשימת האתרים? (ברירת מחדל: התאמת תת-דומיינים).
+  // Default-deny: כתובת שאינה http/https או שאינה תואמת לאף מארח — נדחית.
+  function siteUrlAllowed(websiteApps, targetUrl, allowSubdomains) {
+    let target;
+    try { target = new URL(String(targetUrl)); } catch (e) { return false; }
+    if (target.protocol !== 'http:' && target.protocol !== 'https:') return false;
+    const host = target.hostname.toLowerCase();
+    for (const app of (Array.isArray(websiteApps) ? websiteApps : [])) {
+      for (const u of ((app && app.urls) || [])) {
+        let allowed;
+        try { allowed = new URL(String(u)); } catch (e) { continue; }
+        const allowedPort = allowed.port || (allowed.protocol === 'https:' ? '443' : '80');
+        const targetPort = target.port || (target.protocol === 'https:' ? '443' : '80');
+        if (allowed.protocol === target.protocol && allowedPort === targetPort &&
+            hostMatches(allowed.hostname, host, allowSubdomains)) return true;
+      }
+    }
+    return false;
+  }
+
+  // סיומת קובץ קנונית (אותיות קטנות, עם נקודה מובילה) — או '' אם לא תקינה.
+  function normalizeExtension(e) {
+    let s = String(e == null ? '' : e).trim().toLowerCase();
+    if (!s) return '';
+    if (s.charAt(0) !== '.') s = '.' + s;
+    if (!/^\.[a-z0-9][a-z0-9.+_-]*$/.test(s)) return '';
+    return s.slice(0, 20);
+  }
+
+  function normalizeExtList(list) {
+    const out = [];
+    const seen = new Set();
+    (Array.isArray(list) ? list : []).forEach((e) => {
+      const ext = normalizeExtension(e);
+      if (ext && !seen.has(ext)) { seen.add(ext); out.push(ext); }
+    });
+    return out;
+  }
+
+  var EXPLORER_ROOTS = ['documents', 'downloads', 'desktop', 'pictures', 'music', 'videos', 'library'];
+
+  // סייר קבצים מוגבל: אילו שורשים חשופים, האם הספרייה לקריאה בלבד, ואילו
+  // סוגי קבצים מוסתרים. enabled כבוי כברירת מחדל.
+  function normalizeFileExplorer(v) {
+    const o = (v && typeof v === 'object') ? v : {};
+    const roots = [];
+    const seen = new Set();
+    (Array.isArray(o.roots) ? o.roots : []).forEach((r) => {
+      const key = String(r == null ? '' : r).trim().toLowerCase();
+      if (EXPLORER_ROOTS.indexOf(key) >= 0 && !seen.has(key)) { seen.add(key); roots.push(key); }
+    });
+    return {
+      enabled: o.enabled === true,
+      roots: roots.length ? roots : ['documents', 'downloads'],
+      readonlyLibrary: o.readonlyLibrary !== false, // ברירת מחדל: לקריאה בלבד
+      hiddenTypes: normalizeExtList(o.hiddenTypes),
+      // נתיב "הספרייה" (תיקיית לימוד לקריאה בלבד). ריק = לא הוגדר.
+      libraryPath: (function () {
+        const p = String(o.libraryPath == null ? '' : o.libraryPath).trim();
+        return (/^[a-zA-Z]:[\\/]/.test(p) || /^\\\\/.test(p)) ? p : '';
+      })()
+    };
+  }
+
+  // האם סוג הקובץ מוסתר לפי מדיניות הסייר? (רשימת סיומות מוסתרות).
+  function isHiddenType(hiddenTypes, fileName) {
+    const list = Array.isArray(hiddenTypes) ? hiddenTypes : [];
+    if (!list.length) return false;
+    const name = String(fileName || '');
+    const dot = name.lastIndexOf('.');
+    if (dot < 0) return false; // ללא סיומת — אינו מוסתר לפי סוג
+    const ext = name.slice(dot).toLowerCase();
+    return list.indexOf(ext) >= 0;
+  }
+
+  // מבנה שבועי מנורמל — מופרד לפונקציה כדי שגם פרופילים יוכלו להשתמש בו.
+  function normalizeWeek(week) {
+    const out = [];
+    for (let d = 0; d < 7; d++) {
+      const src = (week || [])[d] || { slots: [] };
+      const slots = (Array.isArray(src.slots) ? src.slots : [])
+        .filter((x) => x && typeof x === 'object')
+        .map((x) => ({
+          start: parseScheduleHM(x.start, false),
+          end: parseScheduleHM(x.end, true),
+          type: x.type === 'allowed' ? 'allowed' : x.type === 'netblock' ? 'netblock' : 'blocked'
+        }))
+        .filter((x) => x.start !== null && x.end !== null && x.start !== x.end);
+      out.push({ day: d, slots });
+    }
+    return out;
+  }
+
+  // שדות שפרופיל רשאי לדרוס מעל המדיניות הבסיסית. רק מפתחות שקיימים
+  // בקלט נשמרים — כך פרופיל דורס אך ורק את מה שהוגדר בו במפורש.
+  function normalizeProfileOverrides(o) {
+    if (!o || typeof o !== 'object') return {};
+    const out = {};
+    if ('enabled' in o) out.enabled = o.enabled !== false;
+    if ('mode' in o) out.mode = o.mode === 'allowlist' ? 'allowlist' : 'blocklist';
+    if ('warnMinutes' in o) out.warnMinutes = Math.max(0, Math.min(60, Math.round(Number(o.warnMinutes) || 0)));
+    if ('blockMessage' in o) out.blockMessage = String(o.blockMessage || '').trim().slice(0, 300);
+    if ('blockBg' in o) out.blockBg = ['blobs', 'fluid', 'particles', 'aurora'].includes(o.blockBg) ? o.blockBg : 'blobs';
+    if ('showTorahQuotes' in o) out.showTorahQuotes = o.showTorahQuotes !== false;
+    if ('week' in o) out.week = normalizeWeek(o.week);
+    if ('allowedApps' in o) out.allowedApps = normalizeAllowedApps(o.allowedApps);
+    if ('allowedAppsEnabled' in o) out.allowedAppsEnabled = o.allowedAppsEnabled !== false;
+    if ('studyMode' in o) out.studyMode = normalizeStudyMode(o.studyMode);
+    if ('websiteApps' in o) out.websiteApps = normalizeWebsiteApps(o.websiteApps);
+    if ('fileExplorer' in o) out.fileExplorer = normalizeFileExplorer(o.fileExplorer);
+    return out;
+  }
+
+  // פרופילים: מערך של { id, name, user, overrides }. הבחירה האוטומטית נעשית
+  // לפי שדה user (שם משתמש Windows, אותיות קטנות); פרופיל ללא user הוא ידני.
+  // כפילויות מזהה מוסרות; פרופיל ללא שם וללא משתמש חסר משמעות ונמחק.
+  function normalizeProfiles(list) {
+    const out = [];
+    const seenId = new Set();
+    (Array.isArray(list) ? list : []).forEach((p) => {
+      if (!p || typeof p !== 'object') return;
+      const name = String(p.name || '').trim().slice(0, 80);
+      const user = String(p.user || '').trim().toLowerCase().slice(0, 128);
+      let id = String(p.id || '').trim().slice(0, 80);
+      if (!id) id = user ? 'user:' + user : (name ? 'name:' + name.toLowerCase() : '');
+      if (!id || seenId.has(id)) return;
+      if (!name && !user) return;
+      seenId.add(id);
+      out.push({ id, name: name || user, user, overrides: normalizeProfileOverrides(p.overrides) });
+    });
+    return out;
+  }
+
+  // בחירת הפרופיל הפעיל לפי שם משתמש Windows: קודם התאמת user מדויקת, אחרת
+  // פרופיל ברירת המחדל (defaultProfile), אחרת null (משתמשים במדיניות הבסיסית).
+  function resolveProfile(schedule, username) {
+    const profiles = (schedule && Array.isArray(schedule.profiles)) ? schedule.profiles : [];
+    const u = String(username || '').trim().toLowerCase();
+    if (u) {
+      const byUser = profiles.find((p) => p.user && p.user === u);
+      if (byUser) return byUser;
+    }
+    const def = schedule && schedule.defaultProfile;
+    if (def) {
+      const byDefault = profiles.find((p) => p.id === def);
+      if (byDefault) return byDefault;
+    }
+    return null;
+  }
+
+  // שדות שפרופיל רשאי לדרוס (מדיניות בלבד — לא סיסמה/שחזור/שותף/צינון).
+  var PROFILE_OVERRIDE_KEYS = ['enabled', 'mode', 'warnMinutes', 'blockMessage', 'blockBg',
+    'showTorahQuotes', 'week', 'allowedApps', 'allowedAppsEnabled', 'studyMode', 'websiteApps', 'fileExplorer'];
+
+  // המדיניות ה"אפקטיבית": הבסיס עם דריסות הפרופיל הפעיל (לפי משתמש Windows).
+  // שדות רגישים (pinHash/שחזור/manualUnlockUntil/accountability/coolOff) לעולם
+  // אינם נדרסים — הם נלקחים תמיד מהבסיס. פונקציה טהורה (לבדיקות + אכיפה).
+  function effectiveSchedule(base, username) {
+    const eff = normalizeSchedule(base);
+    const profile = resolveProfile(eff, username);
+    if (profile && profile.overrides) {
+      for (const k of PROFILE_OVERRIDE_KEYS) {
+        if (Object.prototype.hasOwnProperty.call(profile.overrides, k)) eff[k] = profile.overrides[k];
+      }
+    }
+    return eff;
+  }
+
   function parseScheduleHM(value, allowEndOfDay) {
     if (typeof value === 'number') {
       if (!Number.isFinite(value) || !Number.isInteger(value) || value < 0 || value > 1440) return null;
@@ -125,8 +397,14 @@
   function normalizeSchedule(s) {
     const base = defaultSchedule();
     if (!s || typeof s !== 'object') return base;
+    // מיגרציה שקטה: פרופילים ו-defaultProfile מחושבים תחילה כדי ש-defaultProfile
+    // יוכל להתאמת מול המזהים הקיימים; שדות חדשים חסרים מקבלים ברירות מחדל.
+    const profiles = normalizeProfiles(s.profiles);
+    let defaultProfile = String(s.defaultProfile || '').trim().slice(0, 80) || null;
+    if (defaultProfile && !profiles.some((p) => p.id === defaultProfile)) defaultProfile = null;
     const out = {
       version: 1,
+      schemaVersion: SCHEMA_VERSION,
       enabled: s.enabled !== false,
       mode: s.mode === 'allowlist' ? 'allowlist' : 'blocklist',
       warnMinutes: (s.warnMinutes === undefined || s.warnMinutes === null || s.warnMinutes === '')
@@ -146,28 +424,29 @@
         ? Number(s.manualUnlockUntil) : null,
       recoveryEmail: String(s.recoveryEmail || '').trim(),
       recoveryPendingHash: /^[0-9a-f]{64}$/.test(String(s.recoveryPendingHash || '').trim().toLowerCase()) ? String(s.recoveryPendingHash).trim().toLowerCase() : null,
-      recoveryPendingUntil: Number.isFinite(Number(s.recoveryPendingUntil)) ? Number(s.recoveryPendingUntil) : null,
+      // null/undefined/'' חייבים להישאר null (אין שחזור ממתין). בלי המשמר הזה
+      // Number(null) === 0 היה הופך null ל-0 בנרמול חוזר — שבירת idempotency.
+      recoveryPendingUntil: (s.recoveryPendingUntil !== null && s.recoveryPendingUntil !== undefined && s.recoveryPendingUntil !== '' && Number.isFinite(Number(s.recoveryPendingUntil)))
+        ? Number(s.recoveryPendingUntil) : null,
       updateUrl: String(s.updateUrl || '').trim(),
       showNetIcon: s.showNetIcon !== false,
       blockBg: ['blobs', 'fluid', 'particles', 'aurora'].includes(s.blockBg) ? s.blockBg : 'blobs',
       showTorahQuotes: s.showTorahQuotes !== false,
       allowedAppsEnabled: s.allowedAppsEnabled !== false,
       allowedApps: normalizeAllowedApps(s.allowedApps),
-      week: []
+
+      /* ---------- שדות סכימה v2 (מיגרציה שקטה, ברירות מחדל בטוחות) ---------- */
+      studyMode: normalizeStudyMode(s.studyMode),
+      websiteApps: normalizeWebsiteApps(s.websiteApps),
+      fileExplorer: normalizeFileExplorer(s.fileExplorer),
+      accountabilityEmail: String(s.accountabilityEmail || '').trim().slice(0, 200),
+      accountabilityEnabled: s.accountabilityEnabled === true,
+      accountabilityRequireApproval: s.accountabilityRequireApproval === true,
+      coolOffMinutes: Math.max(0, Math.min(120, Math.round(Number(s.coolOffMinutes) || 0))),
+      profiles: profiles,
+      defaultProfile: defaultProfile,
+      week: normalizeWeek(s.week)
     };
-    for (let d = 0; d < 7; d++) {
-      const src = (s.week || [])[d] || { slots: [] };
-      const slots = (Array.isArray(src.slots) ? src.slots : [])
-        .filter((x) => x && typeof x === 'object')
-        .map((x) => ({
-          start: parseScheduleHM(x.start, false),
-          end: parseScheduleHM(x.end, true),
-          // שלושה סוגי חלונות: מותר, חסום (נעילת מחשב מלאה) או חסימת אינטרנט בלבד
-          type: x.type === 'allowed' ? 'allowed' : x.type === 'netblock' ? 'netblock' : 'blocked'
-        }))
-        .filter((x) => x.start !== null && x.end !== null && x.start !== x.end);
-      out.week.push({ day: d, slots });
-    }
     return out;
   }
 
@@ -422,6 +701,7 @@
     dateKey,
     DAY_NAMES_HE,
     DAY_SHORT_HE,
+    SCHEMA_VERSION,
     defaultSchedule,
     normalizeSchedule,
     stateAt,
@@ -430,6 +710,14 @@
     formatDuration,
     formatDate,
     sha256Hex,
-    isValidPassword
+    isValidPassword,
+    // שדות סכימה v2 — עזרים טהורים (משותפים ל-Node ולדפדפן)
+    normalizeUrl,
+    hostMatches,
+    siteUrlAllowed,
+    normalizeExtension,
+    resolveProfile,
+    effectiveSchedule,
+    isHiddenType
   };
 });

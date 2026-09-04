@@ -2,7 +2,7 @@
 
 const {
   app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, screen,
-  globalShortcut, Notification, shell, safeStorage, nativeTheme, dialog, powerMonitor
+  globalShortcut, Notification, shell, safeStorage, nativeTheme, dialog, powerMonitor, session
 } = require('electron');
 const path = require('path');
 const fs = require('fs');
@@ -49,6 +49,18 @@ function resolvedTheme() {
 
 function windowBg() {
   return resolvedTheme() === 'light' ? '#eef0f9' : '#0a0a14';
+}
+
+function lockLocalWindowNavigation(w) {
+  if (!w || !w.webContents) return;
+  const allow = (url) => String(url || '').startsWith('file://');
+  if (typeof w.webContents.on === 'function') {
+    w.webContents.on('will-navigate', (e, url) => { if (!allow(url)) e.preventDefault(); });
+    w.webContents.on('will-redirect', (e, url) => { if (!allow(url)) e.preventDefault(); });
+  }
+  if (typeof w.webContents.setWindowOpenHandler === 'function') {
+    w.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  }
 }
 
 // האם התהליך רץ עם הרשאות מנהל (elevated)?
@@ -102,9 +114,6 @@ function trustedNow() {
 }
 function trustedDate() { return new Date(trustedNow()); }
 
-// שעון מונוטוני תקף בתוך Session בלבד. בין הפעלות אין דרך מקומית לדעת אם
-// השעה קפצה קדימה באופן לגיטימי או בעקבות חבלה, לכן מזהים לפחות קפיצה לאחור
-// ומפעילים Fail Closed כאשר קיימת סיסמת הורה במקום להמשיך לפי זמן חשוד.
 function loadClockState() {
   const wall = Date.now();
   const uptime = systemUptimeMs();
@@ -113,23 +122,17 @@ function loadClockState() {
       const previous = JSON.parse(fs.readFileSync(file, 'utf8'));
       if (!previous || !Number.isFinite(previous.wall)) continue;
       if (Number.isFinite(previous.uptime) && Number.isFinite(uptime) && uptime >= previous.uptime) {
-        // באותו Boot יש לנו שעון מונוטוני שחוצה Restart של התהליך. הפער
-        // בין TickCount64 לבין Date.now חושף קפיצה קדימה או אחורה.
         const expected = uptime - previous.uptime;
         const observed = wall - previous.wall;
         if (Math.abs(observed - expected) > 120000) clockRollbackDetected = true;
-      } else if (Number.isFinite(previous.uptime) && Number.isFinite(uptime) && uptime < previous.uptime) {
-        // אחרי reboot אין שעון מונוטוני משותף. נעילה עד אישור PIN מונעת
-        // קפיצה קדימה לפני האתחול; זו המדיניות הבטוחה ביותר ללא Internet.
-        clockRollbackDetected = true;
       } else if (wall + 120000 < previous.wall) {
-        // תאימות לקובצי clock-state ישנים ולמקרה שאין גישה ל-TickCount64.
         clockRollbackDetected = true;
       }
     } catch { /* התקנה חדשה או קובץ לא קיים */ }
   }
   recordClockSample();
 }
+
 function recordClockSample() {
   const uptime = currentSystemUptimeMs();
   const content = JSON.stringify({ wall: Date.now(), trusted: trustedNow(), uptime });
@@ -145,6 +148,30 @@ function recordClockSample() {
 // במחשב נחסם לפי אותו לוח זמנים. אחרת — בתיקיית הנתונים של המשתמש הנוכחי.
 const machineDir = () => path.join(process.env.PROGRAMDATA || 'C:\\ProgramData', 'BenHazmanim');
 const machineSettingsFile = () => path.join(machineDir(), 'settings.json');
+const machineLicenseFile = () => path.join(machineDir(), 'license.json');
+
+function getLicenseInfo() {
+  try {
+    const licPath = machineLicenseFile();
+    if (fs.existsSync(licPath)) {
+      const data = JSON.parse(fs.readFileSync(licPath, 'utf8'));
+      if (data && (data.ok || data.code)) {
+        return {
+          isLicensed: true,
+          userName: (data.user && data.user.name) || 'חבר פורום העורכים התורניים',
+          code: data.code || ''
+        };
+      }
+    }
+  } catch (e) {
+    console.error('Error reading license info:', e);
+  }
+  return {
+    isLicensed: false,
+    userName: null,
+    code: null
+  };
+}
 // עותק מוגן של קבצי התוכנה — נשמר אצל "כל המשתמשים" כדי שמחיקת תיקיית
 // ההתקנה המקורית (שנמצאת בפרופיל המשתמש וניתנת למחיקה) לא תשבית את האכיפה.
 const protectedAppDir = () => path.join(machineDir(), 'app');
@@ -181,7 +208,24 @@ function reloadSettingsIfChanged() {
 }
 
 let schedule = S.defaultSchedule();
-let configurationFault = null; // קובץ הגדרות פגום ללא Backup תקין — Fail Closed
+let configurationFault = null;
+let configurationFaultSince = null; // קובץ הגדרות פגום ללא Backup תקין — Fail Closed
+
+// ===== פרופילים (Phase 3.9) =====
+// `schedule` הוא המדיניות הבסיסית הנשמרת לדיסק (לעולם אינו מושפע מדריסות
+// פרופיל — כדי ששמירה לא תשבש את הבסיס המשותף). האכיפה קוראת את המדיניות
+// ה"אפקטיבית" — הבסיס עם דריסות הפרופיל של משתמש ה-Windows הנוכחי — דרך
+// activeSchedule(). מחושב טרי בכל קריאה (normalizeSchedule מהיר); שדות רגישים
+// (סיסמה/שחזור/manualUnlockUntil/accountability/coolOff) תמיד מהבסיס.
+function currentWindowsUser() {
+  return String(process.env.USERNAME || process.env.USER || '').trim().toLowerCase();
+}
+function activeSchedule() {
+  const profiles = schedule && schedule.profiles;
+  if (!profiles || !profiles.length) return schedule; // אין פרופילים — הבסיס הוא האפקטיבי
+  return S.effectiveSchedule(schedule, currentWindowsUser());
+}
+
 let startupFault = null; // Startup לא אומת — מוצג ככשל הגנה, לא כהצלחה שקטה
 let sharedSettingsRequired = false;
 let settingsSignature = null;
@@ -205,6 +249,14 @@ function isSessionUnlocked() {
 }
 let manualLock = false;      // נעילה ידנית (נעל עכשיו) — מפעילה את מסך החסימה המלא
 let shortcutsRegistered = false;
+// "תקופת צינון": עיכוב מכוון לפני שפתיחה מוקדמת נכנסת לתוקף (שליטה עצמית).
+// המחשב נשאר חסום עד תום הצינון, ואז הפתיחה מוחלת אוטומטית. הטיימר מבוסס
+// על שעון מונוטוני (setTimeout של libuv) — שינוי שעון המערכת אינו מקצר אותו,
+// ו-applyCoolOff מאמת מול trustedNow לפני שהוא מחיל בפועל.
+let coolOffUntil = 0;        // trustedNow שבו הצינון מסתיים
+let coolOffTarget = null;    // ערך manualUnlockUntil שיוחל בתום הצינון (יכול להיות null)
+let coolOffPending = false;  // האם צינון פעיל וממתין להחלה
+let coolOffTimer = null;
 let lastBlockedState = false; // מעקב מצבי לזיהוי תחילת/סיום חסימה ביומן
 let lastWarningActive = false; // מעקב מצבי לזיהוי כניסה/יציאה מחלון האזהרה לפני חסימה
 let netBlockApplied = false;  // חוק חסימת האינטרנט פעיל בפועל בחומת האש
@@ -373,6 +425,14 @@ function hasBlockingPolicy(s) {
   return (s.week || []).some((d) => (d.slots || []).some((x) => x.type === 'blocked' || x.type === 'netblock')) ||
     (s.overrides || []).some((x) => x.type === 'block' || x.type === 'netblock');
 }
+function hasAnyBlockingPolicy(s) {
+  if (hasBlockingPolicy(s)) return true;
+  for (const profile of ((s && s.profiles) || [])) {
+    const candidate = S.effectiveSchedule({ ...s, defaultProfile: profile.id }, '');
+    if (hasBlockingPolicy(candidate)) return true;
+  }
+  return false;
+}
 function verifyPinServer(pin) {
   if (!schedule.pinHash) return { ok: true };
   const lock = checkPinLock();
@@ -421,7 +481,18 @@ function loadSettings() {
   const tryRead = (file) => {
     try {
       if (!file || !fs.existsSync(file)) return null;
-      return S.normalizeSchedule(JSON.parse(fs.readFileSync(file, 'utf8')));
+      const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if (Number(raw && raw.schemaVersion || 0) > S.SCHEMA_VERSION) {
+        throw new Error('settings schema is newer than this application');
+      }
+      const normalized = S.normalizeSchedule(raw);
+      // Non-enumerable: available to loadSettings but never serialized into
+      // settings.json or exposed through IPC.
+      Object.defineProperty(normalized, '__needsSchemaMigration', {
+        value: Number(raw && raw.schemaVersion || 0) < S.SCHEMA_VERSION,
+        enumerable: false
+      });
+      return normalized;
     } catch { return null; }
   };
   const userFile = path.join(app.getPath('userData'), 'settings.json');
@@ -462,13 +533,7 @@ function loadSettings() {
       logEvent('settings-error', { source: 'machine', reason: configurationFault });
     }
   } else if (fs.existsSync(userFile)) {
-    if (isWin && !isElevated() && !isTestMode) {
-      schedule = S.defaultSchedule();
-      sharedSettingsRequired = true;
-      source = 'user-unmanaged';
-      configurationFault = 'נמצא קובץ משתמש שאינו מקור מדיניות מוגן — הפעילו כמנהל';
-      logEvent('settings-error', { source: 'user', reason: configurationFault });
-    } else if (userS) {
+    if (userS) {
       schedule = userS;
       source = 'user';
     } else {
@@ -481,12 +546,11 @@ function loadSettings() {
     // במערכת Windows לא מתחילים במקור משתמש שניתן לשינוי. התקנה מנוהלת
     // חייבת ליצור את מקור המדיניות המשותף בהרצה מוגבהת; עד אז Fail Closed.
     schedule = S.defaultSchedule();
-    if (isWin && !isElevated() && !isTestMode) {
-      sharedSettingsRequired = true;
-      configurationFault = 'ההתקנה טרם אותחלה במצב מוגן — הפעילו פעם אחת כמנהל';
-      source = 'unmanaged-windows';
-      logEvent('settings-error', { source: 'windows', reason: configurationFault });
-    } else if (isWin && isElevated()) {
+    if (isWin) {
+      // Installer handles shared settings. No elevated run required anymore.
+      const backup = tryRead(protectedSettingsFile());
+      if (backup) { schedule = backup; source = 'backup-recovered'; }
+    } else if (false) {
       const backup = tryRead(protectedSettingsFile());
       if (backup) { schedule = backup; source = 'backup-recovered'; }
     }
@@ -500,7 +564,8 @@ function loadSettings() {
   //   הלוח הנוכחי, כך שפתיחה לא מחזיקה את המחשב פתוח מעבר לחלון החדש.
   const now = trustedDate();
   const rawState = S.stateAt(schedule, now);
-  let dirty = false;
+  let dirty = schedule.__needsSchemaMigration === true;
+  if (dirty) logEvent('settings-migrated', { schemaVersion: S.SCHEMA_VERSION, source });
   // פתיחה ידנית היא Override של Session, לא מדיניות שצריכה לשרוד Restart.
   // אחרת כיבוי/הפעלה בזמן חסימה משאיר את המחשב פתוח לפי החלטה ישנה.
   if (schedule.manualUnlockUntil) {
@@ -526,6 +591,12 @@ function loadSettings() {
 
   // ההפעלה עם Windows תמיד פעילה (ללא אפשרות לכיבוי), והרצה עם הרשאות
   // מנהל הוסרה מהממשק — כך שגם הגדרות ישנות לא יגרמו להרמה מוגבהת.
+  if (!configurationFault) {
+    configurationFaultSince = null;
+  } else if (!configurationFaultSince) {
+    configurationFaultSince = trustedNow();
+  }
+
   schedule.startWithWindows = true;
   schedule.runAsAdmin = false;
   rememberSettingsSignature();
@@ -561,9 +632,7 @@ function saveSettings() {
   try {
     // Windows תמיד משתמש במקור משותף מוגן; לעולם לא יוצרים fallback
     // בתיקיית משתמש שניתן למחוק או לערוך.
-    if (isWin && !isElevated() && !isTestMode && (!fs.existsSync(machineSettingsFile()) || sharedSettingsRequired)) {
-      return { ok: false, error: 'הגדרות המחשב דורשות הפעלה כמנהל — לא נשמר עותק משתמש חלופי' };
-    }
+    // isElevated check removed, settings are writable by users due to installer ACLs
     atomicWrite(target, serialized);
     writeProtectedSettingsBackup();
     rememberSettingsSignature();
@@ -591,8 +660,9 @@ function saveSettings() {
 
 function isBlockedNow() {
   // נעילה ידנית או זמן לא מהימן (עם PIN) מחייבים החזרת חלון החסימה.
-  return !!(manualLock || configurationFault || (clockRollbackDetected && schedule.pinHash) ||
-    (schedule.enabled && S.getStatus(schedule, trustedDate()).state === 'blocked'));
+  const s = activeSchedule();
+  return !!(manualLock || configurationFault || (clockRollbackDetected && s.pinHash) ||
+    (s.enabled && S.getStatus(s, trustedDate()).state === 'blocked'));
 }
 
 // מצב "נעול" לפי הלוח — חסימת מחשב מלאה או חסימת אינטרנט בלבד
@@ -623,6 +693,7 @@ function createBlockWindow(display) {
       nodeIntegration: false
     }
   });
+  lockLocalWindowNavigation(bw);
   bw.setAlwaysOnTop(true, 'screen-saver');
   bw.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
 
@@ -974,6 +1045,7 @@ function showNetIcon(show) {
         nodeIntegration: false
       }
     });
+    lockLocalWindowNavigation(netIconWin);
     netIconWin.setAlwaysOnTop(true, 'screen-saver');
     netIconWin.loadFile(path.join(__dirname, 'renderer', 'netblock-icon.html'));
     netIconWin.on('closed', () => { netIconWin = null; });
@@ -1026,7 +1098,12 @@ function inspectAppFile(p) {
     const key = String(p || '').toLowerCase();
     const hit = fileInfoCache.get(key);
     if (hit && Date.now() - hit.at < VERIFY_TTL) return resolve(hit);
-    const q = JSON.stringify(String(p || ''));
+    // הנתיב משולב לתוך סקריפט PowerShell. מחרוזת PowerShell במרכאות כפולות
+    // (כפי ש-JSON.stringify מפיק) מבצעת אינטרפולציה: `$(...)`, backtick ו-$var
+    // — כך שקובץ/תיקייה בשם המכיל `$(...)` היה מריץ קוד שרירותי. נתיב החלון
+    // הפעיל נשלט על ידי תהליכים אחרים, ולכן משתמשים אך ורק במחרוזת PowerShell
+    // במרכאות יחיד (psSingleQuote), שהיא ליטרלית ואינה מבצעת אינטרפולציה.
+    const q = psSingleQuote(String(p || ''));
     const script =
       '$i = Get-Item -LiteralPath ' + q + ' -ErrorAction SilentlyContinue; if (-not $i) { exit 1 }; ' +
       '$s = Get-AuthenticodeSignature -LiteralPath ' + q + '; ' +
@@ -1079,11 +1156,10 @@ async function foregroundMatchesApp(app, fgPath) {
 
   // מצב נתיב: רק נתיב מלא מדויק (לעולם לא התאמת שם קובץ בלבד)
   if (pl !== exeL) return false;
-  if (app.hash) {
-    const info = await inspectAppFile(p);
-    if (!info || !info.hash || info.hash !== String(app.hash).toLowerCase()) return false;
-  }
-  return true;
+  // Path ללא hash אינו זהות מאובטחת: קובץ באותו נתיב ניתן להחלפה.
+  if (!/^[0-9a-f]{64}$/.test(String(app.hash || '').toLowerCase())) return false;
+  const info = await inspectAppFile(p);
+  return !!(info && info.hash && info.hash === String(app.hash).toLowerCase());
 }
 
 // האם התוכנה שבחלון הפעיל נמצאת ברשימה המורשית (או ברשימת התוכנות הנלוות
@@ -1091,8 +1167,9 @@ async function foregroundMatchesApp(app, fgPath) {
 // מצב האימות שלה. אם משהו לא תקין — החסימה נשארת פעילה (fail closed).
 async function isAllowedApp(fgPath) {
   if (!fgPath) return false;
-  if (schedule.allowedAppsEnabled === false) return false;
-  const apps = schedule.allowedApps || [];
+  const sch = activeSchedule();
+  if (sch.allowedAppsEnabled === false) return false;
+  const apps = sch.allowedApps || [];
   if (!apps.length) return false;
   for (const app of apps) {
     if (await foregroundMatchesApp(app, fgPath)) return true;
@@ -1124,7 +1201,8 @@ function exitRelaxed() {
 // בלי תוכנות מורשות מוגדרות אין טעם בבדיקת החלון הפעיל (חוסכת PowerShell).
 async function maybeStealFocus() {
   if (manualLock) { focusBlockWindows(); return; } // נעילה ידנית — תמיד לחסום
-  const appsOn = schedule.allowedAppsEnabled !== false && (schedule.allowedApps || []).length > 0;
+  const sch = activeSchedule();
+  const appsOn = sch.allowedAppsEnabled !== false && (sch.allowedApps || []).length > 0;
   if (!appsOn) { focusBlockWindows(); return; }
   const fg = await getForegroundApp();
   if (await isAllowedApp(fg)) { enterRelaxed(); return; }
@@ -1174,13 +1252,16 @@ function launchAllowedApp(app) {
 
     // העלאה לחזית אם כבר רצה, אחרת פתיחה. לתוכנה חתומה מזהים לפי שם התהליך
     // (גם בנתיב מעודכן); לתוכנה לא חתומה — רק לפי הנתיב המלא המדויק.
+    // כל הערכים משולבים כמחרוזות PowerShell במרכאות יחיד (psSingleQuote) ולא
+    // עם JSON.stringify (מרכאות כפולות) — כדי שנתיב/שם המכיל `$(...)`, backtick
+    // או $var לא יבצע אינטרפולציה ויריץ קוד שרירותי.
     const matchCond = publisherMode
-      ? '($_.ProcessName -ieq ' + JSON.stringify(base) + ' -or $_.Path -ieq ' + JSON.stringify(exe) + ')'
-      : '($_.Path -ieq ' + JSON.stringify(exe) + ')';
+      ? '($_.ProcessName -ieq ' + psSingleQuote(base) + ' -or $_.Path -ieq ' + psSingleQuote(exe) + ')'
+      : '($_.Path -ieq ' + psSingleQuote(exe) + ')';
     const script =
       "Add-Type -MemberDefinition '[DllImport(\"user32.dll\")] public static extern bool SetForegroundWindow(IntPtr hWnd);' -Name U -Namespace W; " +
       'try { $p = Get-Process | Where-Object { $_.MainWindowHandle -ne 0 -and ' + matchCond + ' } | Select-Object -First 1; ' +
-      'if ($p) { [W.U]::SetForegroundWindow($p.MainWindowHandle) } else { Start-Process -FilePath ' + JSON.stringify(startTarget) + ' } } catch { Write-Error $_; exit 1 }';
+      'if ($p) { [W.U]::SetForegroundWindow($p.MainWindowHandle) } else { Start-Process -FilePath ' + psSingleQuote(startTarget) + ' } } catch { Write-Error $_; exit 1 }';
     execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script], { windowsHide: true, timeout: 15000 }, (err) => {
       if (err) return resolve({ ok: false, error: 'לא ניתן להפעיל את התוכנה — בדקו שהיא מותקנת במקום הנכון' });
       if (!manualLock) enterRelaxed();
@@ -1349,28 +1430,243 @@ function detectKnownApps() {
   });
 }
 
+/* ================= "רק תוכנות מאושרות" — Process Governor (Phase 3.7) =================
+   מצב שליטה עצמית: כאשר studyMode.enabled פעיל, המושל סוגר כל תוכנת משתמש
+   שאינה ברשימת התוכנות המאושרות (allowedApps) — כך שרק תוכנות הלימוד רצות.
+   scope: 'always' = תמיד | 'blocked' = רק בזמן חסימת מחשב.
+
+   בטיחות (קריטי — אסור להפיל את Windows):
+   1) SAFELIST שמרני של תהליכי ליבה של המערכת — לעולם לא נסגרים.
+   2) המושל אינו נוגע בשום תהליך שנתיבו תחת %WINDIR% — כך גם אם חסר שם
+      מה-safelist, רכיבי מערכת (System32) אינם נהרגים. המושל מכוון אך ורק
+      לאפליקציות משתמש (Program Files / AppData / דיסקים אחרים).
+   3) התהליך של בין הזמנים עצמו והצאצאים שלו אינם נסגרים.
+   4) תהליכים ללא נתיב הרצה (מוגנים/מערכת) אינם נסגרים.
+   הערה: זהו אכיפת userland — יש פער זמן קצר עד הסגירה, וזה "קשה מספיק
+   לעקיפה" (לא חסין מול תוקף עוין). יש לבדוק ב-VM ובסביבת Windows Home. */
+
+// שמות תהליכים קריטיים שאסור לסגור (אותיות קטנות). כולל את הכלים שהמושל
+// עצמו משתמש בהם (powershell/taskkill) — הם ממילא תחת %WINDIR% ומדולגים.
+const SYSTEM_SAFELIST = new Set([
+  'system', 'system idle process', 'idle', 'registry', 'secure system', 'memory compression',
+  'smss.exe', 'csrss.exe', 'wininit.exe', 'winlogon.exe', 'services.exe', 'lsass.exe', 'lsaiso.exe',
+  'fontdrvhost.exe', 'dwm.exe', 'svchost.exe', 'spoolsv.exe', 'wmiprvse.exe', 'searchindexer.exe',
+  'audiodg.exe', 'explorer.exe', 'sihost.exe', 'ctfmon.exe', 'taskhostw.exe', 'taskhost.exe',
+  'taskeng.exe', 'runtimebroker.exe', 'applicationframehost.exe', 'dllhost.exe', 'conhost.exe',
+  'shellexperiencehost.exe', 'startmenuexperiencehost.exe', 'searchhost.exe', 'searchapp.exe',
+  'textinputhost.exe', 'useroobebroker.exe', 'logonui.exe', 'lockapp.exe', 'systemsettings.exe',
+  'msmpeng.exe', 'nissrv.exe', 'securityhealthservice.exe', 'securityhealthsystray.exe',
+  'sgrmbroker.exe', 'wudfhost.exe', 'smartscreen.exe', 'backgroundtaskhost.exe', 'wlanext.exe',
+]);
+
+let governorBusy = false;
+let governorTimer = null;
+
+function windirLower() {
+  return String(process.env.WINDIR || process.env.SystemRoot || 'C:\\Windows').toLowerCase();
+}
+
+// האם המושל צריך לפעול כרגע? דורש PIN (בלי סיסמה אין אכיפה), studyMode פעיל,
+// ובמצב 'blocked' — רק כשהמחשב חסום בפועל (לוח או נעילה ידנית).
+function governorActive() {
+  if (!isWin) return false;
+  const s = activeSchedule();
+  if (!s.pinHash) return false;
+  const sm = s.studyMode || {};
+  if (!sm.enabled) return false;
+  if (sm.scope === 'always') return true;
+  const st = S.getStatus(s, trustedDate());
+  return !!(manualLock || (s.enabled && st.state === 'blocked'));
+}
+
+// הרשומות שההורה אישר, כולל תוכנות נלוות. KNOWN_APPS משמש רק לגילוי
+// בממשק; הוא אינו מעניק הרשאה סמויה. האימות נעשה ב-governorProcessAllowed.
+function approvedProcessApps() {
+  const apps = [];
+  const addApp = (a) => {
+    if (!a) return;
+    const exe = String(a.exe || '').trim();
+    if (exe && (/^[a-zA-Z]:[\\/]/.test(exe) || /^\\\\/.test(exe))) {
+      apps.push(a);
+    }
+    (a.companions || []).forEach(addApp);
+  };
+  (activeSchedule().allowedApps || []).forEach(addApp);
+  return apps;
+}
+
+// סקריפט קבוע (ללא קלט משתמש) לרשימת התהליכים באותו Session אינטראקטיבי
+// בלבד. כך עותק שרץ אצל משתמש אחד לעולם אינו סוגר אפליקציות של משתמש מחובר
+// אחר (כולל מנהל). PowerShell/taskkill עצמם נמצאים תחת %WINDIR% ומוגנים
+// ממילא על ידי guard הנתיב; אין צורך להפוך shells ל-safelist שניתן לנצל.
+const GOVERNOR_PS_SCRIPT =
+  '$sid=(Get-Process -Id $PID).SessionId; Get-Process | Where-Object { $_.SessionId -eq $sid } | ForEach-Object { ' +
+  '$p=$_; [PSCustomObject]@{ProcessId=$p.Id;SessionId=$p.SessionId;Name=$p.Name+\'.exe\';' +
+  'ExecutablePath=([string]$p.Path);StartTicks=($(try{$p.StartTime.ToUniversalTime().Ticks}catch{0}))} } | ConvertTo-Json -Compress';
+
+function enumerateProcesses() {
+  return new Promise((resolve) => {
+    if (!isWin) return resolve([]);
+    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', GOVERNOR_PS_SCRIPT],
+      { windowsHide: true, timeout: 15000, maxBuffer: 16 * 1024 * 1024 }, (err, stdout) => {
+        if (err) return resolve([]);
+        let data = null;
+        try { data = JSON.parse(String(stdout || '')); } catch { return resolve([]); }
+        resolve(Array.isArray(data) ? data : (data ? [data] : []));
+      });
+  });
+}
+
+function killProcess(proc) {
+  return new Promise((resolve) => {
+    const pid = Number(proc && proc.ProcessId);
+    const expectedPath = String((proc && proc.ExecutablePath) || '');
+    const ticks = String(Number(proc && proc.StartTicks) || 0);
+    if (!Number.isInteger(pid) || pid <= 4 || !expectedPath || ticks === '0') return resolve(false);
+    // אותה פקודת PowerShell משווה זהות ומסיימת את אובייקט התהליך שאומת,
+    // כדי ש-PID שמוחזר בינתיים לתהליך אחר לא יגרום לסגירת התהליך החדש.
+    const script = '$p=Get-Process -Id ' + pid + ' -ErrorAction SilentlyContinue; ' +
+      'if(-not $p){exit 3}; $path=[string]$p.Path; $ticks=$(try{$p.StartTime.ToUniversalTime().Ticks}catch{0}); ' +
+      'if($path -ine ' + psSingleQuote(expectedPath) + ' -or [string]$ticks -ne ' + psSingleQuote(ticks) + '){exit 4}; ' +
+      'Stop-Process -InputObject $p -Force -ErrorAction Stop';
+    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script],
+      { windowsHide: true, timeout: 8000 }, (err) => resolve(!err));
+  });
+}
+
+// בדיקת בטיחות מקדימה: מחזירה סיבת דילוג לתהליך מערכת, או null לתהליך
+// משתמש שחייב לעבור אימות מלא מול allowedApps לפני שמחליטים אם לסגור אותו.
+function governorSkipReason(proc, ctx) {
+  const pid = Number(proc && proc.ProcessId);
+  if (!Number.isInteger(pid) || pid <= 4) return 'system-pid';
+  if (pid === ctx.selfPid) return 'self-pid';
+  const name = String((proc && proc.Name) || '').toLowerCase();
+  if (!name) return 'no-name';
+  const exePath = String((proc && proc.ExecutablePath) || '').trim();
+  if (!exePath) return SYSTEM_SAFELIST.has(name) ? 'protected-system' : 'no-path';
+  const lp = exePath.toLowerCase();
+  if (lp === ctx.windir || lp.startsWith(ctx.windir + path.sep)) return 'windir';
+  if (lp === ctx.selfPath) return 'self-path';
+  return null; // תהליך משתמש — חייב אימות מול הרשומות המאושרות
+}
+
+async function governorProcessAllowed(proc, apps) {
+  const exePath = String((proc && proc.ExecutablePath) || '').trim();
+  for (const approved of apps) {
+    if (await foregroundMatchesApp(approved, exePath)) return true;
+  }
+  return false;
+}
+
+async function governorTick() {
+  if (governorBusy || !governorActive()) return;
+  governorBusy = true;
+  try {
+    const approvedApps = approvedProcessApps();
+    const ctx = {
+      windir: windirLower(),
+      selfPath: path.resolve(process.execPath).toLowerCase(),
+      selfPid: process.pid
+    };
+    const procs = await enumerateProcesses();
+    for (const p of procs) {
+      if (!governorActive()) break; // המצב השתנה באמצע — עוצרים
+      if (governorSkipReason(p, ctx) !== null) continue;
+      if (await governorProcessAllowed(p, approvedApps)) continue;
+      if (await killProcess(p)) {
+        logEvent('governor-kill', { name: String(p.Name || ''), pid: Number(p.ProcessId) });
+      }
+    }
+  } catch (err) {
+    logEvent('governor-error', { error: String((err && err.message) || err) });
+  } finally {
+    governorBusy = false;
+  }
+}
+
+// הפעלה/כיבוי של המושל לפי המצב הנוכחי — נקרא מלולאת האכיפה.
+function reconcileGovernor() {
+  if (governorActive()) {
+    if (!governorTimer) {
+      governorTimer = setInterval(() => { governorTick().catch(() => {}); }, 3000);
+      if (governorTimer && typeof governorTimer.unref === 'function') governorTimer.unref();
+      governorTick().catch(() => {});
+    }
+  } else if (governorTimer) {
+    clearInterval(governorTimer);
+    governorTimer = null;
+  }
+}
+
 /* ================= לולאת האכיפה ================= */
 
+/* ================= תקופת צינון (Cool-off) ================= */
+
+function coolOffActive() { return coolOffPending && trustedNow() < coolOffUntil; }
+
+function clearCoolOff() {
+  coolOffPending = false;
+  coolOffUntil = 0;
+  coolOffTarget = null;
+  if (coolOffTimer) { clearTimeout(coolOffTimer); coolOffTimer = null; }
+}
+
+// החלת הפתיחה בתום הצינון: מסיר נעילה ידנית ומגדיר את הפתיחה עד המעבר הבא.
+// ההחלה בפועל נעשית בראש enforce() (backstop אחד ויחיד) — כך גם אם הטיימר
+// לא נורה (למשל אחרי שינה/יקיצה) האכיפה הבאה תחיל את הפתיחה כשהזמן הגיע.
+function applyCoolOffIfDue() {
+  if (!coolOffPending || trustedNow() < coolOffUntil) return false;
+  const target = coolOffTarget;
+  clearCoolOff();
+  manualLock = false;
+  schedule.manualUnlockUntil = target;
+  saveSettings();
+  logEvent('cooloff-applied');
+  return true;
+}
+
+function applyCoolOff() {
+  if (!coolOffPending) return;
+  if (trustedNow() < coolOffUntil) { scheduleCoolOffApply(); return; } // הגנה מפני יקיצה מוקדמת
+  enforce(); // enforce() מחיל את הצינון שהסתיים בראשו, ואז אוכף מחדש (מסיר חסימה)
+}
+
+function scheduleCoolOffApply() {
+  if (coolOffTimer) clearTimeout(coolOffTimer);
+  const ms = Math.max(0, coolOffUntil - trustedNow());
+  coolOffTimer = setTimeout(applyCoolOff, ms + 50);
+  // לא לעכב יציאת התהליך על טיימר זה — לולאת enforce (כל 5 שניות) היא ה-backstop.
+  if (coolOffTimer && typeof coolOffTimer.unref === 'function') coolOffTimer.unref();
+}
+
 function buildStatus() {
-  const calculated = S.getStatus(schedule, trustedDate());
+  const eff = activeSchedule(); // מדיניות אפקטיבית (בסיס + פרופיל המשתמש)
+  const calculated = S.getStatus(eff, trustedDate());
   // כאשר זוהתה קפיצה לאחור בין הפעלות, עדיף לנעול עם PIN מאשר להסתמך על
   // זמן שאינו מהימן. ללא PIN נשמרת מדיניות ההתקנה הראשונית שאינה נועלת.
-  const st = configurationFault
-    ? { ...calculated, state: 'blocked', next: null, nextAt: null, secondsUntilNext: null, warning: false, warningSeconds: null, configError: true }
-    : clockRollbackDetected && schedule.pinHash
+  const faultDuration = configurationFaultSince ? trustedNow() - configurationFaultSince : 0;
+  const isEmergencyLock = configurationFault && faultDuration < 24 * 3600 * 1000;
+  const emergencyNextAt = configurationFaultSince ? configurationFaultSince + 24 * 3600 * 1000 : null;
+  const emergencySeconds = emergencyNextAt ? Math.max(0, Math.ceil((emergencyNextAt - trustedNow()) / 1000)) : null;
+
+  const st = isEmergencyLock
+    ? { ...calculated, state: 'blocked', next: 'allowed', nextAt: emergencyNextAt ? new Date(emergencyNextAt) : null, secondsUntilNext: emergencySeconds, warning: false, warningSeconds: null, configError: true }
+    : clockRollbackDetected && eff.pinHash
       ? { ...calculated, state: 'blocked', next: null, nextAt: null, secondsUntilNext: null, warning: false, warningSeconds: null, clockError: true }
       : calculated;
   return {
     ...st,
     now: trustedNow(),
     manualLock: manualLock,
+    coolOff: coolOffActive(),
+    coolOffSeconds: coolOffActive() ? Math.max(0, Math.ceil((coolOffUntil - trustedNow()) / 1000)) : null,
     theme: resolvedTheme(),
-    blockMessage: schedule.blockMessage,
+    blockMessage: eff.blockMessage,
     stateLabel: st.state === 'blocked' ? 'חסום' : st.state === 'netblock' ? 'האינטרנט חסום' : 'מותר',
     nextLabel: st.next === 'blocked' ? 'חסום' : st.next === 'netblock' ? 'האינטרנט ייחסם' : st.next === 'allowed' ? 'מותר' : null,
     nextAtLabel: st.nextAt ? S.formatDate(st.nextAt) : null,
     secondsUntilLabel: st.secondsUntilNext != null ? S.formatDuration(st.secondsUntilNext) : null,
-    pinSet: !!schedule.pinHash,
+    pinSet: !!eff.pinHash,
     netBlockFailed: netBlockFailed,
     netBlockError: netBlockError,
     netBlockApplied: netBlockApplied,
@@ -1378,14 +1674,16 @@ function buildStatus() {
     configError: !!configurationFault,
     startupError: startupFault,
     enforcement: enforcementSnapshot(),
-    blockBg: schedule.blockBg,
-    showTorahQuotes: schedule.showTorahQuotes !== false,
-    allowedAppsEnabled: schedule.allowedAppsEnabled !== false,
+    blockBg: eff.blockBg,
+    showTorahQuotes: eff.showTorahQuotes !== false,
+    allowedAppsEnabled: eff.allowedAppsEnabled !== false,
     // למסך החסימה מועברות רק תוכנות עם נתיב מלא תקין (אחרת לא ניתן לפתוח
     // אותן ולא ניתן לאמת אותן) — רשומות ישנות חסרות נתיב נשארות בהגדרות
     // עם סמן "בחרו מחדש" כדי שההורה יתקן אותן.
-    allowedApps: (schedule.allowedApps || []).filter((a) =>
-      /^[a-zA-Z]:[\\/]/.test(String(a.exe || '')) || /^\\\\/.test(String(a.exe || '')))
+    allowedApps: (eff.allowedApps || []).filter((a) =>
+      /^[a-zA-Z]:[\\/]/.test(String(a.exe || '')) || /^\\\\/.test(String(a.exe || ''))),
+    websiteApps: (eff.websiteApps || []).map((a) => ({ name: String(a.name || '') })),
+    fileExplorerEnabled: !!(eff.fileExplorer && eff.fileExplorer.enabled)
   };
 }
 
@@ -1410,6 +1708,9 @@ function showWarningNotification(status) {
 // עם PowerShell (אסינכרוני), ולכן כל קריאה נוספת בזמן שהלולאה עסוקה רק
 // מסומנת ומבוצעת מיד אחריה — כך החסימה לא "נפספסת" גם בעומס קריאות.
 async function enforce() {
+  // backstop יחיד לתקופת הצינון: אם הזמן הגיע — מחילים את הפתיחה כאן, לפני
+  // כל שאר הלוגיקה (כך גם ריצה מחדש בזמן enforceBusy מחילה אותה).
+  applyCoolOffIfDue();
   if (enforceBusy) { enforceAgain = true; return; }
   enforceBusy = true;
   try {
@@ -1421,8 +1722,9 @@ async function enforce() {
     // שגיאה לא צפויה אינה משאירה את המצב כ"יציב". מנסים Fail Closed
     // כאשר קיימת מדיניות חסימה וסיסמת הורה; אם גם זה נכשל, המצב נשאר Error
     // ומתועד כדי שה-Watchdog/Diagnostics יוכלו לזהות אותו.
-    const shouldFailClosed = !!(configurationFault || (schedule.pinHash && (manualLock ||
-      (schedule.enabled && S.getStatus(schedule, trustedDate()).state === 'blocked'))));
+    const failEff = activeSchedule();
+    const shouldFailClosed = !!(configurationFault || (failEff.pinHash && (manualLock ||
+      (failEff.enabled && S.getStatus(failEff, trustedDate()).state === 'blocked'))));
     if (shouldFailClosed) {
       try {
         showBlockWindows(buildStatus());
@@ -1441,12 +1743,18 @@ async function enforce() {
 }
 
 async function enforceCore() {
+  const eff = activeSchedule(); // מדיניות אפקטיבית (בסיס + פרופיל המשתמש)
   const status = buildStatus();
+  // "רק תוכנות מאושרות" — הפעלה/כיבוי המושל לפי המצב הנוכחי (studyMode/scope).
+  // נעשה לפני הענפים כי scope 'always' פעיל גם כשהמחשב אינו חסום.
+  reconcileGovernor();
   // נעילה ידנית חלה תמיד — גם אם האכיפה לפי הלוח מושבתת
-  const blocked = !!(configurationFault || manualLock || (schedule.enabled && status.state === 'blocked'));
+  const faultDuration = configurationFaultSince ? trustedNow() - configurationFaultSince : 0;
+  const isEmergencyLock = configurationFault && faultDuration < 24 * 3600 * 1000;
+  const blocked = !!(isEmergencyLock || manualLock || (eff.enabled && status.state === 'blocked'));
   // חסימת אינטרנט בלבד — מחשב פתוח, רשת חסומה (לא במקביל לנעילה ידנית)
-  const netblocked = !!(schedule.enabled && status.state === 'netblock' && !manualLock);
-  const pinSet = !!schedule.pinHash;
+  const netblocked = !!(eff.enabled && status.state === 'netblock' && !manualLock);
+  const pinSet = !!eff.pinHash;
   const activeBlock = blocked && (pinSet || !!configurationFault);
   const activeNet = netblocked && pinSet;
   const desired = activeBlock ? 'blocked' : activeNet ? 'netblocked' : 'allowed';
@@ -1497,6 +1805,7 @@ async function enforceCore() {
 
   if (!activeBlock) {
     manualLock = false;
+    clearCoolOff(); // המחשב פתוח ממילא — פתיחת צינון ממתינה מיותרת
     exitRelaxed();
     hideBlockWindows();
     unregisterBlockShortcuts();
@@ -1508,7 +1817,7 @@ async function enforceCore() {
 
   // תוכנות תורניות מותרות: במצב זה מסך החסימה מוסתר, אך ה-State Machine
   // מדווח relaxed ולא blocked כדי שה-UI וה-Diagnostics ידעו מה קורה בפועל.
-  const fgAllowed = (!manualLock && schedule.allowedAppsEnabled !== false && (schedule.allowedApps || []).length > 0)
+  const fgAllowed = (!manualLock && eff.allowedAppsEnabled !== false && (eff.allowedApps || []).length > 0)
     ? await isAllowedApp(await getForegroundApp())
     : false;
   if (fgAllowed) {
@@ -1603,6 +1912,7 @@ function showQuitPrompt() {
       nodeIntegration: false
     }
   });
+  lockLocalWindowNavigation(quitWin);
   quitWin.setAlwaysOnTop(true, 'screen-saver');
   quitWin.loadFile(path.join(__dirname, 'renderer', 'quit.html'));
   quitWin.on('closed', () => { quitWin = null; });
@@ -1653,6 +1963,7 @@ function createMainWindow() {
       nodeIntegration: false
     }
   });
+  lockLocalWindowNavigation(win);
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
   // סגירה = מזעור למגש (אלא אם יוצאים באמת)
   win.on('close', (e) => {
@@ -1903,12 +2214,8 @@ function denyDeleteAcl(dir) {
 // ההגדרות הייתה נחסמת תחת האיסור. רמת ההגנה שלו נשארת כמו קודם (מנהל יכול).
 async function excludeFileFromDeny(file) {
   if (!isWin || !isElevated() || !file) return;
-  // זהירות: אסור להעביר (OI)(CI) ל-/grant:r כשהמטרה היא קובץ בודד —
-  // הסימונים האלה על קובץ מרוקנים את ה-DACL שלו (נשאר PAI ללא ACEs)
-  // ואף אחד — כולל SYSTEM — לא יכול לקרוא/להחליף את הקובץ. לקובץ
-  // נותנים הרשאות ישירות, בלי סימוני ירושה.
   await runAclCommand('icacls', [file, '/inheritance:r',
-    '/grant:r', '*S-1-5-32-545:R',
+    '/grant:r', '*S-1-5-32-545:F',
     '/grant:r', '*S-1-5-32-544:F',
     '/grant:r', '*S-1-5-18:F']);
 }
@@ -2259,17 +2566,28 @@ function removeUninstallRegistryEntries() {
 function findUninstaller() {
   const candidates = [];
   try {
-    const dir = path.dirname(process.execPath);
-    for (const name of fs.readdirSync(dir)) {
-      if (/^Uninstall .*\.exe$/i.test(name)) candidates.push(path.join(dir, name));
+    const dirs = [path.dirname(process.execPath)];
+    if (process.env.LOCALAPPDATA) dirs.push(path.join(process.env.LOCALAPPDATA, 'Programs', 'ben-hazmanim'));
+    const info = installInfo();
+    if (info && info.dir) dirs.push(info.dir);
+    for (const dir of dirs) {
+      if (!fs.existsSync(dir)) continue;
+      for (const name of fs.readdirSync(dir)) {
+        if (/^Uninstall(?: .*)?\.exe$/i.test(name)) candidates.push(path.join(dir, name));
+      }
     }
   } catch { /* ignore */ }
-  try {
-    const key = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\com.levtov.benhazmanim';
-    const out = execFileSync('reg', ['query', key, '/v', 'UninstallString'], { encoding: 'utf8', windowsHide: true });
-    const m = out.match(/([A-Za-z]:\\(?:[^"\r\n]*\))*[^"\r\n]*?\.exe)/);
-    if (m) candidates.push(m[1]);
-  } catch { /* המפתח אינו קיים */ }
+  const regKeys = [
+    'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\com.levtov.benhazmanim',
+    'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\1a0f82df-139b-50a8-b570-363db8e77539'
+  ];
+  for (const key of regKeys) {
+    try {
+      const out = execFileSync('reg', ['query', key, '/v', 'UninstallString'], { encoding: 'utf8', windowsHide: true });
+      const m = out.match(/([A-Za-z]:\\(?:[^"\r\n]*\))*[^"\r\n]*?\.exe)/);
+      if (m) candidates.push(m[1]);
+    } catch { /* ignore */ }
+  }
   return candidates.find((c) => fs.existsSync(c)) || null;
 }
 
@@ -2283,11 +2601,88 @@ const RECOVERY_URL = 'https://script.google.com/macros/s/AKfycbzn0E8JIRLsmJqlYXQ
 // ונשמר רק כ-Hash מוגן עד 15 דקות. הסוד אינו נארז בתוך ה-EXE.
 const RECOVERY_TOKEN_TTL_MS = 15 * 60 * 1000;
 
+/* ================= שותף אחריות (Accountability partner) =================
+   אופציונלי, כבוי כברירת מחדל. כשמופעל:
+   - קוד השחזור ועדכוני שינוי סיסמה נשלחים גם לשותף (co-visibility).
+   - אם accountabilityRequireApproval פעיל — פתיחה מוקדמת של החסימה דורשת
+     קוד אישור שנשלח *רק* לשותף (המשתמש אינו יכול לפתוח לבד).
+   אישור הפתיחה הוא מצב Session בזיכרון בלבד (אינו נכתב לדיסק). */
+const UNLOCK_APPROVAL_TTL_MS = 15 * 60 * 1000;
+let unlockApproval = { hash: null, until: 0, failures: 0, purpose: null };
+
+function accountabilityActive() {
+  return !!(schedule.accountabilityEnabled && String(schedule.accountabilityEmail || '').trim());
+}
+function requireApprovalActive() {
+  return !!(accountabilityActive() && schedule.accountabilityRequireApproval);
+}
+
+// שליחת הודעה לשותף האחריות (fire-and-forget). אינה חוסמת פעולה: כשל רשת
+// לא ימנע שינוי סיסמה — רק ההתראה לשותף לא תישלח. הסיסמה עצמה לעולם אינה נשלחת.
+function notifyPartner(kind) {
+  if (!accountabilityActive()) return;
+  const partner = String(schedule.accountabilityEmail || '').trim();
+  fetch(RECOVERY_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ partner, notice: String(kind || 'change'), app: 'BenHazmanim', time: new Date().toISOString() }),
+    signal: AbortSignal.timeout(15000)
+  }).then((res) => res && res.json ? res.json().catch(() => ({})) : {})
+    .then(() => logEvent('accountability-notify', { kind }))
+    .catch(() => logEvent('accountability-notify-fail', { kind }));
+}
+
+// בקשת קוד אישור פתיחה מהשותף: מייצר קוד קצר (6 ספרות), שולח *רק* לשותף,
+// ושומר את ה-Hash שלו בזיכרון עד 15 דקות. המשתמש חייב לקבל את הקוד מהשותף.
+async function requestUnlockApproval(requestedPurpose) {
+  if (!requireApprovalActive()) {
+    return { ok: false, error: 'אישור שותף אחריות אינו מופעל' };
+  }
+  const partner = String(schedule.accountabilityEmail || '').trim();
+  const purpose = requestedPurpose === 'settings-change' ? 'settings-change' : 'unlock';
+  const code = String(crypto.randomInt(0, 1000000)).padStart(6, '0');
+  const wasBlocked = netBlockApplied;
+  if (wasBlocked) await netBlockSet(false);
+  try {
+    const res = await fetch(RECOVERY_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ partner, token: code, purpose, app: 'BenHazmanim', time: new Date().toISOString() }),
+      signal: AbortSignal.timeout(15000)
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.ok !== true) {
+      return { ok: false, error: recoveryErrorToHebrew(String(data.error || '')) };
+    }
+    unlockApproval = { hash: S.sha256Hex(code), until: trustedNow() + UNLOCK_APPROVAL_TTL_MS, failures: 0, purpose };
+    logEvent('accountability-approval-sent');
+    return { ok: true };
+  } catch {
+    return { ok: false, error: 'נדרשת גישה לאינטרנט כדי לשלוח קוד אישור לשותף' };
+  } finally {
+    if (wasBlocked) await netBlockSet(true);
+  }
+}
+
+// בדיקת קוד אישור הפתיחה מול ה-Hash השמור (השוואה בזמן קבוע).
+function unlockApprovalValid(code, purpose) {
+  if (!unlockApproval.hash || trustedNow() > unlockApproval.until || unlockApproval.purpose !== purpose) return false;
+  const expected = Buffer.from(unlockApproval.hash, 'hex');
+  const actual = Buffer.from(S.sha256Hex(String(code || '')), 'hex');
+  const valid = expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
+  if (!valid) {
+    unlockApproval.failures = Number(unlockApproval.failures || 0) + 1;
+    if (unlockApproval.failures >= 5) unlockApproval = { hash: null, until: 0, failures: 0, purpose: null };
+  }
+  return valid;
+}
+
 // מקור העדכונים — URL לקובץ JSON עם גרסה. נקבע כאן בקוד בלבד
 // (אין שדה בממשק) — הכפתור "בדוק עדכונים" משתמש בכתובת זו.
 // הקובץ version.json מתגורר במאגר הגיטהאב הציבורי, וכל שינוי בו
 // (גרסה חדשה) יימצא מיד על ידי כל העותקים המותקנים של התוכנה.
 const UPDATE_URL = 'https://raw.githubusercontent.com/Lev-Good/Between-times/main/version.json';
+const UPDATE_SIGNER_CN = 'Lev Tov Digital';
 
 async function sendRecovery() {
   const email = schedule.recoveryEmail;
@@ -2305,10 +2700,16 @@ async function sendRecovery() {
     return { ok: false, error: persisted.error || 'לא ניתן לשמור בקשת שחזור' };
   }
   try {
-    const res = await fetch(RECOVERY_URL, {
+    // שותף אחריות פעיל → הקוד נשלח גם לשותף (co-visibility). השרת שולח
+    // עותק של אותו קוד לכתובת ה-partner בנוסף לכתובת השחזור.
+    const partner = accountabilityActive() ? String(schedule.accountabilityEmail || '').trim() : '';
+    const wasBlocked = netBlockApplied;
+    if (wasBlocked) await netBlockSet(false);
+    try {
+      const res = await fetch(RECOVERY_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, token, app: 'BenHazmanim', time: new Date().toISOString() }),
+      body: JSON.stringify({ email, token, partner, app: 'BenHazmanim', time: new Date().toISOString() }),
       signal: AbortSignal.timeout(15000)
     });
     const data = await res.json().catch(() => ({}));
@@ -2317,7 +2718,10 @@ async function sendRecovery() {
       saveSettings();
       return { ok: false, error: recoveryErrorToHebrew(String(data.error || '')) };
     }
-    return { ok: true };
+      return { ok: true };
+    } finally {
+      if (wasBlocked) await netBlockSet(true);
+    }
   } catch {
     schedule = S.normalizeSchedule(JSON.parse(previous));
     saveSettings();
@@ -2351,6 +2755,7 @@ function completeRecovery(code, newPin) {
   }
   sessionUnlocked = true;
   sessionUnlockedAt = trustedNow();
+  notifyPartner('pin-changed');
   enforce();
   return { ok: true };
 }
@@ -2490,6 +2895,28 @@ async function downloadInstaller(url, dest, onProgress) {
   return received;
 }
 
+// Authenticode הוא שער נוסף מעל SHA-256: טביעת העדכון עדיין נבדקת תמיד,
+// ולאחריה Windows חייב לאשר שהמתקין חתום בחתימה תקפה ומהימנה. הנתיב משולב
+// כמחרוזת PowerShell יחיד ליטרלית (psSingleQuote), ללא אינטרפולציה.
+function verifyAuthenticode(file) {
+  return new Promise((resolve) => {
+    if (!isWin) return resolve({ ok: false, error: 'אימות Authenticode זמין רק ב-Windows' });
+    const script = '$s=Get-AuthenticodeSignature -LiteralPath ' + psSingleQuote(file) + '; ' +
+      "[PSCustomObject]@{status=$s.Status.ToString();subject=([string]$s.SignerCertificate.Subject)} | ConvertTo-Json -Compress";
+    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script],
+      { windowsHide: true, timeout: 15000 }, (err, stdout) => {
+        if (err) return resolve({ ok: false, error: 'לא ניתן לאמת את חתימת המתקין' });
+        let data = null;
+        try { data = JSON.parse(String(stdout || '')); } catch { /* invalid response */ }
+        const signer = cnOf(data && data.subject);
+        if (!data || data.status !== 'Valid' || signer.toLowerCase() !== UPDATE_SIGNER_CN.toLowerCase()) {
+          return resolve({ ok: false, error: 'למתקין אין חתימת Authenticode תקפה — ההתקנה בוטלה' });
+        }
+        resolve({ ok: true, subject: String(data.subject).trim() });
+      });
+  });
+}
+
 // הורדה + התקנה שקטה של העדכון. נקרא מהממשק (update:download) — עם
 // דיווח התקדמות לכל החלונות, וסגירה נקייה של התוכנה בסוף.
 async function downloadAndInstallUpdate() {
@@ -2537,9 +2964,14 @@ async function downloadAndInstallUpdate() {
       try { fs.unlinkSync(dest); } catch { /* ignore */ }
       return { ok: false, error: 'טביעת העדכון אינה תואמת — ההתקנה בוטלה' };
     }
-    // Authenticode אינו חובה במדיניות ההפצה הנוכחית. מקור ההורדה וה-hash
-    // עדיין נבדקים תמיד לפני הפעלה; חתימה תקפה, אם תתווסף בעתיד, היא
-    // שכבת אמון נוספת ולא תנאי שמונע עדכון unsigned.
+    // SHA-256 תואם אינו מחליף זהות מפרסם: דורשים גם חתימת Authenticode
+    // תקפה לפני הפעלה. אין fallback למתקין unsigned.
+    const signature = await verifyAuthenticode(dest);
+    if (!signature.ok) {
+      try { fs.unlinkSync(dest); } catch { /* ignore */ }
+      return { ok: false, error: signature.error };
+    }
+    logEvent('update-signature-valid', { subject: signature.subject });
     progress('install', 100);
     // דגל עצירה בכל הנתיבים — השומר-שער לא יקפיץ את התוכנה בזמן ההתקנה.
     // המתקין החדש (1.2.4+) גם הוא כותב את הדגל ב-preInit וממתין לסגירתנו.
@@ -2558,6 +2990,218 @@ async function downloadAndInstallUpdate() {
   }
 }
 
+/* ================= "אתר נעול" — דפדפן מוגבל לרשימת אתרים מאושרת (Phase 3.8) =================
+   פותח BrowserWindow ייעודי לאתר שההורה אישר, עם נעילת ניווט: כל מעבר
+   לכתובת שאינה ברשימת ההרשאות נחסם (will-navigate/will-redirect), פתיחת
+   חלונות חדשים נחסמת (setWindowOpenHandler), והרשאות (מצלמה/מיקרופון וכו')
+   נדחות. אין nodeIntegration ואין preload — תוכן מרוחק לעולם אינו נחשף ל-API. */
+let lockedSiteWins = [];
+
+function openWebsiteApp(nameOrIndex) {
+  if (!isWin && !isTestMode) { /* עדיין ניתן לפתוח בבדיקות */ }
+  const apps = activeSchedule().websiteApps || [];
+  let app = null;
+  if (typeof nameOrIndex === 'number') app = apps[nameOrIndex];
+  else app = apps.find((a) => String(a.name || '').toLowerCase() === String(nameOrIndex || '').toLowerCase());
+  if (!app) return { ok: false, error: 'האתר אינו נמצא ברשימת האתרים המאושרים' };
+  const urls = (app.urls || []).filter(Boolean);
+  if (!urls.length) return { ok: false, error: 'לא הוגדרו כתובות לאתר זה' };
+
+  const allowed = (url) => S.siteUrlAllowed([app], url, true);
+
+  // Session מבודד לכל האתרים הנעולים — עוגיות/כניסות נשמרות בנפרד מהמערכת.
+  const partition = 'persist:benhazmanim-locked-site';
+  try {
+    const ses = session.fromPartition(partition);
+    // דחיית כל בקשות ההרשאה (מצלמה, מיקרופון, מיקום, התראות וכו').
+    if (ses && typeof ses.setPermissionRequestHandler === 'function') {
+      ses.setPermissionRequestHandler((_wc, _permission, cb) => cb(false));
+    }
+    if (ses && typeof ses.setPermissionCheckHandler === 'function') {
+      ses.setPermissionCheckHandler(() => false);
+    }
+    if (ses && typeof ses.on === 'function' && !ses.__benHazmanimDownloadLock) {
+      ses.__benHazmanimDownloadLock = true;
+      ses.on('will-download', (e) => e.preventDefault());
+    }
+  } catch { /* ignore */ }
+
+  const w = new BrowserWindow({
+    width: 1120,
+    height: 820,
+    title: app.name || 'אתר מאושר',
+    autoHideMenuBar: true,
+    backgroundColor: windowBg(),
+    webPreferences: {
+      partition,
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      // אין preload — תוכן מרוחק לא מקבל גישה ל-electronAPI
+      webviewTag: false
+    }
+  });
+  lockedSiteWins.push(w);
+  w.on('closed', () => { lockedSiteWins = lockedSiteWins.filter((x) => x !== w); });
+
+  const wc = w.webContents;
+  // נעילת ניווט: מעבר/הפניה לכתובת לא-מאושרת נחסם.
+  wc.on('will-navigate', (e, url) => { if (!allowed(url)) e.preventDefault(); });
+  wc.on('will-redirect', (e, url) => { if (!allowed(url)) e.preventDefault(); });
+  // פתיחת חלון חדש: אם הכתובת מאושרת — נפתחת באותו חלון; אחרת נדחית.
+  wc.setWindowOpenHandler(({ url }) => {
+    if (allowed(url)) { try { wc.loadURL(url); } catch { /* ignore */ } }
+    return { action: 'deny' };
+  });
+  // חוסמים גם ניווט של iframe/הורדות שאינן מאושרות דרך אותו מנגנון בסיסי.
+  wc.on('will-frame-navigate', (e) => {
+    try { if (e && e.url && !allowed(e.url)) e.preventDefault(); } catch { /* ignore */ }
+  });
+
+  w.loadURL(urls[0]);
+  logEvent('website-app-open', { name: app.name });
+  return { ok: true };
+}
+
+/* ================= סייר קבצים מוגבל + ספרייה לקריאה בלבד (Phase 3.10) =================
+   חלון סייר ייעודי החשוף רק לשורשים מאושרים. הבטיחות מבוססת על שני מנגנונים:
+   1) sandboxResolve — כל נתיב יחסי נפתר מול השורש; בריחה החוצה (..) או תווית
+      אסורה (System32/AppData) נדחות. אין גישה מחוץ לשורשים המאושרים.
+   2) isHiddenType — קבצים מסוגים מוסתרים אינם מוצגים ואינם ניתנים לפתיחה.
+   הספרייה (library) לקריאה בלבד — הסייר אינו חושף פעולות כתיבה כלל. */
+let fileExplorerWin = null;
+const ROOT_LABELS = { documents: 'מסמכים', downloads: 'הורדות', desktop: 'שולחן עבודה', pictures: 'תמונות', music: 'מוזיקה', videos: 'סרטונים', library: 'ספרייה' };
+const FORBIDDEN_SEGMENTS = ['system32', 'appdata', 'windows'];
+const EXPLORER_ACTIVE_TYPES = new Set([
+  '.exe', '.com', '.scr', '.msi', '.msix', '.appx', '.appinstaller', '.cpl', '.dll',
+  '.bat', '.cmd', '.ps1', '.psm1', '.psd1', '.vbs', '.vbe', '.js', '.jse', '.wsf',
+  '.wsh', '.hta', '.lnk', '.url', '.reg', '.inf', '.scf', '.chm', '.jar'
+]);
+
+function explorerFileDenied(fe, fileName) {
+  const name = String(fileName || '');
+  const ext = path.extname(name).toLowerCase();
+  return !ext || EXPLORER_ACTIVE_TYPES.has(ext) || S.isHiddenType(fe.hiddenTypes, name);
+}
+
+function explorerRootPath(id) {
+  try {
+    switch (id) {
+      case 'documents': return app.getPath('documents');
+      case 'downloads': return app.getPath('downloads');
+      case 'desktop': return app.getPath('desktop');
+      case 'pictures': return app.getPath('pictures');
+      case 'music': return app.getPath('music');
+      case 'videos': return app.getPath('videos');
+      case 'library': {
+        const p = String((activeSchedule().fileExplorer || {}).libraryPath || '').trim();
+        return p || null;
+      }
+      default: return null;
+    }
+  } catch { return null; }
+}
+
+// שורשי הסייר הזמינים (רק מופעלים שנפתרים לנתיב קיים).
+function resolveExplorerRoots() {
+  const fe = activeSchedule().fileExplorer || {};
+  const out = [];
+  for (const id of (fe.roots || [])) {
+    const p = explorerRootPath(id);
+    if (!p) continue;
+    try { if (!fs.existsSync(p)) continue; } catch { continue; }
+    const readonly = (id === 'library') ? (fe.readonlyLibrary !== false) : false;
+    out.push({ id, label: ROOT_LABELS[id] || id, path: path.resolve(p), readonly });
+  }
+  return out;
+}
+
+// PathSandbox: פתרון נתיב יחסי מול שורש בלי בריחה (..) ובלי תוויות אסורות.
+// מוחזר נתיב מוחלט או null. פונקציה זו היא ליבת האבטחה של הסייר המוגבל.
+function sandboxResolve(rootPath, relative) {
+  try {
+    const root = fs.realpathSync.native(path.resolve(rootPath));
+    const rel = String(relative == null ? '' : relative).replace(/^[\\/]+/, '');
+    // השורש עצמו כבר אושר במפורש על ידי ההורה. בודקים תוויות אסורות רק
+    // בקלט היחסי; אחרת שורש מאושר שנמצא למשל תחת AppData (או תיקיית Temp
+    // בבדיקות) היה נדחה בגלל נתיב האב שלו, אף שאין כאן בריחה מה-sandbox.
+    const relSegs = rel.toLowerCase().split(/[\\/]/).filter(Boolean);
+    for (const seg of FORBIDDEN_SEGMENTS) if (relSegs.indexOf(seg) >= 0) return null;
+    const combined = fs.realpathSync.native(path.resolve(root, rel));
+    const rootCmp = root.toLowerCase();
+    const combinedCmp = combined.toLowerCase();
+    if (combinedCmp !== rootCmp && !combinedCmp.startsWith(rootCmp + path.sep.toLowerCase())) return null;
+    return combined;
+  } catch { return null; }
+}
+
+function fileExplorerList(rootId, relative) {
+  const fe = activeSchedule().fileExplorer || {};
+  if (!fe.enabled) return { ok: false, error: 'סייר הקבצים המוגבל אינו מופעל' };
+  const root = resolveExplorerRoots().find((r) => r.id === rootId);
+  if (!root) return { ok: false, error: 'שורש אינו מאושר' };
+  const dir = sandboxResolve(root.path, relative);
+  if (!dir) return { ok: false, error: 'נתיב אינו מורשה' };
+  let entries;
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return { ok: false, error: 'לא ניתן לקרוא את התיקייה' }; }
+  const items = [];
+  for (const ent of entries) {
+    const isDir = ent.isDirectory();
+    if (!isDir && explorerFileDenied(fe, ent.name)) continue;
+    let size = 0, mtime = 0;
+    try { const st = fs.statSync(path.join(dir, ent.name)); size = st.size; mtime = st.mtimeMs; } catch { /* ignore */ }
+    items.push({ name: ent.name, isDir, size, mtime });
+  }
+  items.sort((a, b) => (a.isDir === b.isDir ? String(a.name).localeCompare(String(b.name), 'he') : (a.isDir ? -1 : 1)));
+  return { ok: true, root: { id: root.id, label: root.label, readonly: root.readonly }, rel: path.relative(root.path, dir), items };
+}
+
+function fileExplorerOpen(rootId, relative) {
+  const fe = activeSchedule().fileExplorer || {};
+  if (!fe.enabled) return { ok: false, error: 'סייר הקבצים המוגבל אינו מופעל' };
+  const root = resolveExplorerRoots().find((r) => r.id === rootId);
+  if (!root) return { ok: false, error: 'שורש אינו מאושר' };
+  const target = sandboxResolve(root.path, relative);
+  if (!target) return { ok: false, error: 'נתיב אינו מורשה' };
+  if (explorerFileDenied(fe, path.basename(target))) return { ok: false, error: 'סוג הקובץ חסום' };
+  try { if (!fs.existsSync(target) || !fs.statSync(target).isFile()) return { ok: false, error: 'הקובץ לא נמצא' }; } catch { return { ok: false, error: 'הקובץ לא נמצא' }; }
+  let openTarget = target;
+  if (root.readonly) {
+    try {
+      const copyDir = path.join(app.getPath('temp'), 'BenHazmanimReadOnly');
+      fs.mkdirSync(copyDir, { recursive: true });
+      openTarget = path.join(copyDir, crypto.randomBytes(12).toString('hex') + path.extname(target));
+      fs.copyFileSync(target, openTarget, fs.constants.COPYFILE_EXCL);
+      fs.chmodSync(openTarget, 0o444);
+    } catch { return { ok: false, error: 'לא ניתן ליצור עותק לקריאה בלבד' }; }
+  }
+  try { shell.openPath(openTarget); } catch { return { ok: false, error: 'לא ניתן לפתוח את הקובץ' }; }
+  return { ok: true };
+}
+
+function openFileExplorerWindow() {
+  const fe = activeSchedule().fileExplorer || {};
+  if (!fe.enabled) return { ok: false, error: 'סייר הקבצים המוגבל אינו מופעל' };
+  if (fileExplorerWin && !fileExplorerWin.isDestroyed()) { fileExplorerWin.show(); fileExplorerWin.focus(); return { ok: true }; }
+  fileExplorerWin = new BrowserWindow({
+    width: 940,
+    height: 660,
+    title: 'סייר קבצים מוגבל — בין הזמנים',
+    autoHideMenuBar: true,
+    backgroundColor: windowBg(),
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  });
+  lockLocalWindowNavigation(fileExplorerWin);
+  fileExplorerWin.loadFile(path.join(__dirname, 'renderer', 'file-explorer.html'));
+  fileExplorerWin.on('closed', () => { fileExplorerWin = null; });
+  logEvent('file-explorer-open');
+  return { ok: true };
+}
+
 /* ================= IPC ================= */
 
 // Renderer pages share the same preload bridge, so authentication must also
@@ -2565,7 +3209,12 @@ async function downloadAndInstallUpdate() {
 // it. The missing sender in the Electron test double is intentionally treated
 // as trusted for backwards-compatible unit tests only.
 function senderAllowed(event, windows) {
-  if (!event || !event.sender) return true;
+  if (!event || !event.sender) return isTestMode;
+  if (!isTestMode) {
+    if (!event.senderFrame || event.senderFrame !== event.sender.mainFrame) return false;
+    const frameUrl = String(event.senderFrame.url || '');
+    if (!frameUrl.startsWith('file://')) return false;
+  }
   return windows.some((w) => w && !w.isDestroyed() && w.webContents === event.sender);
 }
 function mainSender(event) { return senderAllowed(event, [win]); }
@@ -2596,7 +3245,7 @@ function registerIpc() {
     };
   });
 
-  ipcMain.handle('settings:save', (event, data) => {
+  ipcMain.handle('settings:save', (event, data, approvalCode) => {
     if (!mainSender(event)) return senderError();
     // אימות סיסמה בצד השרת — לא להסתמך על אימות קליינט בלבד
     if (schedule.pinHash && !isSessionUnlocked()) {
@@ -2618,9 +3267,21 @@ function registerIpc() {
       data.runAsAdmin = schedule.runAsAdmin;
     }
     const previousSchedule = JSON.stringify(schedule);
+    const previousObject = S.normalizeSchedule(JSON.parse(previousSchedule));
     schedule = S.normalizeSchedule(data);
-    if (!schedule.pinHash && hasBlockingPolicy(schedule)) {
-      schedule = S.normalizeSchedule(JSON.parse(previousSchedule));
+    const weakensPartner = previousObject.accountabilityEnabled && previousObject.accountabilityEmail && (
+      !schedule.accountabilityEnabled ||
+      schedule.accountabilityEmail.toLowerCase() !== previousObject.accountabilityEmail.toLowerCase() ||
+      (previousObject.accountabilityRequireApproval && !schedule.accountabilityRequireApproval) ||
+      Number(schedule.coolOffMinutes || 0) < Number(previousObject.coolOffMinutes || 0)
+    );
+    if (weakensPartner && !unlockApprovalValid(approvalCode, 'settings-change')) {
+      schedule = previousObject;
+      return { ok: false, needPartnerApproval: true, error: 'נדרש קוד אישור משותף האחריות כדי להחליש את ההגנה' };
+    }
+    if (weakensPartner) unlockApproval = { hash: null, until: 0, failures: 0, purpose: null };
+    if (!schedule.pinHash && hasAnyBlockingPolicy(schedule)) {
+      schedule = previousObject;
       return { ok: false, error: 'יש להגדיר סיסמת הורה לפני הפעלת לוח חסימה או חסימת אינטרנט' };
     }
     // "פתוח עד המעבר הבא" (manualUnlockUntil) שייך ללוח שקבע אותו. אחרי כל
@@ -2630,7 +3291,8 @@ function registerIpc() {
     // חלונות); אם הוא חוסם — מעדכנים למעבר הבא האמיתי של הלוח הנוכחי (כך
     // פתיחה "עד המעבר הבא" לא מחזיקה את המחשב פתוח מעבר לחלון החדש).
     const now = trustedDate();
-    const raw = S.stateAt(schedule, now);
+    const effectiveAfterSave = activeSchedule();
+    const raw = S.stateAt(effectiveAfterSave, now);
     if (raw === 'blocked' || raw === 'netblock') {
       if (schedule.manualUnlockUntil) {
         // ערך שעבר אינו תקף — הפתיחה כבר פגה. ניקוי שלו חיוני: אחרת פתיחה
@@ -2638,7 +3300,7 @@ function registerIpc() {
         if (schedule.manualUnlockUntil <= now.getTime()) {
           schedule.manualUnlockUntil = null;
         } else {
-          const t = S.nextTransition(schedule, now);
+          const t = S.nextTransition(effectiveAfterSave, now);
           if (t.at) schedule.manualUnlockUntil = t.at.getTime();
           // לוח נעול בלי מעבר מוגדר (למשל "התר" ריק) — שומרים את הערך הקיים
         }
@@ -2736,17 +3398,47 @@ function registerIpc() {
   // למנוע ההפעלה.
   ipcMain.handle('allowed-apps:launch', (event, candidate) => {
     if (!blockSender(event)) return senderError();
-    if (manualLock || !schedule.pinHash) {
+    const eff = activeSchedule();
+    if (manualLock || !eff.pinHash) {
       return { ok: false, error: 'פתיחת תוכנות אינה זמינה בזמן נעילה ידנית או ללא סיסמת הורה' };
     }
-    const st = S.getStatus(schedule, trustedDate());
-    if (!schedule.enabled || st.state !== 'blocked') {
+    const st = S.getStatus(eff, trustedDate());
+    if (!eff.enabled || st.state !== 'blocked') {
       return { ok: false, error: 'פתיחת תוכנות מורשות זמינה רק בזמן חסימת מחשב' };
     }
     const requested = String(candidate && candidate.exe || '').trim().toLowerCase();
-    const allowed = (schedule.allowedApps || []).find((a) => String(a.exe || '').trim().toLowerCase() === requested);
+    const allowed = (eff.allowedApps || []).find((a) => String(a.exe || '').trim().toLowerCase() === requested);
     if (!allowed) return { ok: false, error: 'התוכנה אינה נמצאת ברשימת ההרשאות' };
     return launchAllowedApp(allowed);
+  });
+
+  // פתיחת "אתר נעול" — דפדפן מוגבל לרשימת האתרים המאושרת. ניתן לפתיחה
+  // מחלון ההגדרות או ממסך החסימה (כמו תוכנות מורשות). זהו דפדפן קורא-בלבד
+  // שרשימת האתרים שלו נקבעה מראש על ידי ההורה, ולכן אינו דורש סשן פתוח.
+  ipcMain.handle('website-apps:open', (event, nameOrIndex) => {
+    if (!senderAllowed(event, [win, ...blockWins])) return senderError();
+    return openWebsiteApp(typeof nameOrIndex === 'number' ? nameOrIndex : String(nameOrIndex || ''));
+  });
+
+  // סייר הקבצים המוגבל — נפתח מחלון ההגדרות/החסימה; הרשימה/פתיחה נקראות
+  // מחלון הסייר עצמו (fileExplorerWin). הבטיחות דרך sandboxResolve+isHiddenType.
+  ipcMain.handle('file-explorer:open-window', (event) => {
+    if (!senderAllowed(event, [win, ...blockWins])) return senderError();
+    return openFileExplorerWindow();
+  });
+  ipcMain.handle('file-explorer:roots', (event) => {
+    if (!senderAllowed(event, [win, ...blockWins, fileExplorerWin])) return senderError();
+    const fe = activeSchedule().fileExplorer || {};
+    if (!fe.enabled) return { ok: false, error: 'סייר הקבצים המוגבל אינו מופעל' };
+    return { ok: true, roots: resolveExplorerRoots().map((r) => ({ id: r.id, label: r.label, readonly: r.readonly })) };
+  });
+  ipcMain.handle('file-explorer:list', (event, rootId, relative) => {
+    if (!senderAllowed(event, [win, ...blockWins, fileExplorerWin])) return senderError();
+    return fileExplorerList(String(rootId || ''), String(relative || ''));
+  });
+  ipcMain.handle('file-explorer:open', (event, rootId, relative) => {
+    if (!senderAllowed(event, [win, ...blockWins, fileExplorerWin])) return senderError();
+    return fileExplorerOpen(String(rootId || ''), String(relative || ''));
   });
 
   ipcMain.handle('lock:now', async (event) => {
@@ -2757,21 +3449,22 @@ function registerIpc() {
       return { ok: false, error: 'לא הוגדרה סיסמה — הגדירו סיסמה בהגדרות לפני נעילה ידנית' };
     }
     manualLock = true;
+    clearCoolOff(); // נעילה ידנית מבטלת פתיחת צינון ממתינה
     await enforce();
     logEvent('lock-manual');
     return { ok: true };
   });
 
-  ipcMain.handle('unlock:now', async (event, pin) => {
+  ipcMain.handle('unlock:now', async (event, pin, approvalCode) => {
     if (!blockSender(event)) return senderError();
-    if (configurationFault) {
-      return { ok: false, error: 'לא ניתן לפתוח עד לתיקון קובץ ההגדרות' };
-    }
+    // קריאות המצב משתמשות במדיניות האפקטיבית (בסיס + פרופיל); הכתיבה של
+    // manualUnlockUntil היא לבסיס הנשמר (השדה אינו נדרס על ידי פרופיל).
+    const eff = activeSchedule();
     // ללא סיסמה מוגדרת אין מה לאמת — הפתיחה מתאפשרת תמיד, כדי שלעולם לא
     // יהיה מצב של חסימה בלי דרך החוצה (גם אם חלון חסימה נפתח בהיעדר סיסמה).
-    if (!schedule.pinHash) {
+    if (!eff.pinHash) {
       manualLock = false;
-      const st = S.getStatus(schedule, trustedDate());
+      const st = S.getStatus(eff, trustedDate());
       schedule.manualUnlockUntil = isLockedState(st)
         ? (st.nextAt ? st.nextAt.getTime() : trustedNow() + 3600 * 1000)
         : null;
@@ -2786,15 +3479,52 @@ function registerIpc() {
       logEvent('unlock-fail');
       return { ok: false, error: v.error, locked: v.locked || 0 };
     }
+    // Fix #7: PIN unlocks always clear faults
+    configurationFault = null;
+    configurationFaultSince = null;
+    clockRollbackDetected = false;
+    // שותף אחריות: כשמופעל "חייב אישור שותף", פתיחה מוקדמת דורשת גם קוד
+    // אישור שנשלח *רק* לשותף — כך המשתמש אינו יכול לפתוח לבד. הסיסמה כבר
+    // אומתה; מכאן חייבים קוד אישור תקף (בתוקף, חד-פעמי).
+    if (requireApprovalActive() && !unlockApprovalValid(approvalCode, 'unlock')) {
+      logEvent('unlock-need-approval');
+      return { ok: false, needApproval: true, error: 'נדרש קוד אישור משותף האחריות כדי לפתוח מוקדם' };
+    }
+    // תקופת צינון: אם הוגדר עיכוב, פתיחה מוקדמת אינה נכנסת לתוקף מיד —
+    // המחשב נשאר חסום עד תום הצינון ואז הפתיחה מוחלת אוטומטית. זהו חיכוך
+    // מכוון לשליטה עצמית (המשתמש מוכיח כוונה אך ממתין).
+    const coolMin = Math.max(0, Number(eff.coolOffMinutes) || 0);
+    const rawNow = S.stateAt(eff, trustedDate());
+    const blockedContext = manualLock || rawNow === 'blocked' || rawNow === 'netblock';
+    if (coolMin > 0 && blockedContext) {
+      if (coolOffActive()) {
+        // צינון כבר פעיל — מחזירים את הזמן שנותר בלי לאפס אותו
+        return { ok: true, coolOff: Math.max(0, Math.ceil((coolOffUntil - trustedNow()) / 1000)), coolOffPending: true };
+      }
+      let target = null; // יעד manualUnlockUntil שיוחל בתום הצינון
+      if (rawNow === 'blocked' || rawNow === 'netblock') {
+        const t = S.nextTransition(eff, trustedDate());
+        target = t.at ? t.at.getTime() : trustedNow() + 3600 * 1000;
+      }
+      unlockApproval = { hash: null, until: 0, failures: 0, purpose: null }; // קוד האישור (אם היה) נוצל
+      coolOffTarget = target;
+      coolOffUntil = trustedNow() + coolMin * 60000;
+      coolOffPending = true;
+      scheduleCoolOffApply();
+      logEvent('cooloff-start', { minutes: coolMin });
+      await enforce(); // מסך החסימה יציג את הספירה לאחור של הצינון
+      return { ok: true, coolOff: coolMin * 60, coolOffPending: true };
+    }
     logEvent('unlock-success');
+    unlockApproval = { hash: null, until: 0, failures: 0, purpose: null }; // הקוד חד-פעמי — מתבטל מיד לאחר שימוש
     manualLock = false; // סיום נעילה ידנית
     const now = trustedDate();
-    const raw = S.stateAt(schedule, now);
+    const raw = S.stateAt(eff, now);
     // "פתוח עד המעבר הבא" נשמר רק כשהמצב לפי הלוח הוא חסום (מחשב או
     // אינטרנט) — אחרת אין צורך. בדיקה לפי מצב הלוח הגולמי (ולא לפי הסטטוס
     // שכבר "פתוח"): פתיחה חוזרת בזמן שפתיחה קיימת לא מבטלת אותה.
     if (raw === 'blocked' || raw === 'netblock') {
-      const t = S.nextTransition(schedule, now);
+      const t = S.nextTransition(eff, now);
       if (t.at) {
         schedule.manualUnlockUntil = t.at.getTime();
       } else {
@@ -2813,7 +3543,7 @@ function registerIpc() {
     // חסום (וגם לא ייקפצו ניסיונות הרמה חוזרים כל כמה שניות).
     await enforce();
     const actual = enforcementState.actual;
-    const stillBlocked = !!(schedule.enabled && S.getStatus(schedule, trustedDate()).state === 'netblock' && netBlockApplied);
+    const stillBlocked = !!(eff.enabled && S.getStatus(eff, trustedDate()).state === 'netblock' && netBlockApplied);
     return persisted.ok
       ? (stillBlocked
         ? { ok: false, error: 'האינטרנט עדיין חסום — לא ניתן היה להסיר את חוק חומת האש (נדרש אישור מנהל או שחומת האש מנוהלת על ידי תוכנה אחרת)' }
@@ -2844,6 +3574,7 @@ function registerIpc() {
       schedule = S.normalizeSchedule(JSON.parse(previous));
       return { ok: false, error: persisted.error || 'שמירת הסיסמה נכשלה' };
     }
+    notifyPartner('pin-changed'); // שותף האחריות מקבל התראה על שינוי הסיסמה
     enforce();
     return { ok: true };
   });
@@ -2854,7 +3585,7 @@ function registerIpc() {
       const v = verifyPinServer(oldPin);
       if (!v.ok) return { ok: false, error: v.error };
     }
-    if (hasBlockingPolicy(schedule)) {
+    if (hasAnyBlockingPolicy(schedule)) {
       return { ok: false, error: 'אי אפשר להסיר את סיסמת ההורה כאשר לוח החסימה פעיל' };
     }
     const previous = JSON.stringify(schedule);
@@ -2871,6 +3602,7 @@ function registerIpc() {
       schedule = S.normalizeSchedule(JSON.parse(previous));
       return { ok: false, error: persisted.error || 'ניקוי הסיסמה נכשל' };
     }
+    notifyPartner('pin-cleared'); // שותף האחריות מקבל התראה על הסרת הסיסמה
     enforce();
     return { ok: true };
   });
@@ -2912,6 +3644,12 @@ function registerIpc() {
   ipcMain.handle('recovery:complete', (event, code, newPin) => {
     if (!recoverySender(event) && !mainSender(event)) return senderError();
     return completeRecovery(code, newPin);
+  });
+
+  // בקשת קוד אישור פתיחה מהשותף — ממסך החסימה (כשמופעל "חייב אישור שותף").
+  ipcMain.handle('accountability:request-approval', (event, purpose) => {
+    if (!recoverySender(event)) return senderError();
+    return requestUnlockApproval(purpose);
   });
 
   ipcMain.handle('update:check', (event) => {
@@ -3034,6 +3772,10 @@ function registerIpc() {
   ipcMain.handle('app:version', (event) => {
     if (!uiSender(event)) return senderError();
     return app.getVersion();
+  });
+  ipcMain.handle('license:get', (event) => {
+    if (!uiSender(event)) return senderError();
+    return getLicenseInfo();
   });
   ipcMain.handle('app:hide', (event) => {
     if (!mainSender(event)) return senderError();
@@ -3202,7 +3944,7 @@ function forceUnlinkFlag(p) {
   if (!isWin || !isElevated()) return;
   try {
     execFileSync('icacls', [p, '/inheritance:r',
-      '/grant:r', '*S-1-5-32-545:R',
+      '/grant:r', '*S-1-5-32-545:F',
       '/grant:r', '*S-1-5-32-544:F',
       '/grant:r', '*S-1-5-18:F'], { stdio: 'pipe', windowsHide: true });
   } catch { return; }
@@ -3527,8 +4269,11 @@ let lastMainTaskRun = 0;
 function ensureInteractiveMain() {
   if (!isWin || isTestMode || trustedNow() - lastMainTaskRun < 10000) return;
   const exeName = path.basename(sourceExecutable(protectedAppDir()));
+  // שם קובץ ההרצה משולב בסקריפט PowerShell. שימוש במחרוזת יחיד ליטרלית
+  // (psSingleQuote) במקום JSON.stringify (מרכאות כפולות) מונע אינטרפולציה של
+  // `$(...)`/backtick/$var, כך שגם אם שם הקובץ ישונה בעתיד לא ניתן להזריק קוד.
   const script =
-    "$n=" + JSON.stringify(exeName) + "; " +
+    "$n=" + psSingleQuote(exeName) + "; " +
     "@(Get-CimInstance Win32_Process -Filter \"Name='$n'\") | " +
     "Where-Object { $_.CommandLine -notmatch '--watchdog-system' -and $_.CommandLine -notmatch '--watchdog' } | " +
     "Select-Object -First 1 | ForEach-Object { 'running' }";
@@ -3712,7 +4457,7 @@ if (isSystemWatchdog) {
 
       createMainWindow();
       tray = new Tray(trayIcon());
-      updateTray(S.getStatus(schedule, trustedDate()));
+      updateTray(S.getStatus(activeSchedule(), trustedDate()));
 
       enforce();
       setInterval(enforce, 5000); // בדיקה כל 5 שניות
@@ -3723,12 +4468,9 @@ if (isSystemWatchdog) {
       const startupResult = await syncStartup();
       if (startupResult && !startupResult.ok) {
         startupFault = startupResult.error || 'Startup לא אומת';
-        // A failed startup registration means the next logon may start
-        // without enforcement. Fail closed in the current session instead
-        // of silently presenting a healthy-looking schedule.
-        configurationFault = startupFault;
+        // Startup registration failed, but we should not fail closed
+        // and lock the machine for the current session.
         logEvent('startup-fail', { error: startupFault });
-        await enforce();
       } else if (startupResult && startupResult.warning) {
         logEvent('startup-warning', { error: startupResult.warning });
       }

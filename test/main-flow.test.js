@@ -90,6 +90,10 @@ function makeMock(config) {
       if (args.includes('add') || args.includes('set')) { mockNetRuleExists = true; return { err: null, stdout: '', stderr: '' }; }
       if (args.includes('delete')) { mockNetRuleExists = false; return { err: null, stdout: '', stderr: '' }; }
     }
+    if (cmd === 'powershell.exe' && args.join(' ').includes('Get-AuthenticodeSignature') &&
+        args.join(' ').includes('PSCustomObject')) {
+      return { err: null, stdout: JSON.stringify({ status: 'Valid', subject: 'CN=Lev Tov Digital' }), stderr: '' };
+    }
     return { err: null, stdout: '', stderr: '' };
   }
   const execImpl = cfg.exec || defaultExec;
@@ -1403,6 +1407,46 @@ test('update:download rejects a tampered installer (SHA-256 mismatch)', async ()
   }
 });
 
+test('update:download rejects an unsigned installer even when SHA-256 matches', async () => {
+  const installer = fakeInstallerBytes();
+  const installerHash = fakeInstallerHash(installer);
+  fetchMock = async (url) => {
+    const api = githubApiRelease(url);
+    if (api) return api;
+    if (url.includes('raw.githubusercontent.com')) {
+      return { ok: true, json: async () => ({ version: '9.9.9', sha256: installerHash }) };
+    }
+    if (url.includes('releases/download/v9.9.9/Setup.9.9.9.exe')) {
+      return { ok: true, headers: { get: () => String(installer.length) }, body: fakeStream([installer]) };
+    }
+    throw new Error('unexpected fetch: ' + url);
+  };
+  try {
+    const m = loadMain({
+      exec(cmd, args) {
+        const joined = args.join(' ');
+        if (cmd === 'powershell.exe' && joined.includes('Get-AuthenticodeSignature') && joined.includes('PSCustomObject')) {
+          return { err: null, stdout: JSON.stringify({ status: 'NotSigned', subject: '' }), stderr: '' };
+        }
+        if (cmd === 'schtasks' && args.includes('/Create')) return { err: new Error('access denied'), stdout: '', stderr: '' };
+        if (cmd === 'schtasks' && args.includes('/Query')) return { err: new Error('not found'), stdout: '', stderr: '' };
+        if (cmd === 'netsh' && args.includes('show')) return { err: new Error('no such rule'), stdout: '', stderr: '' };
+        return { err: null, stdout: '', stderr: '' };
+      }
+    });
+    await m.ready();
+    const res = await m.ipcHandlers.get('update:download')();
+    assert.equal(res.ok, false);
+    assert.match(res.error || '', /Authenticode/);
+    assert.equal(m.state.quitCalled, false, 'unsigned installer must not close the app');
+    assert.equal(m.state.spawnCalls.filter((s) => s.args && s.args.includes('/S')).length, 0,
+      'unsigned installer must never be executed');
+    m.cleanup();
+  } finally {
+    fetchMock = null;
+  }
+});
+
 test('update:download rejects download URLs outside the official repo', async () => {
   const installer = fakeInstallerBytes();
   const installerHash = fakeInstallerHash(installer);
@@ -1554,6 +1598,184 @@ test('recovery:send fails cleanly when no recovery email configured', async () =
   const res = await m.ipcHandlers.get('recovery:send')();
   assert.equal(res.ok, false);
   assert.match(res.error || '', /מייל שחזור/);
+  m.cleanup();
+});
+
+/* ================= שותף אחריות (Accountability, Phase 2.5) ================= */
+
+test('accountability: recovery code is also sent to the partner when enabled', async () => {
+  const settings = S.defaultSchedule();
+  settings.pinHash = S.sha256Hex('1234');
+  settings.recoveryEmail = 'me@example.com';
+  settings.accountabilityEnabled = true;
+  settings.accountabilityEmail = 'partner@example.com';
+  const m = loadMain({ settings });
+  await m.ready();
+  let body = null;
+  fetchMock = async (url, opts) => { body = JSON.parse(opts.body); return { ok: true, json: async () => ({ ok: true }) }; };
+  const res = await m.ipcHandlers.get('recovery:send')();
+  assert.ok(res.ok, JSON.stringify(res));
+  assert.equal(body.email, 'me@example.com');
+  assert.equal(body.partner, 'partner@example.com', 'partner CC must be included in the recovery request');
+  m.cleanup();
+});
+
+test('accountability: recovery has NO partner CC when accountability is disabled', async () => {
+  const settings = S.defaultSchedule();
+  settings.pinHash = S.sha256Hex('1234');
+  settings.recoveryEmail = 'me@example.com';
+  settings.accountabilityEnabled = false;
+  settings.accountabilityEmail = 'partner@example.com'; // מוגדר אך כבוי
+  const m = loadMain({ settings });
+  await m.ready();
+  let body = null;
+  fetchMock = async (url, opts) => { body = JSON.parse(opts.body); return { ok: true, json: async () => ({ ok: true }) }; };
+  await m.ipcHandlers.get('recovery:send')();
+  assert.equal(body.partner, '', 'no partner CC when accountability is off');
+  m.cleanup();
+});
+
+test('accountability: request-approval fails when require-approval is off', async () => {
+  const settings = S.defaultSchedule();
+  settings.pinHash = S.sha256Hex('1234');
+  settings.accountabilityEnabled = true;
+  settings.accountabilityEmail = 'partner@example.com';
+  settings.accountabilityRequireApproval = false;
+  const m = loadMain({ settings });
+  await m.ready();
+  const res = await m.ipcHandlers.get('accountability:request-approval')({});
+  assert.equal(res.ok, false);
+  m.cleanup();
+});
+
+test('accountability: unlock requires a one-time partner approval code when require-approval is on', async () => {
+  const settings = S.defaultSchedule();
+  settings.pinHash = S.sha256Hex('1234');
+  settings.accountabilityEnabled = true;
+  settings.accountabilityEmail = 'partner@example.com';
+  settings.accountabilityRequireApproval = true;
+  for (let d = 0; d < 7; d++) settings.week[d].slots.push({ start: 0, end: 1440, type: 'blocked' });
+  const m = loadMain({ settings });
+  await m.ready();
+
+  // סיסמה נכונה אך בלי קוד אישור → נדחה עם needApproval
+  const noCode = await m.ipcHandlers.get('unlock:now')({}, '1234');
+  assert.equal(noCode.ok, false);
+  assert.equal(noCode.needApproval, true, JSON.stringify(noCode));
+
+  // בקשת קוד אישור — נשלח לשותף בלבד (purpose:'unlock'); לוכדים את הקוד מגוף ה-POST
+  let capturedCode = null, approvalBody = null;
+  fetchMock = async (url, opts) => {
+    const b = JSON.parse(opts.body);
+    if (b.purpose === 'unlock') { capturedCode = b.token; approvalBody = b; }
+    return { ok: true, json: async () => ({ ok: true }) };
+  };
+  const reqRes = await m.ipcHandlers.get('accountability:request-approval')({});
+  assert.ok(reqRes.ok, JSON.stringify(reqRes));
+  assert.equal(approvalBody.partner, 'partner@example.com', 'approval code goes only to the partner');
+  assert.match(String(capturedCode), /^\d{6}$/, 'unlock approval code is 6 digits');
+
+  // קוד שגוי → עדיין נדחה
+  const wrongCode = capturedCode === '000000' ? '111111' : '000000';
+  const wrong = await m.ipcHandlers.get('unlock:now')({}, '1234', wrongCode);
+  assert.equal(wrong.ok, false);
+  assert.equal(wrong.needApproval, true);
+
+  // קוד נכון → פתיחה מצליחה
+  const ok = await m.ipcHandlers.get('unlock:now')({}, '1234', capturedCode);
+  assert.ok(ok.ok, JSON.stringify(ok));
+
+  // הקוד חד-פעמי: נעילה חוזרת ואותו קוד — שוב דורש אישור
+  await m.ipcHandlers.get('lock:now')();
+  const reuse = await m.ipcHandlers.get('unlock:now')({}, '1234', capturedCode);
+  assert.equal(reuse.ok, false, 'a used approval code cannot be reused');
+  assert.equal(reuse.needApproval, true);
+  m.cleanup();
+});
+
+test('accountability: changing the PIN notifies the partner', async () => {
+  const settings = S.defaultSchedule();
+  settings.pinHash = S.sha256Hex('1234');
+  settings.accountabilityEnabled = true;
+  settings.accountabilityEmail = 'partner@example.com';
+  const m = loadMain({ settings });
+  await m.ready();
+  const notices = [];
+  fetchMock = async (url, opts) => {
+    const b = JSON.parse(opts.body);
+    if (b.notice) notices.push(b);
+    return { ok: true, json: async () => ({ ok: true }) };
+  };
+  const res = await m.ipcHandlers.get('pin:set')({}, '5678', '1234');
+  assert.ok(res.ok, JSON.stringify(res));
+  await new Promise((r) => setTimeout(r, 20)); // ההתראה נשלחת ברקע (fire-and-forget)
+  assert.ok(notices.some((n) => n.notice === 'pin-changed' && n.partner === 'partner@example.com'),
+    'partner must be notified on pin change: ' + JSON.stringify(notices));
+  m.cleanup();
+});
+
+/* ================= תקופת צינון (Cool-off, Phase 2.6) ================= */
+
+function blockedSettingsWithCoolOff(mins) {
+  const s = S.defaultSchedule();
+  s.pinHash = S.sha256Hex('1234');
+  s.coolOffMinutes = mins;
+  for (let d = 0; d < 7; d++) s.week[d].slots.push({ start: 0, end: 1440, type: 'blocked' });
+  return s;
+}
+
+test('cool-off: unlock does not take effect immediately — stays blocked with a countdown', async () => {
+  const m = loadMain({ settings: blockedSettingsWithCoolOff(5) });
+  await m.ready();
+  let st = await m.ipcHandlers.get('status:get')();
+  assert.equal(st.state, 'blocked');
+
+  const res = await m.ipcHandlers.get('unlock:now')({}, '1234');
+  assert.ok(res.ok, JSON.stringify(res));
+  assert.equal(res.coolOffPending, true, 'unlock should enter a cool-off, not open immediately');
+  assert.equal(res.coolOff, 300, 'cool-off is 5 minutes');
+
+  st = await m.ipcHandlers.get('status:get')();
+  assert.equal(st.state, 'blocked', 'still blocked during cool-off');
+  assert.equal(st.coolOff, true, 'status reports cool-off active');
+  assert.ok(st.coolOffSeconds > 0 && st.coolOffSeconds <= 300, 'cool-off countdown present: ' + st.coolOffSeconds);
+  m.cleanup();
+});
+
+test('cool-off: re-requesting during cool-off returns the remaining time (no reset)', async () => {
+  const m = loadMain({ settings: blockedSettingsWithCoolOff(5) });
+  await m.ready();
+  const first = await m.ipcHandlers.get('unlock:now')({}, '1234');
+  assert.ok(first.ok && first.coolOffPending);
+  await new Promise((r) => setTimeout(r, 40));
+  const second = await m.ipcHandlers.get('unlock:now')({}, '1234');
+  assert.ok(second.ok && second.coolOffPending);
+  assert.ok(second.coolOff <= first.coolOff, 'remaining time must not increase on re-request');
+  m.cleanup();
+});
+
+test('cool-off: manual lock cancels a pending cool-off', async () => {
+  const m = loadMain({ settings: blockedSettingsWithCoolOff(5) });
+  await m.ready();
+  await m.ipcHandlers.get('unlock:now')({}, '1234');
+  let st = await m.ipcHandlers.get('status:get')();
+  assert.equal(st.coolOff, true);
+  await m.ipcHandlers.get('lock:now')();
+  st = await m.ipcHandlers.get('status:get')();
+  assert.equal(st.coolOff, false, 'manual lock must clear the pending cool-off');
+  assert.equal(st.manualLock, true);
+  m.cleanup();
+});
+
+test('cool-off: with 0 minutes the unlock opens immediately (no cool-off)', async () => {
+  const m = loadMain({ settings: blockedSettingsWithCoolOff(0) });
+  await m.ready();
+  const res = await m.ipcHandlers.get('unlock:now')({}, '1234');
+  assert.ok(res.ok, JSON.stringify(res));
+  assert.ok(!res.coolOffPending, 'no cool-off when coolOffMinutes=0');
+  const st = await m.ipcHandlers.get('status:get')();
+  assert.equal(st.state, 'allowed', 'opened immediately (manualUnlockUntil set)');
+  assert.equal(st.coolOff, false);
   m.cleanup();
 });
 
@@ -2336,6 +2558,87 @@ test('loadSettings: קובץ משותף עדכני יותר גובר על קוב
   await m.ready();
   const back = await m.ipcHandlers.get('settings:get')();
   assert.equal(back.week[2].slots.length, 0, 'הקובץ המשותף העדכני (ריק) נבחר');
+  m.cleanup();
+});
+
+test('accountability: known PIN cannot weaken partner controls without a purpose-bound partner code', async () => {
+  const settings = S.defaultSchedule();
+  settings.pinHash = S.sha256Hex('1234');
+  settings.accountabilityEnabled = true;
+  settings.accountabilityEmail = 'partner@example.com';
+  settings.accountabilityRequireApproval = true;
+  settings.coolOffMinutes = 10;
+  const m = loadMain({ settings });
+  await m.ready();
+  await m.ipcHandlers.get('session:unlock')({}, '1234');
+  const proposed = await m.ipcHandlers.get('settings:get')();
+  proposed.accountabilityEnabled = false;
+  proposed.accountabilityRequireApproval = false;
+  proposed.coolOffMinutes = 0;
+  const denied = await m.ipcHandlers.get('settings:save')({}, proposed);
+  assert.equal(denied.ok, false);
+  assert.equal(denied.needPartnerApproval, true);
+
+  let code = null;
+  fetchMock = async (_url, opts) => {
+    const body = JSON.parse(opts.body);
+    if (body.purpose === 'settings-change') code = body.token;
+    return { ok: true, json: async () => ({ ok: true }) };
+  };
+  assert.ok((await m.ipcHandlers.get('accountability:request-approval')({}, 'settings-change')).ok);
+  assert.match(String(code), /^\d{6}$/);
+  const accepted = await m.ipcHandlers.get('settings:save')({}, proposed, code);
+  assert.ok(accepted.ok, JSON.stringify(accepted));
+  m.cleanup();
+});
+
+test('accountability: approval token is invalidated after five wrong attempts', async () => {
+  const settings = blockedSettingsWithCoolOff(0);
+  settings.accountabilityEnabled = true;
+  settings.accountabilityEmail = 'partner@example.com';
+  settings.accountabilityRequireApproval = true;
+  const m = loadMain({ settings });
+  await m.ready();
+  let code = null;
+  fetchMock = async (_url, opts) => {
+    const body = JSON.parse(opts.body); if (body.purpose === 'unlock') code = body.token;
+    return { ok: true, json: async () => ({ ok: true }) };
+  };
+  await m.ipcHandlers.get('accountability:request-approval')({}, 'unlock');
+  for (let i = 0; i < 5; i++) {
+    const bad = await m.ipcHandlers.get('unlock:now')({}, '1234', '000000');
+    assert.equal(bad.ok, false);
+  }
+  const expired = await m.ipcHandlers.get('unlock:now')({}, '1234', code);
+  assert.equal(expired.ok, false, 'correct code is unusable after attempt exhaustion');
+  assert.equal(expired.needApproval, true);
+  m.cleanup();
+});
+
+test('loadSettings: elevated managed load silently persists a v1.5.10 config as schema v2', async () => {
+  const m = loadMain({ elevate: true });
+  const machineDir = path.join(process.env.PROGRAMDATA, 'BenHazmanim');
+  fs.mkdirSync(machineDir, { recursive: true });
+  const legacy = {
+    version: 1,
+    enabled: true,
+    mode: 'blocklist',
+    blockMessage: 'legacy-preserved',
+    allowedApps: [{ name: 'Word', exe: 'C:\\Office\\WINWORD.EXE' }],
+    week: [{ day: 0, slots: [{ start: '08:00', end: '09:00', type: 'blocked' }] }]
+  };
+  const file = path.join(machineDir, 'settings.json');
+  fs.writeFileSync(file, JSON.stringify(legacy), 'utf8');
+  await m.ready();
+
+  const migrated = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.equal(migrated.schemaVersion, S.SCHEMA_VERSION);
+  assert.equal(migrated.blockMessage, 'legacy-preserved');
+  assert.equal(migrated.allowedApps[0].exe, 'C:\\Office\\WINWORD.EXE');
+  assert.equal(migrated.week[0].slots[0].start, 480);
+  assert.deepEqual(migrated.studyMode, { enabled: false, scope: 'blocked' });
+  assert.equal(migrated.accountabilityEnabled, false);
+  assert.equal(migrated.fileExplorer.enabled, false);
   m.cleanup();
 });
 

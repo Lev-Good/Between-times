@@ -165,6 +165,15 @@
   IfFileExists "$R1\BenHazmanim\relaunch.flag" 0 RelaunchCheckDone
     StrCpy $R0 "1"
   RelaunchCheckDone:
+  ; Fix #5: create settings file with write access for everyone so any user can save settings
+  CreateDirectory "$R1\BenHazmanim"
+  IfFileExists "$R1\BenHazmanim\settings.json" SettingsExists
+    FileOpen $0 "$R1\BenHazmanim\settings.json" w
+    FileWrite $0 "{}"
+    FileClose $0
+  SettingsExists:
+  nsExec::Exec 'cmd /c icacls "$R1\BenHazmanim\settings.json" /grant *S-1-5-32-545:(M)'
+
   ; preInit writes quit.flag so the running copy can exit. Remove it before
   ; relaunching; a normal user cannot delete the protected ProgramData copy.
   Delete "$APPDATA\BenHazmanim\quit.flag"
@@ -192,3 +201,157 @@
   ${EndIf}
   relaunchDone:
 !macroend
+; ---------------------------------------------------------------------------
+; Custom License Code Verification Page (Forum Registration & Profile Code)
+; ---------------------------------------------------------------------------
+!ifndef BUILD_UNINSTALLER
+!include "nsDialogs.nsh"
+!ifndef StrContains
+  !include "StrContains.nsh"
+!endif
+
+Var LicenseDialog
+Var LicenseInput
+Var LicenseHelpLabel
+Var LicenseLink
+Var LicenseErrorLabel
+
+Function TrimString
+  Exch $R0
+  Push $R1
+  loop_lead:
+    StrCpy $R1 $R0 1
+    StrCmp $R1 " " 0 check_tab_lead
+    StrCpy $R0 $R0 "" 1
+    Goto loop_lead
+  check_tab_lead:
+    StrCmp $R1 "$\t" 0 done_lead
+    StrCpy $R0 $R0 "" 1
+    Goto loop_lead
+  done_lead:
+  loop_trail:
+    StrCpy $R1 $R0 1 -1
+    StrCmp $R1 " " 0 check_tab_trail
+    StrCpy $R0 $R0 -1
+    Goto loop_trail
+  check_tab_trail:
+    StrCmp $R1 "$\t" 0 done_trail
+    StrCpy $R0 $R0 -1
+    Goto loop_trail
+  done_trail:
+  Pop $R1
+  Exch $R0
+FunctionEnd
+
+Function OpenForumLink
+  ExecShell "open" "https://editorforum.levtov.uk"
+FunctionEnd
+
+Function LicensePageCreate
+  ; If silent installation, skip the interactive license page
+  IfSilent SkipLicensePage 0
+
+  ; Upgrades / Reinstall: if this PC already has a valid license, skip asking again
+  ReadEnvStr $R1 "PROGRAMDATA"
+  ${If} ${FileExists} "$R1\BenHazmanim\license.json"
+    ClearErrors
+    FileOpen $0 "$R1\BenHazmanim\license.json" r
+    ${IfNot} ${Errors}
+      FileRead $0 $1
+      FileClose $0
+      ${StrContains} $2 '"ok":true' $1
+      ${If} $2 != ""
+        Goto SkipLicensePage
+      ${EndIf}
+    ${EndIf}
+  ${EndIf}
+
+  nsDialogs::Create 1018
+  Pop $LicenseDialog
+  ${If} $LicenseDialog == error
+    Abort
+  ${EndIf}
+
+  ${NSD_CreateLabel} 0 0 100% 28u "ברוכים הבאים להתקנת 'בין הזמנים - ניהול זמן מחשב'!$\r$\nהתוכנה מיועדת לחברי פורום העורכים התורניים בלבד."
+  Pop $0
+
+  ${NSD_CreateLabel} 0 32u 100% 32u "כדי להפעיל את ההתקנה עליך להזין את קוד הרישיון האישי שלך.$\r$\nאם אינך רשום עדיין, הירשם לפורום (ללא עלות). לאחר ההתחברות, קוד הרישיון יופיע בדף הפרופיל האישי שלך תחת 'רישיונות תוכנה'."
+  Pop $LicenseHelpLabel
+
+  ${NSD_CreateLink} 0 68u 100% 12u "לחץ כאן לפתיחת פורום העורכים התורניים (editorforum.levtov.uk)"
+  Pop $LicenseLink
+  ${NSD_OnClick} $LicenseLink OpenForumLink
+
+  ${NSD_CreateLabel} 0 86u 100% 12u "הזן את קוד הרישיון האישי שלך (16 תווים):"
+  Pop $0
+
+  ${NSD_CreateText} 0 100u 100% 14u ""
+  Pop $LicenseInput
+
+  ${NSD_CreateLabel} 0 120u 100% 20u ""
+  Pop $LicenseErrorLabel
+
+  nsDialogs::Show
+  Return
+
+  SkipLicensePage:
+    Abort
+FunctionEnd
+
+Function LicensePageLeave
+  ${NSD_GetText} $LicenseInput $0
+
+  Push $0
+  Call TrimString
+  Pop $R2
+
+  ${If} $R2 == ""
+    ${NSD_SetText} $LicenseErrorLabel "שגיאה: חובה להזין קוד רישיון כדי להמשיך בהתקנה."
+    Abort
+  ${EndIf}
+
+  ${NSD_SetText} $LicenseErrorLabel "מאמת את קוד הרישיון מול שרת הפורום..."
+
+  InitPluginsDir
+  Delete "$PLUGINSDIR\license_resp.json"
+  Delete "$PLUGINSDIR\req.json"
+
+  FileOpen $1 "$PLUGINSDIR\req.json" w
+  FileWrite $1 '{"code":"$R2","app":"ben-hazmanim"}'
+  FileClose $1
+
+  ; Run curl with --ssl-no-revoke to guarantee compatibility with NetFree / kosher internet
+  nsExec::ExecToStack 'curl.exe -s --ssl-no-revoke -X POST https://editorforum.levtov.uk/api/ben-hazmanim/verify -H "Content-Type: application/json" -d "@$PLUGINSDIR\req.json" -o "$PLUGINSDIR\license_resp.json" --max-time 10'
+  Pop $R3
+
+  ${IfNot} ${FileExists} "$PLUGINSDIR\license_resp.json"
+    ${NSD_SetText} $LicenseErrorLabel "שגיאת תקשורת: לא ניתן להתחבר לשרת האימות. ודא חיבור תקין לאינטרנט ונסה שוב."
+    Abort
+  ${EndIf}
+
+  ClearErrors
+  FileOpen $1 "$PLUGINSDIR\license_resp.json" r
+  ${If} ${Errors}
+    ${NSD_SetText} $LicenseErrorLabel "שגיאה בקריאת תשובת השרת. אנא נסה שוב."
+    Abort
+  ${EndIf}
+  FileRead $1 $4
+  FileClose $1
+
+  ${StrContains} $5 '"ok":true' $4
+  ${If} $5 == ""
+    ${NSD_SetText} $LicenseErrorLabel "קוד הרישיון אינו תקין או שאינו פעיל. בדוק את הקוד בפרופיל הפורום ונסה שוב."
+    Abort
+  ${EndIf}
+
+  ; Success: save license to %ProgramData%\BenHazmanim\license.json
+  ReadEnvStr $R1 "PROGRAMDATA"
+  CreateDirectory "$R1\BenHazmanim"
+  CopyFiles /SILENT "$PLUGINSDIR\license_resp.json" "$R1\BenHazmanim\license.json"
+  nsExec::Exec 'cmd /c icacls "$R1\BenHazmanim\license.json" /grant *S-1-5-32-545:(M)'
+FunctionEnd
+
+!macro customPageAfterChangeDir
+  Page custom LicensePageCreate LicensePageLeave
+!macroend
+!endif

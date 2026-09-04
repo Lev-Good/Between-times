@@ -64,6 +64,10 @@
             <span class="clock-chip-day" id="liveClockDay">טוען…</span>
           </div>
         </div>
+        <button class="btn btn-help" id="openHelpBtn" type="button" title="מדריך למשתמש ועזרה">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+          <span>מדריך ועזרה</span>
+        </button>
         <div class="master">
           <span class="master-label" id="masterLabel">האכיפה פעילה</span>
           <label class="switch">
@@ -209,216 +213,409 @@
 
     <!-- הגדרות -->
     <section class="card tab-panel hidden" data-panel="settings">
-      <div class="card-head">
-        <h2>הגדרות נוספות</h2>
-      </div>
-      <div class="settings-grid">
-
-        <div class="setting theme-setting">
-          <div class="setting-text">
-            <strong>ערכת נושא</strong>
-            <span>בהיר, כהה, או התאמה אוטומטית להגדרת Windows</span>
-          </div>
-          <div class="theme-toggle" role="radiogroup" aria-label="ערכת נושא">
-            <button class="theme-btn" data-theme-choice="system" role="radio" aria-checked="true">
-              <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
-              מערכת
-            </button>
-            <button class="theme-btn" data-theme-choice="light" role="radio" aria-checked="false">
-              <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
-              בהיר
-            </button>
-            <button class="theme-btn" data-theme-choice="dark" role="radio" aria-checked="false">
-              <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
-              כהה
-            </button>
-          </div>
-        </div>
-
-        <div class="setting">
-          <div class="setting-text">
-            <strong>אייקון צף כשאינטרנט חסום</strong>
-            <span>מציג אייקון קטן בפינת המסך כשהמחשב פתוח והאינטרנט חסום (לחיצה עליו פותחת את ההגדרות). חסימת האינטרנט מתבצעת עם חוק חומת אש ייעודי של בין הזמנים — הסינונים הקיימים במחשב נשארים ללא שינוי וחוזרים לפעול כשהחסימה מסתיימת.</span>
-          </div>
-          <label class="switch">
-            <input type="checkbox" id="netIconToggle" checked />
-            <span class="slider"></span>
-          </label>
-        </div>
-
-        <div class="setting">
-          <div class="setting-text">
-            <strong>אזהרה לפני החסימה</strong>
-            <span>כמה דקות לפני שהמחשב נחסם — להציג הודעה שמזהירה לשמור קבצים ולסיים את העבודה (0 = ללא אזהרה; ברירת מחדל: 5 דקות)</span>
-          </div>
-          <input type="number" id="warnInput" min="0" max="60" step="1" value="5" class="num-input" />
-        </div>
-
-        <div class="setting">
-          <div class="setting-text">
-            <strong>סיסמה</strong>
-            <span id="pinStatus">לא מוגדרת</span>
-          </div>
-          <div class="pin-controls">
-            <input type="password" id="pinInput" placeholder="סיסמה חדשה" class="text-input" autocomplete="new-password" />
-            <input type="password" id="pinInput2" placeholder="אימות סיסמה" class="text-input" autocomplete="new-password" />
-            <button class="btn btn-primary btn-sm" id="pinSaveBtn">שמור</button>
-            <button class="btn btn-ghost btn-sm" id="pinClearBtn">בטל</button>
-          </div>
-        </div>
-
-      </div>
-
-      <!-- מסך חסימה -->
-      <div class="card-head" style="margin-top:26px">
-        <h2>מסך החסימה</h2>
-        <p class="hint">מסר אישי שמוצג למשתמש כשהמחשב חסום — למשל תזכורת ללימוד.</p>
-      </div>
-      <div class="setting">
-        <div class="setting-text">
-          <strong>הודעה אישית</strong>
-          <span>מופיעה מתחת לכותרת במסך החסימה</span>
-        </div>
-        <input type="text" id="blockMessage" class="text-input wide-msg" placeholder="למשל: נלמד עכשיו בשקט" maxlength="300" />
-      </div>
-      <div class="setting">
-        <div class="setting-text">
-          <strong>משפטי עידוד מהמקורות</strong>
-          <span>במסך החסימה מתחלפים משפטי עידוד מתוך התנ"ך, המשנה והתלמוד — כל משפט מדויק כלשונו במקור, עם המקור שלו. כבו כדי להסתיר אותם.</span>
-        </div>
-        <label class="switch">
-          <input type="checkbox" id="torahQuotesToggle" checked />
-          <span class="slider"></span>
-        </label>
-      </div>
-
-      <!-- תוכנות תורניות מותרות בזמן חסימה -->
-      <div class="card-head" style="margin-top:26px">
-        <h2>תוכנות תורניות מותרות בזמן חסימה</h2>
-        <p class="hint">גם כשהמחשב חסום לפי הלוח — אפשר יהיה לפתוח ולהשתמש בתוכנות לימוד וכתיבה תורניות: וורד (לכתיבת תורה), אוצריא, זית, אוצר החכמה ובר אילן. בזמן שימוש בתוכנה מותרת החסימה מושהית, וחוזרת מיד כשעוברים לתוכנה אחרת או סוגרים אותה. נעילה ידנית ("נעל עכשיו") תמיד חוסמת הכל.</p>
-      </div>
-      <div class="setting">
-        <div class="setting-text">
-          <strong>אפשר תוכנות תורניות בזמן חסימה</strong>
-          <span>מציג את רשימת התוכנות על מסך החסימה ומאפשר לפתוח אותן גם כשהמחשב חסום</span>
-        </div>
-        <label class="switch">
-          <input type="checkbox" id="allowedAppsToggle" checked />
-          <span class="slider"></span>
-        </label>
-      </div>
-      <div class="allowed-apps">
-        <div class="allowed-apps-list" id="allowedAppsList"></div>
-        <div class="allowed-apps-add">
-          <button class="btn btn-primary btn-sm" id="allowedAppPickBtn">
-            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
-            בחירת תוכנה מהמחשב…
+      <div class="settings-layout">
+        <!-- סרגל צידי קבוע של תת-הלשוניות -->
+        <aside class="settings-sidebar" id="settingsSidebar" role="tablist" aria-label="תפריט הגדרות">
+          <button class="settings-subtab-btn active" data-subtab="security" role="tab" aria-selected="true">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+            <span>אבטחה וסיסמה</span>
           </button>
-        </div>
-        <div class="known-apps">
-          <button class="btn btn-ghost btn-sm detect-btn" id="detectAppsBtn">
-            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
-            סריקת תוכנות תורניות מותקנות…
+          <button class="settings-subtab-btn" data-subtab="apps" role="tab" aria-selected="false">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+            <span>תוכנות ולימוד</span>
           </button>
-          <div class="known-apps-list hidden" id="detectedAppsList"></div>
-          <p class="hint">הסריקה מוצאת תוכנות תורניות מוכרות המותקנות במחשב — וורד, אוצריא, זית, אוצר החכמה ובר אילן — לפי רישום המערכת, קיצורי הדרך ונתיבי ההתקנה האופייניים, ומוסיפה אותן לרשימה בלחיצה אחת (ההוספה תבקש את הסיסמה).</p>
-        </div>
-        <p class="hint">בחרו את קובץ ההרצה (.exe) של התוכנה מתיקיית ההתקנה שלה, והתוכנה תיבדק מיד: אם היא חתומה דיגיטלית — יישמר החותם ושם המוצר, והזיהוי ימשיך לעבוד גם אחרי עדכון התוכנה. אם אינה חתומה — יישמרו הנתיב המלא וטביעת הקובץ, ותידרש בחירה מחדש אחרי עדכון התוכנה. תוכנות נלוות (תוספים שפועלים כתוכנה נפרדת לצד התוכנה הראשית) אפשר להוסיף מתחת לתוכנה.</p>
-      </div>
-
-      <!-- חריגים חד-פעמיים -->
-      <div class="card-head" style="margin-top:26px">
-        <h2>חריגים חד-פעמיים</h2>
-        <p class="hint">דילוג על הלוח הרגיל ליום מסוים — מתאים לחופשה, חג או יום מיוחד. החריג גובר על לוח הזמנים השבועי.</p>
-      </div>
-      <div class="override-controls">
-        <input type="date" id="overrideDate" class="date-input" />
-        <select id="overrideType" class="select-input">
-          <option value="allow">אפשר כל היום</option>
-          <option value="block">חסום כל היום (נעילת מחשב)</option>
-          <option value="netblock">חסום אינטרנט כל היום (המחשב פתוח)</option>
-        </select>
-        <button class="btn btn-primary btn-sm" id="addOverrideBtn">הוסף</button>
-        <button class="btn btn-ghost btn-sm" id="allowTomorrowBtn">אפשר מחר</button>
-        <button class="btn btn-ghost btn-sm" id="blockTomorrowBtn">חסום מחר</button>
-      </div>
-      <div class="override-list" id="overrideList"></div>
-
-      <!-- אבטחה ושחזור (בתוך הגדרות) -->
-      <div class="card-head" style="margin-top:26px">
-        <h2>אבטחה ושחזור סיסמה</h2>
-        <p class="hint">שכחתם את הסיסמה? התוכנה שולחת קוד חד-פעמי למייל שמוגדר כאן ומאפשרת להגדיר סיסמה חדשה. הסיסמה עצמה אינה נשלחת או נשמרת בשרת.</p>
-      </div>
-      <div class="recovery-grid single">
-        <div class="field">
-          <label>כתובת מייל לשחזור</label>
-          <input type="email" id="recoveryEmail" class="text-input wide" placeholder="me@example.com" />
-        </div>
-        <div class="recovery-actions">
-          <button class="btn btn-ghost" id="testRecoveryBtn">
-            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>
-            שליחת סיסמה לבדיקה
+          <button class="settings-subtab-btn" data-subtab="web" role="tab" aria-selected="false">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+            <span>אתרים וקבצים</span>
           </button>
-          <button class="btn btn-ghost" id="checkUpdateBtn">
-            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
-            בדוק עדכונים
+          <button class="settings-subtab-btn" data-subtab="appearance" role="tab" aria-selected="false">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+            <span>מראה ומסך חסימה</span>
           </button>
-        </div>
-      </div>
+          <button class="settings-subtab-btn" data-subtab="profiles" role="tab" aria-selected="false">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+            <span>פרופילים וחריגים</span>
+          </button>
+          <button class="settings-subtab-btn" data-subtab="system" role="tab" aria-selected="false">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+            <span>תחזוקה ומערכת</span>
+          </button>
+        </aside>
 
-      <!-- מצב ההגנה + גיבוי -->
-      <div class="card-head" style="margin-top:26px">
-        <h2>מצב ההגנה שלך</h2>
-        <p class="hint">בדיקת תקינות מהירה — ודאו שכל ההגנות פעילות כדי שהתוכנה תעשה את העבודה.</p>
-      </div>
-      <div class="checklist" id="securityList">
-        <div class="check-item pending">טוען…</div>
-      </div>
-      <div class="recovery-actions">
-        <button class="btn btn-ghost" id="backupExportBtn">
-          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>
-          גיבוי הגדרות
-        </button>
-        <button class="btn btn-ghost" id="backupImportBtn">
-          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21V9M7 14l5-5 5 5"/><path d="M5 3h14"/></svg>
-          שחזור מגיבוי
-        </button>
-      </div>
+        <!-- אזור תוכן הגדרות לפי תת-לשונית -->
+        <div class="settings-content" id="settingsContent">
+          <!-- 1. אבטחה וסיסמה -->
+          <div class="settings-subpanel" data-subpanel="security">
+            <div class="card-head">
+              <h2>אבטחה וסיסמת הורה</h2>
+              <p class="hint">הגדרת סיסמת ה-PIN הנחוצה לשינוי הגדרות ולפתיחה מוקדמת, אמצעי שחזור והגנה מפני עקיפה.</p>
+            </div>
+            <div class="setting">
+              <div class="setting-text">
+                <strong>סיסמה</strong>
+                <span id="pinStatus">לא מוגדרת</span>
+              </div>
+              <div class="pin-controls">
+                <input type="password" id="pinInput" placeholder="סיסמה חדשה" class="text-input" autocomplete="new-password" />
+                <input type="password" id="pinInput2" placeholder="אימות סיסמה" class="text-input" autocomplete="new-password" />
+                <button class="btn btn-primary btn-sm" id="pinSaveBtn">שמור</button>
+                <button class="btn btn-ghost btn-sm" id="pinClearBtn">בטל</button>
+              </div>
+            </div>
 
-      <!-- הסרת התוכנה -->
-      <div class="card-head" style="margin-top:26px">
-        <h2>הסרת התוכנה</h2>
-        <p class="hint">מסירה את התוכנה מהמחשב יחד עם ההגדרות, לוח הזמנים והסיסמה — כולל הסרת ההפעלה עם Windows ועצירת כלבי השמירה. נדרשת סיסמת ההורה.</p>
-      </div>
-      <div class="recovery-actions">
-        <button class="btn btn-danger" id="uninstallBtn">
-          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6M10 11v6M14 11v6"/></svg>
-          הסרת התוכנה מהמחשב
-        </button>
-      </div>
+            <div class="card-head" style="margin-top:24px">
+              <h2>אבטחה ושחזור סיסמה</h2>
+              <p class="hint">שכחתם את הסיסמה? התוכנה שולחת קוד חד-פעמי למייל שמוגדר כאן ומאפשרת להגדיר סיסמה חדשה. הסיסמה עצמה אינה נשלחת או נשמרת בשרת.</p>
+            </div>
+            <div class="recovery-grid single">
+              <div class="field">
+                <label>כתובת מייל לשחזור</label>
+                <input type="email" id="recoveryEmail" class="text-input wide" placeholder="me@example.com" />
+              </div>
+              <div class="recovery-actions">
+                <button class="btn btn-ghost" id="testRecoveryBtn">
+                  <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>
+                  שליחת סיסמה לבדיקה
+                </button>
+                <button class="btn btn-ghost" id="checkUpdateBtn">
+                  <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+                  בדוק עדכונים
+                </button>
+              </div>
+            </div>
 
-      <!-- אודות (בתוך הגדרות) -->
-      <div class="card-head" style="margin-top:26px">
-        <h2>אודות</h2>
-      </div>
-      <div class="about">
-        <div class="logo small">
-          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
-        </div>
-        <div>
-          <h2>בין הזמנים <span class="version">v<span id="version">1.1.0</span></span></h2>
-          <p class="hint">נוצר באהבה על ידי <strong>לב טוב דיגיטל</strong>
-            <svg class="icon inline-heart" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
-          </p>
-          <div class="about-links">
-            <a href="#" id="siteLink">
-              <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18 15 15 0 0 1 0-18z"/></svg>
-              אתר הבית: digital.levtov.uk
-            </a>
-            <a href="#" id="mailLink">
-              <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>
-              צרו קשר: mytovmail@gmail.com
-            </a>
+            <div class="card-head" style="margin-top:24px">
+              <h2>שותף אחריות</h2>
+              <p class="hint">אופציונלי. שותף אחריות (בן/בת זוג, חבר או רב) מקבל התראה על שינוי הסיסמה ועל בקשות שחזור — עוזר לשמור על עצמכם. אפשר גם לדרוש קוד אישור מהשותף כדי לפתוח את החסימה מוקדם, כך שאי אפשר לפתוח לבד.</p>
+            </div>
+            <div class="setting">
+              <div class="setting-text">
+                <strong>הפעלת שותף אחריות</strong>
+                <span>קוד שחזור והתראות על שינוי/הסרת סיסמה יישלחו גם למייל של השותף</span>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="accountabilityToggle" />
+                <span class="slider"></span>
+              </label>
+            </div>
+            <div class="recovery-grid single">
+              <div class="field">
+                <label>מייל של שותף האחריות</label>
+                <input type="email" id="accountabilityEmail" class="text-input wide" placeholder="partner@example.com" />
+              </div>
+            </div>
+            <div class="setting">
+              <div class="setting-text">
+                <strong>חייב אישור שותף לפתיחה מוקדמת</strong>
+                <span>פתיחת החסימה לפני הזמן תדרוש קוד אישור חד-פעמי שנשלח רק לשותף — בנוסף לסיסמה. כך המשתמש אינו יכול לפתוח לבד.</span>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="accountabilityRequireApproval" />
+                <span class="slider"></span>
+              </label>
+            </div>
+            <div class="setting">
+              <div class="setting-text">
+                <strong>תקופת צינון לפני פתיחה (דקות)</strong>
+                <span>עיכוב מכוון לשליטה עצמית: אחרי הזנת הסיסמה לפתיחה מוקדמת, המחשב יישאר חסום עוד מספר דקות לפני שהפתיחה נכנסת לתוקף. 0 = ללא צינון (פתיחה מיידית).</span>
+              </div>
+              <input type="number" id="coolOffInput" min="0" max="120" step="1" value="0" class="num-input" />
+            </div>
+          </div>
+
+          <!-- 2. תוכנות ולימוד -->
+          <div class="settings-subpanel hidden" data-subpanel="apps">
+            <div class="card-head">
+              <h2>תוכנות תורניות מותרות בזמן חסימה</h2>
+              <p class="hint">גם כשהמחשב חסום לפי הלוח — אפשר יהיה לפתוח ולהשתמש בתוכנות לימוד וכתיבה תורניות: וורד (לכתיבת תורה), אוצריא, זית, אוצר החכמה ובר אילן. בזמן שימוש בתוכנה מותרת החסימה מושהית, וחוזרת מיד כשעוברים לתוכנה אחרת או סוגרים אותה. נעילה ידנית ("נעל עכשיו") תמיד חוסמת הכל.</p>
+            </div>
+            <div class="setting">
+              <div class="setting-text">
+                <strong>אפשר תוכנות תורניות בזמן חסימה</strong>
+                <span>מציג את רשימת התוכנות על מסך החסימה ומאפשר לפתוח אותן גם כשהמחשב חסום</span>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="allowedAppsToggle" checked />
+                <span class="slider"></span>
+              </label>
+            </div>
+            <div class="allowed-apps">
+              <div class="allowed-apps-list" id="allowedAppsList"></div>
+              <div class="allowed-apps-add">
+                <button class="btn btn-primary btn-sm" id="allowedAppPickBtn">
+                  <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                  בחירת תוכנה מהמחשב…
+                </button>
+              </div>
+              <div class="known-apps">
+                <button class="btn btn-ghost btn-sm detect-btn" id="detectAppsBtn">
+                  <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+                  סריקת תוכנות תורניות מותקנות…
+                </button>
+                <div class="known-apps-list hidden" id="detectedAppsList"></div>
+                <p class="hint">הסריקה מוצאת תוכנות תורניות מוכרות המותקנות במחשב — וורד, אוצריא, זית, אוצר החכמה ובר אילן — לפי רישום המערכת, קיצורי הדרך ונתיבי ההתקנה האופייניים, ומוסיפה אותן לרשימה בלחיצה אחת (ההוספה תבקש את הסיסמה).</p>
+              </div>
+              <p class="hint">בחרו את קובץ ההרצה (.exe) של התוכנה מתיקיית ההתקנה שלה, והתוכנה תיבדק מיד: אם היא חתומה דיגיטלית — יישמר החותם ושם המוצר, והזיהוי ימשיך לעבוד גם אחרי עדכון התוכנה. אם אינה חתומה — יישמרו הנתיב המלא וטביעת הקובץ, ותידרש בחירה מחדש אחרי עדכון התוכנה. תוכנות נלוות (תוספים שפועלים כתוכנה נפרדת לצד התוכנה הראשית) אפשר להוסיף מתחת לתוכנה.</p>
+            </div>
+
+            <div class="card-head" style="margin-top:24px">
+              <h2>מצב "רק תוכנות מאושרות"</h2>
+              <p class="hint">שכבת אכיפה חזקה יותר לשליטה עצמית: כשהיא פעילה, המחשב סוגר אוטומטית כל תוכנה שאינה ברשימת התוכנות המאושרות שלמעלה (תוכנות הלימוד). רכיבי המערכת של Windows ובין הזמנים עצמו מוגנים תמיד ולעולם לא ייסגרו — ולכן המערכת נשארת יציבה. <strong>שימו לב:</strong> אם אין תוכנות מאושרות ברשימה, כמעט כל תוכנה שתיפתח תיסגר מיד.</p>
+            </div>
+            <div class="setting">
+              <div class="setting-text">
+                <strong>הפעלת "רק תוכנות מאושרות"</strong>
+                <span>סגירה אוטומטית של תוכנות שאינן ברשימת התוכנות המאושרות</span>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="studyModeToggle" />
+                <span class="slider"></span>
+              </label>
+            </div>
+            <div class="setting">
+              <div class="setting-text">
+                <strong>מתי המצב פעיל</strong>
+                <span>"רק בזמן חסימה" — רק כשהמחשב חסום לפי הלוח או בנעילה ידנית; "תמיד" — בכל עת</span>
+              </div>
+              <select id="studyModeScope" class="select-input">
+                <option value="blocked">רק בזמן חסימה</option>
+                <option value="always">תמיד</option>
+              </select>
+            </div>
+            <div class="mode-warning hidden" id="studyModeWarning">
+              <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg>
+              <span><strong>מצב "רק תוכנות מאושרות" פעיל תמיד.</strong> רק התוכנות המאושרות שלמעלה יוכלו לרוץ — כל שאר תוכנות המשתמש ייסגרו מיד. ודאו שהוספתם את כל תוכנות הלימוד הנחוצות.</span>
+            </div>
+          </div>
+
+          <!-- 3. אתרים וקבצים -->
+          <div class="settings-subpanel hidden" data-subpanel="web">
+            <div class="card-head">
+              <h2>אתרים מאושרים (אתר נעול)</h2>
+              <p class="hint">רשימת אתרים שההורה מאשר. פתיחת "אתר נעול" פותחת דפדפן מוגבל שאפשר לגלוש בו רק לאתרים שברשימה — כל ניווט לאתר אחר, פתיחת חלון חדש או בקשת הרשאה (מצלמה/מיקרופון) נחסמים. מתאים לאתרי לימוד. הגלישה מותרת לפי שם המתחם (כולל תת-מתחמים).</p>
+            </div>
+            <div class="website-apps">
+              <div class="website-apps-list" id="websiteAppsList"></div>
+              <div class="override-controls">
+                <input type="text" id="websiteAppName" class="text-input" placeholder="שם האתר (למשל: אתר הלימוד)" maxlength="80" />
+                <input type="text" id="websiteAppUrl" class="text-input wide" placeholder="כתובת (למשל: hebrewbooks.org)" />
+                <button class="btn btn-primary btn-sm" id="addWebsiteAppBtn">הוסף אתר</button>
+              </div>
+            </div>
+
+            <div class="card-head" style="margin-top:24px">
+              <h2>סייר קבצים מוגבל</h2>
+              <p class="hint">סייר קבצים שמאפשר גישה רק לתיקיות שתבחרו, מסתיר סוגי קבצים שתגדירו, ותומך ב"ספרייה" לקריאה בלבד. הגישה מוגבלת לתיקיות המאושרות בלבד — אי אפשר לצאת מהן (חסימת <code>..</code> ותיקיות מערכת). פתיחת קבצים בלבד — ללא פעולות כתיבה או מחיקה.</p>
+            </div>
+            <div class="setting">
+              <div class="setting-text">
+                <strong>הפעלת סייר קבצים מוגבל</strong>
+                <span>מאפשר לפתוח מכאן סייר קבצים המוגבל לתיקיות המאושרות</span>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="fileExplorerToggle" />
+                <span class="slider"></span>
+              </label>
+            </div>
+            <div class="setting">
+              <div class="setting-text">
+                <strong>תיקיות מאושרות</strong>
+                <span>אילו תיקיות ייחשפו בסייר המוגבל</span>
+              </div>
+              <div class="fe-roots" id="feRoots"></div>
+            </div>
+            <div class="setting">
+              <div class="setting-text">
+                <strong>ספרייה לקריאה בלבד</strong>
+                <span>כשתיקיית "ספרייה" חשופה — אין דרך לשנות בה קבצים דרך הסייר</span>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="fileExplorerReadonly" checked />
+                <span class="slider"></span>
+              </label>
+            </div>
+            <div class="recovery-grid single">
+              <div class="field">
+                <label>נתיב תיקיית "הספרייה" (אופציונלי)</label>
+                <input type="text" id="fileExplorerLibraryPath" class="text-input wide" placeholder="C:\Study" />
+              </div>
+              <div class="field">
+                <label>סוגי קבצים מוסתרים (מופרדים בפסיק)</label>
+                <input type="text" id="fileExplorerHidden" class="text-input wide" placeholder=".exe, .mp4, .zip" />
+              </div>
+            </div>
+            <div class="recovery-actions">
+              <button class="btn btn-ghost" id="openFileExplorerBtn">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                פתח סייר קבצים מוגבל
+              </button>
+            </div>
+          </div>
+
+          <!-- 4. מראה ומסך חסימה -->
+          <div class="settings-subpanel hidden" data-subpanel="appearance">
+            <div class="card-head">
+              <h2>מראה וערכת נושא</h2>
+              <p class="hint">התאמת המראה החזותי של התוכנה ושל מסך החסימה.</p>
+            </div>
+            <div class="setting theme-setting">
+              <div class="setting-text">
+                <strong>ערכת נושא</strong>
+                <span>בהיר, כהה, או התאמה אוטומטית להגדרת Windows</span>
+              </div>
+              <div class="theme-toggle" role="radiogroup" aria-label="ערכת נושא">
+                <button class="theme-btn" data-theme-choice="system" role="radio" aria-checked="true">
+                  <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+                  מערכת
+                </button>
+                <button class="theme-btn" data-theme-choice="light" role="radio" aria-checked="false">
+                  <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+                  בהיר
+                </button>
+                <button class="theme-btn" data-theme-choice="dark" role="radio" aria-checked="false">
+                  <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+                  כהה
+                </button>
+              </div>
+            </div>
+            <div class="setting">
+              <div class="setting-text">
+                <strong>אייקון צף כשאינטרנט חסום</strong>
+                <span>מציג אייקון קטן בפינת המסך כשהמחשב פתוח והאינטרנט חסום (לחיצה עליו פותחת את ההגדרות). חסימת האינטרנט מתבצעת עם חוק חומת אש ייעודי של בין הזמנים — הסינונים הקיימים במחשב נשארים ללא שינוי וחוזרים לפעול כשהחסימה מסתיימת.</span>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="netIconToggle" checked />
+                <span class="slider"></span>
+              </label>
+            </div>
+            <div class="setting">
+              <div class="setting-text">
+                <strong>אזהרה לפני החסימה</strong>
+                <span>כמה דקות לפני שהמחשב נחסם — להציג הודעה שמזהירה לשמור קבצים ולסיים את העבודה (0 = ללא אזהרה; ברירת מחדל: 5 דקות)</span>
+              </div>
+              <input type="number" id="warnInput" min="0" max="60" step="1" value="5" class="num-input" />
+            </div>
+
+            <div class="card-head" style="margin-top:24px">
+              <h2>הודעה ומשפטי עידוד במסך החסימה</h2>
+              <p class="hint">מסר אישי שמוצג למשתמש כשהמחשב חסום — למשל תזכורת ללימוד.</p>
+            </div>
+            <div class="setting">
+              <div class="setting-text">
+                <strong>הודעה אישית</strong>
+                <span>מופיעה מתחת לכותרת במסך החסימה</span>
+              </div>
+              <input type="text" id="blockMessage" class="text-input wide-msg" placeholder="למשל: נלמד עכשיו בשקט" maxlength="300" />
+            </div>
+            <div class="setting">
+              <div class="setting-text">
+                <strong>משפטי עידוד מהמקורות</strong>
+                <span>במסך החסימה מתחלפים משפטי עידוד מתוך התנ"ך, המשנה והתלמוד — כל משפט מדויק כלשונו במקור, עם המקור שלו. כבו כדי להסתיר אותם.</span>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="torahQuotesToggle" checked />
+                <span class="slider"></span>
+              </label>
+            </div>
+          </div>
+
+          <!-- 5. פרופילים וחריגים -->
+          <div class="settings-subpanel hidden" data-subpanel="profiles">
+            <div class="card-head">
+              <h2>חריגים חד-פעמיים</h2>
+              <p class="hint">דילוג על הלוח הרגיל ליום מסוים — מתאים לחופשה, חג או יום מיוחד. החריג גובר על לוח הזמנים השבועי.</p>
+            </div>
+            <div class="override-controls">
+              <input type="date" id="overrideDate" class="date-input" />
+              <select id="overrideType" class="select-input">
+                <option value="allow">אפשר כל היום</option>
+                <option value="block">חסום כל היום (נעילת מחשב)</option>
+                <option value="netblock">חסום אינטרנט כל היום (המחשב פתוח)</option>
+              </select>
+              <button class="btn btn-primary btn-sm" id="addOverrideBtn">הוסף</button>
+              <button class="btn btn-ghost btn-sm" id="allowTomorrowBtn">אפשר מחר</button>
+              <button class="btn btn-ghost btn-sm" id="blockTomorrowBtn">חסום מחר</button>
+            </div>
+            <div class="override-list" id="overrideList"></div>
+
+            <div class="card-head" style="margin-top:24px">
+              <h2>פרופילים (לפי משתמש Windows)</h2>
+              <p class="hint">אפשר להגדיר לוח זמנים ומדיניות שונים לכל משתמש Windows במחשב. כשמשתמש מסוים מחובר — הפרופיל שלו חל אוטומטית במקום הלוח הבסיסי. ליצירת פרופיל: הגדירו את הלוח והתוכנות הרצויים, ואז שמרו אותם כפרופיל עבור שם משתמש. השדות הרגישים (סיסמה, שחזור, שותף אחריות, צינון) משותפים לכל הפרופילים.</p>
+            </div>
+            <div class="website-apps">
+              <div class="website-apps-list" id="profilesList"></div>
+              <div class="override-controls">
+                <input type="text" id="profileName" class="text-input" placeholder="שם הפרופיל (למשל: ילדים)" maxlength="80" />
+                <input type="text" id="profileUser" class="text-input" placeholder="שם משתמש Windows (למשל: kids)" maxlength="128" />
+                <button class="btn btn-primary btn-sm" id="addProfileBtn">שמור לוח נוכחי כפרופיל</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- 6. תחזוקה ומערכת -->
+          <div class="settings-subpanel hidden" data-subpanel="system">
+            <div class="card-head">
+              <h2>מצב ההגנה שלך</h2>
+              <p class="hint">בדיקת תקינות מהירה — ודאו שכל ההגנות פעילות כדי שהתוכנה תעשה את העבודה.</p>
+            </div>
+            <div class="checklist" id="securityList">
+              <div class="check-item pending">טוען…</div>
+            </div>
+            <div class="recovery-actions">
+              <button class="btn btn-ghost" id="backupExportBtn">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>
+                גיבוי הגדרות
+              </button>
+              <button class="btn btn-ghost" id="backupImportBtn">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21V9M7 14l5-5 5 5"/><path d="M5 3h14"/></svg>
+                שחזור מגיבוי
+              </button>
+            </div>
+
+            <div class="card-head" style="margin-top:24px">
+              <h2>הסרת התוכנה</h2>
+              <p class="hint">מסירה את התוכנה מהמחשב יחד עם ההגדרות, לוח הזמנים והסיסמה — כולל הסרת ההפעלה עם Windows ועצירת כלבי השמירה. נדרשת סיסמת ההורה.</p>
+            </div>
+            <div class="recovery-actions">
+              <button class="btn btn-danger" id="uninstallBtn">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6M10 11v6M14 11v6"/></svg>
+                הסרת התוכנה מהמחשב
+              </button>
+            </div>
+
+            <div class="card-head" style="margin-top:24px">
+              <h2>אודות</h2>
+            </div>
+            <div class="about">
+              <div class="logo small">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+              </div>
+              <div>
+                <h2>בין הזמנים <span class="version">v<span id="version">1.1.0</span></span></h2>
+                <p class="hint">נוצר באהבה על ידי <strong>לב טוב דיגיטל</strong>
+                  <svg class="icon inline-heart" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
+                </p>
+                <div class="about-links">
+                  <a href="#" id="siteLink">
+                    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18 15 15 0 0 1 0-18z"/></svg>
+                    אתר הבית: digital.levtov.uk
+                  </a>
+                  <a href="#" id="mailLink">
+                    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>
+                    צרו קשר: mytovmail@gmail.com
+                  </a>
+                </div>
+              </div>
+            <div class="license-info-card" id="licenseCard" style="margin-top: 16px; padding: 14px 18px; border-radius: 10px; background: rgba(37, 99, 235, 0.07); border: 1px solid rgba(37, 99, 235, 0.25); display: flex; align-items: center; justify-content: space-between; gap: 12px;">
+              <div style="display: flex; align-items: center; gap: 12px;">
+                <span style="font-size: 1.5rem;">🔑</span>
+                <div>
+                  <div style="font-weight: 700; font-size: 0.95rem; color: var(--text-color, #1e293b);">רישיון תוכנה (פורום העורכים התורניים)</div>
+                  <div id="licenseUserText" style="font-size: 0.85rem; color: var(--muted-color, #64748b);">טוען פרטי רישיון...</div>
+                </div>
+              </div>
+              <span id="licenseBadge" class="badge" style="background: #16a34a; color: white; padding: 4px 12px; border-radius: 20px; font-size: 0.8rem; font-weight: bold; white-space: nowrap;">פעיל ומאומת</span>
+            </div>
           </div>
         </div>
       </div>
@@ -486,9 +683,76 @@
     </div>
   </div>
 
+  <!-- חלונית מדריך ועזרה מקיפה -->
+  <div class="modal-overlay hidden" id="helpModal">
+    <div class="modal guide-modal">
+      <div class="guide-modal-header">
+        <div class="guide-modal-title">
+          <div class="guide-modal-icon">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+          </div>
+          <div>
+            <h3>מרכז הדרכה ועזרה — בין הזמנים</h3>
+            <p>מדריך מפורט, פשוט וידידותי לכל אפשרויות התוכנה</p>
+          </div>
+        </div>
+        <div class="guide-modal-actions">
+          <button class="btn btn-primary btn-sm" id="startTourFromHelpBtn" type="button">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+            הפעל את המלווה האישי (סיור מודרך)
+          </button>
+          <button class="close-x" id="helpModalClose" title="סגירה">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="guide-search-bar">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        <input type="text" id="guideSearchInput" placeholder="חיפוש נושא, הגדרה או שאלה במדריך..." class="guide-search-input" />
+      </div>
+
+      <div class="guide-modal-body">
+        <nav class="guide-nav" id="guideNav" aria-label="פרקי המדריך"></nav>
+        <main class="guide-content" id="guideBody" tabindex="0"></main>
+      </div>
+    </div>
+  </div>
+
+  <!-- שכבת המלווה האישי (Interactive Tour) -->
+  <div class="tour-overlay hidden" id="tourOverlay">
+    <div class="tour-spotlight" id="tourSpotlight"></div>
+    <div class="tour-card" id="tourCard" role="dialog" aria-modal="true" aria-labelledby="tourTitle">
+      <div class="tour-card-header">
+        <div class="tour-badge">
+          <span class="tour-avatar">💡</span>
+          <span class="tour-badge-text">המלווה האישי שלך</span>
+        </div>
+        <div class="tour-header-actions">
+          <span class="tour-step-counter" id="tourStepCounter">שלב 1 מתוך 14</span>
+          <button class="tour-close-btn" id="tourCloseX" title="יציאה מההדרכה (Esc)">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+      </div>
+      <h3 class="tour-title" id="tourTitle">כותרת</h3>
+      <div class="tour-text" id="tourText">תוכן הסבר</div>
+      <div class="tour-dots" id="tourDots"></div>
+      <div class="tour-actions">
+        <button class="btn btn-ghost btn-sm" id="tourSkipBtn" type="button">דלג על ההדרכה</button>
+        <div class="tour-nav-btns">
+          <button class="btn btn-ghost btn-sm hidden" id="tourPrevBtn" type="button">הקודם</button>
+          <button class="btn btn-primary btn-sm" id="tourNextBtn" type="button">הבא</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div class="toast hidden" id="toast"></div>
 
   <script src="../scheduler.js"></script>
+  <script src="guide-content.js"></script>
+  <script src="tour.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

@@ -105,12 +105,16 @@ function makeMock(config) {
     constructor(opts) {
       state.windowsCreated++;
       state.windows.push(this);
+      this.opts = opts || {};
       this.title = (opts && opts.title) || null;
       this.visible = !(opts && opts.show === false);
       this._listeners = {};
       this.webContents = {
         sent: [],
-        send: (ch, data) => { this.webContents.sent.push([ch, data]); }
+        send: (ch, data) => { this.webContents.sent.push([ch, data]); },
+        on: () => {},
+        setWindowOpenHandler: () => {},
+        loadURL: () => {}
       };
       this.blockDisplayId = null;
     }
@@ -124,6 +128,7 @@ function makeMock(config) {
     setAlwaysOnTop(flag) { this.alwaysOnTop = !!flag; }
     setVisibleOnAllWorkspaces() {}
     loadFile() {}
+    loadURL() {}
     restore() {}
     isMinimized() { return false; }
     isVisible() { return !!this.visible; }
@@ -160,7 +165,7 @@ function makeMock(config) {
       on() {}
       show() { state.notifications.push(this); }
     },
-    shell: { openExternal: () => Promise.resolve() },
+    shell: { openExternal: () => Promise.resolve(), openPath: () => Promise.resolve('') },
     safeStorage: { isEncryptionAvailable: () => false },
     nativeTheme: { shouldUseDarkColors: true },
     dialog: {
@@ -171,6 +176,20 @@ function makeMock(config) {
       listeners: {},
       on: function (ev, cb) { (this.listeners[ev] = this.listeners[ev] || []).push(cb); },
       emit: function (ev) { (this.listeners[ev] || []).forEach((cb) => cb()); }
+    },
+    session: {
+      _partition: null,
+      fromPartition: function () {
+        if (!this._partition) {
+          this._partition = {
+            listeners: {},
+            setPermissionRequestHandler(fn) { this.permissionRequest = fn; },
+            setPermissionCheckHandler(fn) { this.permissionCheck = fn; },
+            on(ev, fn) { this.listeners[ev] = fn; }
+          };
+        }
+        return this._partition;
+      }
     }
   };
 
@@ -866,7 +885,9 @@ test('ipc: all sensitive IPC handlers reject non-mainWindow senders', async () =
     'settings:open', 'pin:verify', 'pin:set', 'pin:clear', 'lock:now', 'unlock:now',
     'app:hide', 'session:unlock', 'session:get', 'session:lock',
     'backup:export', 'backup:import', 'shell:open', 'theme:apply',
-    'allowed-apps:launch', 'allowed-apps:inspect-path', 'allowed-apps:detect'
+    'allowed-apps:launch', 'allowed-apps:inspect-path', 'allowed-apps:detect',
+    'website-apps:open', 'file-explorer:open-window', 'file-explorer:roots',
+    'file-explorer:list', 'file-explorer:open', 'accountability:request-approval'
   ];
 
   for (const channel of sensitive) {
@@ -958,6 +979,102 @@ test('allowed-apps:launch rejects empty exe path', async () => {
   m.cleanup();
 });
 
+/* ================= PowerShell injection safety (Phase 1 hardening) =================
+   נתיבי קבצים משולבים לתוך סקריפטים של PowerShell. מחרוזת PowerShell במרכאות
+   כפולות (כפי ש-JSON.stringify מפיק) מבצעת אינטרפולציה של $(...) / backtick /
+   $var — כך שקובץ בשם המכיל $(...) היה עלול להריץ קוד שרירותי. הבדיקות
+   מוודאות שהנתיב תמיד עטוף במחרוזת PowerShell יחיד ליטרלית ולא בצורת JSON כפול. */
+
+// עוטף כמחרוזת PowerShell יחיד — זהה ל-psSingleQuote שבתוך main.js
+function psQuote(v) { return "'" + String(v).replace(/'/g, "''") + "'"; }
+
+test('inspectAppFile: malicious $() path is single-quoted, never double-quoted (no PS interpolation)', async () => {
+  // התווים $ ( ) ` וגם רווח חוקיים בשמות קבצים ב-Windows — מטען הזרקה קלאסי
+  const evilName = 'pwn $(Start-Process calc.exe) `whoami`.exe';
+  const evilPath = path.join(os.tmpdir(), evilName);
+  fs.writeFileSync(evilPath, 'fake');
+  try {
+    const settings = S.defaultSchedule();
+    settings.pinHash = S.sha256Hex('1234');
+    const m = loadMain({ settings });
+    await m.ready();
+
+    const res = await m.ipcHandlers.get('allowed-apps:inspect-path')({}, evilPath);
+    assert.ok(res && res.canceled === false, 'inspect-path השלים: ' + JSON.stringify(res));
+
+    // הסקריפט שנשלח ל-PowerShell (Get-AuthenticodeSignature / Get-FileHash)
+    const psCall = m.state.execCalls.find((c) =>
+      c.cmd === 'powershell.exe' && String(c.args.join(' ')).includes('Get-AuthenticodeSignature'));
+    assert.ok(psCall, 'צריכה להיות קריאת PowerShell לבדיקת הקובץ');
+    const script = psCall.args[psCall.args.indexOf('-Command') + 1];
+
+    assert.ok(script.includes(psQuote(evilPath)),
+      'הנתיב חייב להיות עטוף במחרוזת PowerShell יחיד ליטרלית: ' + script);
+    assert.ok(!script.includes(JSON.stringify(evilPath)),
+      'אסור שהנתיב יופיע כמחרוזת כפולה (JSON.stringify) — זו הצורה הפגיעה הישנה');
+    m.cleanup();
+  } finally {
+    try { fs.unlinkSync(evilPath); } catch { /* ignore */ }
+  }
+});
+
+test('launchAllowedApp: malicious $() exe path is single-quoted in the launch script', async () => {
+  const evilName = 'pwn $(calc) `id`.exe';
+  const evilPath = path.join(os.tmpdir(), evilName);
+  fs.writeFileSync(evilPath, 'fake');
+  try {
+    const settings = blockNowSchedule(); // pinHash + חסום עכשיו
+    settings.allowedApps = [{ name: 'evil', exe: evilPath }];
+    const m = loadMain({ settings });
+    await m.ready();
+
+    const res = await m.ipcHandlers.get('allowed-apps:launch')({}, { exe: evilPath });
+    assert.ok(res.ok, 'ההפעלה צריכה להצליח (הקובץ קיים): ' + JSON.stringify(res));
+
+    const psCall = m.state.execCalls.find((c) =>
+      c.cmd === 'powershell.exe' && String(c.args.join(' ')).includes('SetForegroundWindow'));
+    assert.ok(psCall, 'צריכה להיות קריאת PowerShell להעלאה לחזית/הפעלה');
+    const script = psCall.args[psCall.args.indexOf('-Command') + 1];
+    assert.ok(script.includes(psQuote(evilPath)),
+      'נתיב ההפעלה חייב להיות עטוף במחרוזת יחיד: ' + script);
+    assert.ok(!script.includes(JSON.stringify(evilPath)),
+      'אסור שנתיב ההפעלה יופיע כמחרוזת כפולה (JSON.stringify)');
+    m.cleanup();
+  } finally {
+    try { fs.unlinkSync(evilPath); } catch { /* ignore */ }
+  }
+});
+
+/* ================= אכיפה זהה למנהל ולמשתמש רגיל (Phase 2.4) =================
+   האכיפה של בין הזמנים היא userland: מסך החסימה, גניבת הפוקוס וחסימת
+   הקיצורים אינם תלויים בהרשאות. חשבון מנהל מחובר (elevated) נחסם בדיוק כמו
+   חשבון רגיל (limited) — ההרשאות משפיעות רק על שכבות ההגנה (ACL/שומר/רשת). */
+
+test('enforcement parity: admin (elevated) session blocks exactly like a standard (limited) session', async () => {
+  async function checkBlocked(elevate) {
+    const settings = blockNowSchedule(); // pinHash + חסום כל השבוע
+    const m = loadMain({ settings, elevate });
+    await m.ready();
+    const st = await m.ipcHandlers.get('status:get')();
+    assert.equal(st.state, 'blocked', 'blocked regardless of elevation (elevate=' + elevate + ')');
+    assert.equal(st.enforcement.actual, 'blocked', 'enforcement actual=blocked (elevate=' + elevate + ')');
+    // חלונות חסימה אמיתיים: blockDisplayId מספרי (חלון ההגדרות הוא null)
+    const blockWins = m.state.windows.filter((w) => typeof w.blockDisplayId === 'number' && !w.isDestroyed());
+    assert.ok(blockWins.length >= 1, 'block window created (elevate=' + elevate + ')');
+
+    // גניבת פוקוס בזמן חסימה — חייבת לפעול זהה בשני המצבים (anti-Alt+Tab)
+    const before = m.state.focusCalls.length;
+    blockWins[0].emit('blur');
+    assert.ok(m.state.focusCalls.length > before,
+      'blur during block re-steals focus (elevate=' + elevate + ')');
+    m.cleanup();
+    return blockWins.length;
+  }
+  const limited = await checkBlocked(false); // חשבון רגיל
+  const admin = await checkBlocked(true);    // חשבון מנהל מחובר
+  assert.equal(admin, limited, 'admin and standard sessions create the same block windows');
+});
+
 /* ================= session Lock Edge Cases ================= */
 
 test('session: unlock-with-empty-password returns failure when pin is set', async () => {
@@ -1047,4 +1164,358 @@ test('activity:get handles empty log gracefully', async () => {
   const activity = await m.ipcHandlers.get('activity:get')();
   assert.ok(Array.isArray(activity), 'Activity should return an array for empty log');
   m.cleanup();
+});
+
+/* ================= "רק תוכנות מאושרות" — Process Governor (Phase 3.7) =================
+   בטיחות קריטית: המושל חייב לסגור אך ורק אפליקציות משתמש לא-מאושרות, ולעולם
+   לא תהליכי מערכת (safelist), תהליכים תחת %WINDIR%, או את בין הזמנים עצמו. */
+
+const GOVERNOR_PROCS = JSON.stringify([
+  { ProcessId: 4, ParentProcessId: 0, Name: 'System', ExecutablePath: '' },
+  { ProcessId: 900, ParentProcessId: 4, Name: 'csrss.exe', ExecutablePath: 'C:\\Windows\\System32\\csrss.exe' },
+  { ProcessId: 1000, ParentProcessId: 1, Name: 'lsass.exe', ExecutablePath: 'C:\\Windows\\System32\\lsass.exe' },
+  { ProcessId: 1200, ParentProcessId: 1, Name: 'explorer.exe', ExecutablePath: 'C:\\Windows\\explorer.exe' },
+  { ProcessId: 1500, ParentProcessId: 1, Name: 'WINWORD.EXE', ExecutablePath: 'C:\\Program Files\\Microsoft Office\\root\\Office16\\WINWORD.EXE' },
+  { ProcessId: 1550, ParentProcessId: 1, Name: 'otzaria.exe', ExecutablePath: 'C:\\Users\\u\\AppData\\Local\\Programs\\otzaria\\otzaria.exe' },
+  { ProcessId: 1600, ParentProcessId: 1, Name: 'chrome.exe', ExecutablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe' },
+  { ProcessId: 1700, ParentProcessId: 1, Name: 'game.exe', ExecutablePath: 'D:\\Games\\game.exe' },
+  { ProcessId: 1800, ParentProcessId: 1, Name: 'notepad.exe', ExecutablePath: 'C:\\Windows\\System32\\notepad.exe' },
+  { ProcessId: 1900, ParentProcessId: 1, Name: 'powershell.exe', ExecutablePath: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe' },
+  { ProcessId: 1950, ParentProcessId: 1, Name: 'cmd.exe', ExecutablePath: 'D:\\Tools\\cmd.exe' },
+  { ProcessId: 91960, ParentProcessId: 1, Name: 'evil.exe', ExecutablePath: 'C:\\WindowsEvil\\evil.exe' },
+  { ProcessId: 91961, ParentProcessId: 1, Name: 'explorer.exe', ExecutablePath: 'D:\\Games\\explorer.exe' }
+].map((p) => Object.assign({ StartTicks: p.ProcessId * 1000 + 1 }, p)));
+
+function governorExec(killed) {
+  return function (cmd, args) {
+    const joined = args.join(' ');
+    if (cmd === 'powershell.exe' && joined.includes('Get-Process') && joined.includes('StartTicks') && joined.includes('ConvertTo-Json')) {
+      return { err: null, stdout: GOVERNOR_PROCS, stderr: '' };
+    }
+    if (cmd === 'powershell.exe' && joined.includes('Stop-Process -InputObject')) {
+      const match = joined.match(/Get-Process -Id (\d+)/);
+      if (match) killed.push(match[1]);
+      return { err: null, stdout: '', stderr: '' };
+    }
+    if (cmd === 'netsh' && args.includes('show')) return { err: new Error('no rule'), stdout: '', stderr: '' };
+    if (cmd === 'schtasks' && args.includes('/Create')) return { err: new Error('x'), stdout: '', stderr: '' };
+    if (cmd === 'schtasks' && args.includes('/Query')) return { err: new Error('x'), stdout: '', stderr: '' };
+    return { err: null, stdout: '', stderr: '' };
+  };
+}
+
+test('governor (studyMode always): kills non-approved user apps; spares system/WINDIR/cryptographically approved/self', async () => {
+  const settings = S.defaultSchedule();
+  settings.pinHash = S.sha256Hex('1234');
+  settings.studyMode = { enabled: true, scope: 'always' };
+  settings.allowedApps = [{ name: 'Word', exe: 'C:\\Program Files\\Microsoft Office\\root\\Office16\\WINWORD.EXE', mode: 'path' }];
+  const killed = [];
+  const m = loadMain({ settings, exec: governorExec(killed) });
+  await m.ready();
+  // המושל רץ fire-and-forget ומאמת תהליכים בסדרה. מחכים לתוצאה האחרונה
+  // במקום להניח זמן קבוע (מכונות CI עמוסות עלולות להיות איטיות יותר).
+  for (let i = 0; i < 100 && !killed.includes('91960'); i++) {
+    await new Promise((r) => setTimeout(r, 10));
+  }
+
+  // נסגרו: אפליקציות משתמש לא-מאושרות שאינן תחת Windows
+  assert.ok(killed.includes('1600'), 'chrome (non-approved) must be killed');
+  assert.ok(killed.includes('1700'), 'game (non-approved) must be killed');
+  // לא נסגרו:
+  assert.ok(!killed.includes('4'), 'System pid must be spared');
+  assert.ok(!killed.includes('900'), 'csrss (safelist+WINDIR) must be spared');
+  assert.ok(!killed.includes('1000'), 'lsass (safelist+WINDIR) must be spared');
+  assert.ok(!killed.includes('1200'), 'explorer must be spared');
+  assert.ok(killed.includes('1500'), 'path approval without SHA-256 must fail closed');
+  assert.ok(killed.includes('1550'), 'KNOWN_APPS is discovery only; an app not explicitly approved must be killed');
+  assert.ok(!killed.includes('1800'), 'notepad (WINDIR) must be spared');
+  assert.ok(!killed.includes('1900'), 'powershell below WINDIR must be spared for system safety');
+  assert.ok(killed.includes('1950'), 'a shell copied outside WINDIR is not safelisted and must be killed');
+  assert.ok(killed.includes('91960'), 'WINDIR prefix without a path boundary must not be trusted: ' + JSON.stringify(killed));
+  assert.ok(killed.includes('91961'), 'a copied safelisted basename outside WINDIR must be killed');
+  m.cleanup();
+});
+
+test('governor (studyMode blocked): inactive when the computer is not blocked', async () => {
+  const settings = S.defaultSchedule(); // ברירת מחדל: פתוח (לא חסום)
+  settings.pinHash = S.sha256Hex('1234');
+  settings.studyMode = { enabled: true, scope: 'blocked' };
+  const killed = [];
+  const m = loadMain({ settings, exec: governorExec(killed) });
+  await m.ready();
+  await new Promise((r) => setTimeout(r, 80));
+  assert.equal(killed.length, 0, 'governor must not run while not blocked (scope=blocked): ' + JSON.stringify(killed));
+  m.cleanup();
+});
+
+test('governor (studyMode blocked): active during a computer block', async () => {
+  const settings = blockNowSchedule(); // pinHash + חסום כל השבוע
+  settings.studyMode = { enabled: true, scope: 'blocked' };
+  const killed = [];
+  const m = loadMain({ settings, exec: governorExec(killed) });
+  await m.ready();
+  await new Promise((r) => setTimeout(r, 80));
+  assert.ok(killed.includes('1600') && killed.includes('1700'), 'governor must kill non-approved apps during block: ' + JSON.stringify(killed));
+  m.cleanup();
+});
+
+test('governor: disabled studyMode never kills anything', async () => {
+  const settings = blockNowSchedule();
+  settings.studyMode = { enabled: false, scope: 'always' };
+  const killed = [];
+  const m = loadMain({ settings, exec: governorExec(killed) });
+  await m.ready();
+  await new Promise((r) => setTimeout(r, 80));
+  assert.equal(killed.length, 0, 'no kills when studyMode disabled');
+  m.cleanup();
+});
+
+/* ================= "אתר נעול" — דפדפן מוגבל (Phase 3.8) ================= */
+
+test('locked site: open creates a hardened window (contextIsolation, no nodeIntegration, sandbox)', async () => {
+  const settings = S.defaultSchedule();
+  settings.pinHash = S.sha256Hex('1234');
+  settings.websiteApps = [{ name: 'לימוד', urls: ['https://hebrewbooks.org'] }];
+  const m = loadMain({ settings });
+  await m.ready();
+  const before = m.state.windows.length;
+  const res = await m.ipcHandlers.get('website-apps:open')({}, 'לימוד');
+  assert.ok(res.ok, JSON.stringify(res));
+  assert.equal(m.state.windows.length, before + 1, 'a locked-site window must be created');
+  const w = m.state.windows[m.state.windows.length - 1];
+  assert.equal(w.opts.webPreferences.contextIsolation, true, 'contextIsolation must be true');
+  assert.equal(w.opts.webPreferences.nodeIntegration, false, 'nodeIntegration must be false');
+  assert.equal(w.opts.webPreferences.sandbox, true, 'sandbox must be true');
+  assert.ok(!w.opts.webPreferences.preload, 'no preload for remote content');
+  const ses = m.electron.session._partition;
+  let downloadPrevented = false;
+  ses.listeners['will-download']({ preventDefault: () => { downloadPrevented = true; } });
+  assert.equal(downloadPrevented, true, 'locked-site downloads must be cancelled');
+  assert.equal(ses.permissionCheck(), false, 'permission checks are denied');
+  m.cleanup();
+});
+
+test('locked site: open by index works and rejects unknown / url-less sites', async () => {
+  const settings = S.defaultSchedule();
+  settings.pinHash = S.sha256Hex('1234');
+  settings.websiteApps = [{ name: 'לימוד', urls: ['https://hebrewbooks.org'] }];
+  const m = loadMain({ settings });
+  await m.ready();
+  assert.ok((await m.ipcHandlers.get('website-apps:open')({}, 0)).ok, 'open by index 0');
+  const bad = await m.ipcHandlers.get('website-apps:open')({}, 'לא קיים');
+  assert.equal(bad.ok, false, 'unknown site rejected');
+  m.cleanup();
+});
+
+/* ================= פרופילים לפי משתמש Windows (Phase 3.9) ================= */
+
+function allBlockedWeek() {
+  const w = [];
+  for (let d = 0; d < 7; d++) w.push({ day: d, slots: [{ start: 0, end: 1440, type: 'blocked' }] });
+  return w;
+}
+
+test('profiles: a profile bound to the current Windows user overrides the base schedule', async () => {
+  const origUser = process.env.USERNAME;
+  process.env.USERNAME = 'TestKid';
+  try {
+    const settings = S.defaultSchedule(); // בסיס: פתוח (בלי חלונות)
+    settings.pinHash = S.sha256Hex('1234');
+    settings.profiles = [{ name: 'ילד', user: 'testkid', overrides: { week: allBlockedWeek() } }];
+    const m = loadMain({ settings });
+    await m.ready();
+    const st = await m.ipcHandlers.get('status:get')();
+    assert.equal(st.state, 'blocked', 'the current-user profile must make the computer blocked');
+    m.cleanup();
+  } finally {
+    process.env.USERNAME = origUser;
+  }
+});
+
+test('profiles: no matching profile falls back to the base schedule', async () => {
+  const origUser = process.env.USERNAME;
+  process.env.USERNAME = 'SomeoneElse';
+  try {
+    const settings = S.defaultSchedule(); // בסיס: פתוח
+    settings.pinHash = S.sha256Hex('1234');
+    settings.profiles = [{ name: 'ילד', user: 'testkid', overrides: { week: allBlockedWeek() } }];
+    const m = loadMain({ settings });
+    await m.ready();
+    const st = await m.ipcHandlers.get('status:get')();
+    assert.equal(st.state, 'allowed', 'no matching profile → base (open) applies');
+    m.cleanup();
+  } finally {
+    process.env.USERNAME = origUser;
+  }
+});
+
+test('profiles: blocking profile cannot be saved without a parent PIN', async () => {
+  const m = loadMain({ settings: S.defaultSchedule() });
+  await m.ready();
+  const data = S.defaultSchedule();
+  data.pinHash = null;
+  data.profiles = [{ id: 'user:kid', name: 'kid', user: 'kid', overrides: { week: allBlockedWeek() } }];
+  const res = await m.ipcHandlers.get('settings:save')({}, data);
+  assert.equal(res.ok, false);
+  assert.match(res.error || '', /סיסמת הורה/);
+  m.cleanup();
+});
+
+test('profiles: cosmetic save preserves manual unlock using the active profile transition', async () => {
+  const origUser = process.env.USERNAME;
+  process.env.USERNAME = 'TestKid';
+  try {
+    const settings = S.defaultSchedule();
+    settings.pinHash = S.sha256Hex('1234');
+    settings.profiles = [{ id: 'user:testkid', name: 'kid', user: 'testkid', overrides: { week: allBlockedWeek() } }];
+    const m = loadMain({ settings });
+    await m.ready();
+    await m.ipcHandlers.get('session:unlock')({}, '1234');
+    await m.ipcHandlers.get('unlock:now')({}, '1234');
+    const before = await m.ipcHandlers.get('settings:get')();
+    assert.ok(before.manualUnlockUntil, 'early unlock exists');
+    before.theme = 'light';
+    const saved = await m.ipcHandlers.get('settings:save')({}, before);
+    assert.ok(saved.ok, JSON.stringify(saved));
+    const after = await m.ipcHandlers.get('settings:get')();
+    assert.ok(after.manualUnlockUntil, 'cosmetic save must not clear profile-based early unlock');
+    m.cleanup();
+  } finally { process.env.USERNAME = origUser; }
+});
+
+test('profiles: saving on a profiled account does NOT overwrite the persisted base with the overlay', async () => {
+  // רגרסיה קריטית: unlock (שקורא saveSettings) על חשבון עם פרופיל אסור
+  // שידרוס את הבסיס המשותף עם דריסות הפרופיל.
+  const origUser = process.env.USERNAME;
+  process.env.USERNAME = 'TestKid';
+  try {
+    const settings = S.defaultSchedule();
+    settings.pinHash = S.sha256Hex('1234');
+    settings.profiles = [{ name: 'ילד', user: 'testkid', overrides: { week: allBlockedWeek() } }];
+    const m = loadMain({ settings });
+    await m.ready();
+    // פתיחה מוקדמת (מגדירה manualUnlockUntil ושומרת)
+    await m.ipcHandlers.get('unlock:now')({}, '1234');
+    // הקובץ הנשמר חייב לשמר את הבסיס: week ריק + הפרופיל, ולא week חסום
+    const machineFile = path.join(process.env.PROGRAMDATA, 'BenHazmanim', 'settings.json');
+    const userFile = path.join(m.tmpRoot, 'userData', 'settings.json');
+    const saved = JSON.parse(fs.readFileSync(fs.existsSync(machineFile) ? machineFile : userFile, 'utf8'));
+    assert.equal(saved.week[0].slots.length, 0, 'base week must stay empty (not overwritten by the profile overlay)');
+    assert.equal(saved.profiles.length, 1, 'profile preserved in base');
+    assert.equal(saved.profiles[0].overrides.week[0].slots[0].type, 'blocked', 'profile override intact');
+    m.cleanup();
+  } finally {
+    process.env.USERNAME = origUser;
+  }
+});
+
+/* ================= סייר קבצים מוגבל (Phase 3.10) ================= */
+
+function configureLibraryExplorer(m, extra) {
+  const library = path.join(m.tmpRoot, 'study-library');
+  fs.mkdirSync(path.join(library, 'books'), { recursive: true });
+  fs.writeFileSync(path.join(library, 'lesson.pdf'), 'pdf');
+  fs.writeFileSync(path.join(library, 'blocked.EXE'), 'exe');
+  fs.writeFileSync(path.join(library, 'shortcut.lnk'), 'lnk');
+  fs.writeFileSync(path.join(library, 'README'), 'extensionless');
+  fs.writeFileSync(path.join(library, 'books', 'notes.txt'), 'notes');
+  const settings = S.defaultSchedule();
+  settings.pinHash = S.sha256Hex('1234');
+  settings.fileExplorer = Object.assign({
+    enabled: true,
+    roots: ['library'],
+    readonlyLibrary: true,
+    hiddenTypes: ['.exe'],
+    libraryPath: library
+  }, extra || {});
+  return { library, settings };
+}
+
+test('restricted explorer: window is hardened and exposes the configured read-only root', async () => {
+  const m = makeMock({});
+  const configured = configureLibraryExplorer(m);
+  fs.writeFileSync(path.join(m.tmpRoot, 'userData', 'settings.json'), JSON.stringify(configured.settings), 'utf8');
+  delete require.cache[require.resolve('../main.js')];
+  require('../main.js');
+  await m.ready();
+
+  const roots = await m.ipcHandlers.get('file-explorer:roots')({});
+  assert.ok(roots.ok, JSON.stringify(roots));
+  assert.deepEqual(roots.roots, [{ id: 'library', label: 'ספרייה', readonly: true }]);
+
+  const before = m.state.windows.length;
+  const opened = await m.ipcHandlers.get('file-explorer:open-window')({});
+  assert.ok(opened.ok, JSON.stringify(opened));
+  assert.equal(m.state.windows.length, before + 1);
+  const w = m.state.windows[m.state.windows.length - 1];
+  assert.equal(w.opts.webPreferences.contextIsolation, true);
+  assert.equal(w.opts.webPreferences.nodeIntegration, false);
+  assert.match(String(w.title), /סייר קבצים מוגבל/);
+  m.cleanup();
+});
+
+test('restricted explorer: lists directories/files but hides configured file types case-insensitively', async () => {
+  const m = loadMain({});
+  const configured = configureLibraryExplorer(m);
+  // Replace settings after mock construction but before main loads.
+  fs.writeFileSync(path.join(m.tmpRoot, 'userData', 'settings.json'), JSON.stringify(configured.settings), 'utf8');
+  delete require.cache[require.resolve('../main.js')];
+  require('../main.js');
+  await m.ready();
+
+  const listed = await m.ipcHandlers.get('file-explorer:list')({}, 'library', '');
+  assert.ok(listed.ok, JSON.stringify(listed));
+  assert.ok(listed.items.some((x) => x.name === 'books' && x.isDir), 'directory is listed');
+  assert.ok(listed.items.some((x) => x.name === 'lesson.pdf' && !x.isDir), 'allowed file is listed');
+  assert.ok(!listed.items.some((x) => /blocked\.exe/i.test(x.name)), 'hidden extension is not listed');
+  assert.ok(!listed.items.some((x) => x.name === 'shortcut.lnk'), 'active shortcut type is always denied');
+  assert.ok(!listed.items.some((x) => x.name === 'README'), 'extensionless file is denied by default');
+  assert.equal(listed.root.readonly, true);
+  m.cleanup();
+});
+
+test('restricted explorer: blocks path traversal, unknown roots and direct opening of hidden types', async () => {
+  const m = loadMain({});
+  const configured = configureLibraryExplorer(m);
+  fs.writeFileSync(path.join(m.tmpRoot, 'userData', 'settings.json'), JSON.stringify(configured.settings), 'utf8');
+  delete require.cache[require.resolve('../main.js')];
+  require('../main.js');
+  await m.ready();
+
+  const traversal = await m.ipcHandlers.get('file-explorer:list')({}, 'library', '..\\');
+  assert.equal(traversal.ok, false, 'must reject .. escaping the approved root');
+  assert.match(traversal.error || '', /אינו מורשה/);
+  const unknown = await m.ipcHandlers.get('file-explorer:list')({}, 'windows', '');
+  assert.equal(unknown.ok, false, 'unknown root must be rejected');
+  const hidden = await m.ipcHandlers.get('file-explorer:open')({}, 'library', 'blocked.EXE');
+  assert.equal(hidden.ok, false, 'hidden type must also be blocked on direct open');
+  assert.match(hidden.error || '', /סוג הקובץ חסום/);
+  m.cleanup();
+});
+
+test('restricted explorer: opens only an allowed file inside the approved root', async () => {
+  const m = loadMain({});
+  const configured = configureLibraryExplorer(m);
+  fs.writeFileSync(path.join(m.tmpRoot, 'userData', 'settings.json'), JSON.stringify(configured.settings), 'utf8');
+  delete require.cache[require.resolve('../main.js')];
+  require('../main.js');
+  await m.ready();
+  let openedPath = null;
+  m.electron.shell.openPath = (p) => { openedPath = p; return Promise.resolve(''); };
+
+  const res = await m.ipcHandlers.get('file-explorer:open')({}, 'library', 'books\\notes.txt');
+  assert.ok(res.ok, JSON.stringify(res));
+  const source = path.join(configured.library, 'books', 'notes.txt');
+  assert.notEqual(openedPath, source, 'read-only library must not hand the source to an external editor');
+  assert.equal(fs.readFileSync(openedPath, 'utf8'), 'notes');
+  assert.equal(fs.statSync(openedPath).mode & 0o222, 0, 'temporary copy is read-only');
+  m.cleanup();
+});
+
+test('restricted explorer renderer: strict CSP uses an external script and no inline executable code', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'file-explorer.html'), 'utf8');
+  assert.match(html, /Content-Security-Policy[^>]+script-src 'self'/);
+  assert.match(html, /<script src="file-explorer\.js"><\/script>/);
+  assert.ok(!/<script>([\s\S]*?)<\/script>/.test(html), 'inline script would be blocked by the CSP');
+  assert.doesNotThrow(() => new Function(fs.readFileSync(path.join(__dirname, '..', 'renderer', 'file-explorer.js'), 'utf8')));
 });

@@ -582,6 +582,7 @@
       <div class="tq-text" id="tqText"></div>
       <div class="tq-source" id="tqSource"></div>
     </div>
+    <div class="study-apps" id="allowedResources" style="display:none"></div>
     <!-- כפתור קטן ושקט לפתיחה בסיסמה — מיועד למקרי חירום בלבד,
          ולכן שדה הסיסמה מוסתר ומוצג רק בלחיצה על הכפתור -->
     <button class="unlock-toggle" id="pinToggle" type="button">
@@ -1034,6 +1035,25 @@
       applyBlockTheme(status.theme);
       applyBg(status.blockBg);
       renderStudyApps(status);
+      const resources = document.getElementById('allowedResources');
+      if (resources) {
+        resources.textContent = '';
+        (status.websiteApps || []).forEach((site) => {
+          const btn = document.createElement('button');
+          btn.className = 'study-app-btn';
+          btn.textContent = 'אתר: ' + site.name;
+          btn.onclick = () => API && API.openWebsiteApp && API.openWebsiteApp(site.name);
+          resources.appendChild(btn);
+        });
+        if (status.fileExplorerEnabled) {
+          const btn = document.createElement('button');
+          btn.className = 'study-app-btn';
+          btn.textContent = 'סייר קבצים מוגבל';
+          btn.onclick = () => API && API.openFileExplorer && API.openFileExplorer();
+          resources.appendChild(btn);
+        }
+        resources.style.display = resources.childElementCount ? '' : 'none';
+      }
       // משפטי העידוד מהמקורות — ניתנים להסתרה מההגדרות (showTorahQuotes)
       tqBox.classList.toggle('tq-hidden', status.showTorahQuotes === false);
       // קובץ הגדרות פגום הוא מצב Fail Closed: אין להציג כפתור "דלג"
@@ -1046,7 +1066,7 @@
         noPinBox.style.display = 'none';
         settingsFooterBtn.style.display = 'none';
         configFaultBox.style.display = '';
-        lockMsg.textContent = 'קובץ ההגדרות פגום — פתחו את ההגדרות כדי לתקן או לשחזר גיבוי';
+        lockMsg.textContent = 'קובץ ההגדרות פגום או לא קיים — פתחו את ההגדרות כדי לתקן או לשחזר';
         lockMsg.classList.remove('ok');
       } else if (status.pinSet === false) {
         pinBox.style.display = 'none';
@@ -1063,6 +1083,15 @@
         settingsFooterBtn.style.display = '';
         pinToggle.style.display = pinExpanded ? 'none' : '';
         pinBox.style.display = pinExpanded ? '' : 'none';
+      }
+      // תקופת צינון פעילה — הפתיחה אושרה אך נכנסת לתוקף רק בעוד כמה דקות.
+      // מציגים ספירה לאחור חיה (מתעדכנת בכל רענון סטטוס, פעם בשנייה).
+      if (status.coolOff && status.coolOffSeconds != null) {
+        const cm = Math.floor(status.coolOffSeconds / 60);
+        const cs = status.coolOffSeconds % 60;
+        lockMsg.textContent = 'הפתיחה אושרה — תיכנס לתוקף בעוד ' +
+          (cm > 0 ? cm + ':' + String(cs).padStart(2, '0') + ' דקות' : cs + ' שניות');
+        lockMsg.classList.add('ok');
       }
       // הודעה אישית שהוגדרה על ידי ההורה (מוצגת גם במנעול ידני)
       if (status.blockMessage && (status.state === 'blocked' || status.manualLock)) {
@@ -1151,7 +1180,18 @@
 
       document.getElementById('pinBtn').onclick = async () => {
         if (!pinInput.value) return;
-        const res = await API.unlockNow(pinInput.value);
+        const pin = pinInput.value;
+        let res = await API.unlockNow(pin);
+        // שותף אחריות: פתיחה מוקדמת דורשת קוד אישור שנשלח רק לשותף
+        if (res && !res.ok && res.needApproval) {
+          lockMsg.classList.remove('ok');
+          lockMsg.textContent = 'שולח קוד אישור לשותף האחריות…';
+          const sent = API.requestUnlockApproval ? await API.requestUnlockApproval('unlock') : { ok: false, error: 'לא נתמך' };
+          if (!sent || !sent.ok) { showError((sent && sent.error) || 'שליחת קוד האישור לשותף נכשלה'); return; }
+          const code = window.prompt('הזינו את קוד האישור שקיבל שותף האחריות במייל:');
+          if (!code) { showError('נדרש קוד אישור מהשותף כדי לפתוח מוקדם'); return; }
+          res = await API.unlockNow(pin, code.trim());
+        }
         if (!res.ok) {
           if (res.locked) {
             lockTemporarily(res.locked);
@@ -1160,7 +1200,14 @@
           }
         } else {
           pinInput.value = ''; // הסיסמה נמחקת מיד אחרי הכניסה
-          lockMsg.textContent = 'נפתח — הגישה שוחררה עד המעבר הבא';
+          if (res.coolOff) {
+            const cm = Math.floor(res.coolOff / 60);
+            const cs = res.coolOff % 60;
+            lockMsg.textContent = 'הפתיחה אושרה — תיכנס לתוקף בעוד ' +
+              (cm > 0 ? cm + ':' + String(cs).padStart(2, '0') + ' דקות' : cs + ' שניות');
+          } else {
+            lockMsg.textContent = 'נפתח — הגישה שוחררה עד המעבר הבא';
+          }
           lockMsg.classList.add('ok');
         }
       };

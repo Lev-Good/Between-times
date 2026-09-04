@@ -18,3 +18,7 @@ preview.html
 .env
 *.local
 secret.local.js
+
+# כלי פיתוח וסשנים
+opencode.json
+ses_*.json
