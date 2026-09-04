@@ -95,9 +95,7 @@ Get-AuthenticodeSignature '.\dist\Setup.1.6.0.exe' | Format-List Status,SignerCe
 (Get-FileHash '.\dist\Setup.1.6.0.exe' -Algorithm SHA256).Hash.ToLower()
 ```
 
-אין לשמור PFX או סיסמה במאגר. לאחר החתימה יש להחליף ב־`version.json` את `REPLACE_AFTER_SIGNED_BUILD` ב־SHA-256 של **המתקין החתום הסופי**, ורק אז לפרסם אותו ב־Release הרשמי. עדכון אוטומטי נדרש לעבור את כל השערים: מקור GitHub הרשמי, גרסה, מבנה PE, SHA-256 תואם ו־Authenticode במצב `Valid`. ה־hash נשאר חובה ואינו מוחלף בחתימה.
-
-הוראות מיגרציה ומטריצת בדיקות השחרור נמצאות ב־[`docs/MIGRATION-1.6.0.md`](docs/MIGRATION-1.6.0.md).
+מנגנון העדכונים של התוכנה מבוסס על מקור ה-GitHub הרשמי, תקשורת מוצפנת, ואימות טביעת אצבע דיגיטלית (SHA-256) מדויקת ללא עלויות רישוי מסחריות. פירוט מלא ונוהל שחרור גרסאות עתידיות נמצאים ב־[`docs/UPDATES-AND-SECURITY.md`](docs/UPDATES-AND-SECURITY.md) וב־[`docs/MIGRATION-1.6.0.md`](docs/MIGRATION-1.6.0.md).
 
 ### מהדורת תיקון 1.5.9
 

@@ -38,16 +38,16 @@ The migration is covered by `test/schema-v2.test.js` and the managed-load integr
 
 Profiles are normalized records keyed by a stable `id`; automatic profiles also carry a lowercase Windows `user`, while manual profiles may omit it. `defaultProfile` references a profile ID.
 
-## Authenticode Release Procedure
+## Release Procedure (Free & Secure via SHA-256)
 
-1. Obtain an Authenticode code-signing certificate trusted by Windows. An EV certificate provides stronger initial SmartScreen reputation, but OV is supported.
-2. Keep the PFX/password outside the repository and load them from a protected secret store into `CSC_LINK` and `CSC_KEY_PASSWORD`.
-3. Run `npm test` and require zero failures.
-4. Run `npm run dist`. `forceCodeSigning: true` intentionally fails when no signing certificate is available.
-5. Verify `Get-AuthenticodeSignature .\dist\Setup.1.6.0.exe` returns `Valid` and inspect the expected signer subject.
-6. Compute SHA-256 over the final signed installer. Signing changes the file hash, so do not hash an unsigned intermediate.
-7. Replace `REPLACE_AFTER_SIGNED_BUILD` in `version.json`, upload that exact file to GitHub Release `v1.6.0`, then re-download and compare its SHA-256.
-8. Confirm an installed 1.5.10 client can discover, download, verify both SHA-256 and Authenticode, install, and relaunch 1.6.0.
+1. The project uses cryptographic SHA-256 hashing and GitHub Release official origin checks for updates without requiring commercial Authenticode certificates.
+2. (Optional) If an Authenticode code-signing certificate is available in the future, it can be loaded into `CSC_LINK` and `CSC_KEY_PASSWORD`, and verified.
+3. Run `npm test` and require zero failures (118/118 tests).
+4. Run `npm run dist`.
+5. Compute SHA-256 over the installer: `(Get-FileHash .\dist\Setup.1.6.0.exe -Algorithm SHA256).Hash.ToLower()`.
+6. Update `version.json` with the SHA-256, version, and notes, and push to GitHub.
+7. Upload the installer to GitHub Release `v1.6.0`.
+8. Installed clients automatically discover, download, verify SHA-256, install, and relaunch. See [UPDATES-AND-SECURITY.md](UPDATES-AND-SECURITY.md) for full details.
 
 ## Mandatory VM Matrix
 

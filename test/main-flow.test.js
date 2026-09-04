@@ -1407,7 +1407,7 @@ test('update:download rejects a tampered installer (SHA-256 mismatch)', async ()
   }
 });
 
-test('update:download rejects an unsigned installer even when SHA-256 matches', async () => {
+test('update:download accepts an unsigned installer when SHA-256 matches and repo is official', async () => {
   const installer = fakeInstallerBytes();
   const installerHash = fakeInstallerHash(installer);
   fetchMock = async (url) => {
@@ -1436,11 +1436,11 @@ test('update:download rejects an unsigned installer even when SHA-256 matches', 
     });
     await m.ready();
     const res = await m.ipcHandlers.get('update:download')();
-    assert.equal(res.ok, false);
-    assert.match(res.error || '', /Authenticode/);
-    assert.equal(m.state.quitCalled, false, 'unsigned installer must not close the app');
-    assert.equal(m.state.spawnCalls.filter((s) => s.args && s.args.includes('/S')).length, 0,
-      'unsigned installer must never be executed');
+    assert.equal(res.ok, true);
+    assert.equal(res.installing, true);
+    assert.equal(m.state.quitCalled, true, 'valid update initiates app quit for install');
+    assert.equal(m.state.spawnCalls.filter((s) => s.args && s.args.includes('/S')).length, 1,
+      'valid unsigned installer is executed with /S');
     m.cleanup();
   } finally {
     fetchMock = null;

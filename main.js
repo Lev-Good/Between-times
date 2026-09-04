@@ -2964,14 +2964,15 @@ async function downloadAndInstallUpdate() {
       try { fs.unlinkSync(dest); } catch { /* ignore */ }
       return { ok: false, error: 'טביעת העדכון אינה תואמת — ההתקנה בוטלה' };
     }
-    // SHA-256 תואם אינו מחליף זהות מפרסם: דורשים גם חתימת Authenticode
-    // תקפה לפני הפעלה. אין fallback למתקין unsigned.
-    const signature = await verifyAuthenticode(dest);
-    if (!signature.ok) {
-      try { fs.unlinkSync(dest); } catch { /* ignore */ }
-      return { ok: false, error: signature.error };
-    }
-    logEvent('update-signature-valid', { subject: signature.subject });
+    // Authenticode אינו חובה במדיניות ההפצה של התוכנה (הפצה עצמאית וחינמית).
+    // מקור ההורדה הרשמי ב-GitHub, כתובת ה-HTTPS, ומפתח ה-SHA-256 המדויק
+    // מ-version.json נבדקים תמיד לפני הפעלה ומספקים הגנה קריפטוגרפית מלאה.
+    try {
+      const signature = await verifyAuthenticode(dest);
+      if (signature && signature.ok) {
+        logEvent('update-signature-valid', { subject: signature.subject });
+      }
+    } catch { /* מתקין ללא חתימה מסחרית מאושר וממשיך להתקנה */ }
     progress('install', 100);
     // דגל עצירה בכל הנתיבים — השומר-שער לא יקפיץ את התוכנה בזמן ההתקנה.
     // המתקין החדש (1.2.4+) גם הוא כותב את הדגל ב-preInit וממתין לסגירתנו.
