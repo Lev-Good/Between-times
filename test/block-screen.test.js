@@ -284,3 +284,46 @@ test('block: הסבר "חסום לפי ברירת המחדל" מוצג בחסי�
   assert.equal(el('blockReason').classList.contains('hidden'), true,
     'בקובץ פגום — ההסבר מוסתר, ההודעה על התקלה כבר מוצגת למעלה');
 });
+
+test('block: תוכנות תורניות מוצגות במסך החסימה גם בזמן נעילה ידנית (manualLock)', () => {
+  const { el, render } = loadBlockScreen();
+  render(blockedStatus({
+    manualLock: true,
+    allowedAppsEnabled: true,
+    allowedApps: [{ name: 'אוצריא', exe: 'C:\\Apps\\Otzaria.exe' }]
+  }));
+
+  assert.equal(el('studyAppsWrap').style.display, '', 'תיבת תוכנות לימוד מוצגת גם בנעילה ידנית');
+  assert.equal(el('studyAppsList').children.length, 1, 'אוצריא מוצגת ברשימה');
+  assert.equal(el('studyAppsList').children[0].querySelector('span').textContent, 'אוצריא');
+});
+
+test('block: ברירת מחדל של דף החסימה היא מסך נקי עם כפתור שעונים ותוכנות תורניות מהירות', () => {
+  const { el, api, render } = loadBlockScreen();
+  render(blockedStatus({
+    pinSet: true,
+    allowedAppsEnabled: true,
+    allowedApps: [{ name: 'אוצריא', exe: 'C:\\Apps\\Otzaria.exe' }]
+  }));
+
+  // כברירת מחדל, חלונית החסימה סגורה (מוסתרת) והמסך הנקי מוצג
+  assert.equal(el('blockScreen').classList.contains('modal-hidden'), true, 'חלונית החסימה מוסתרת כברירת מחדל');
+  assert.equal(el('cleanView').classList.contains('clean-view-dimmed'), false, 'מסך הרקע הנקי גלוי ופעיל');
+
+  // כפתור תוכנה תורנית מהירה מוצג במסך הנקי
+  assert.equal(el('quickStudyWrap').style.display, '', 'תיבת תוכנות מהירות במסך הנקי גלויה');
+  assert.equal(el('quickStudyList').children.length, 1, 'אוצריא מוצגת ברשימה המהירה');
+  assert.equal(el('quickStudyList').children[0].querySelector('span').textContent, 'אוצריא');
+
+  // לחיצה על תוכנה מהירה במסך הנקי מפעילה אותה
+  el('quickStudyList').children[0].click();
+  assert.equal(api.launchAllowedAppCalls.length, 1, 'התוכנה הופעלה בלחיצה מהירה');
+
+  // לחיצה על כפתור השעונים פותחת את החלונית
+  el('openClocksBtn').click();
+  assert.equal(el('blockScreen').classList.contains('modal-hidden'), false, 'חלונית השעונים נפתחה');
+
+  // לחיצה על כפתור סגירה מחזירה למסך הנקי
+  el('closeModalBtn').click();
+  assert.equal(el('blockScreen').classList.contains('modal-hidden'), true, 'החלונית נסגרה וחזרה לרקע הנקי');
+});

@@ -1,4 +1,4 @@
-﻿; BenHazmanim - custom NSIS installer script
+; BenHazmanim - custom NSIS installer script
 ; ---------------------------------------------------------------------------
 ; Why this exists:
 ;   The app runs a watchdog that respawns it within seconds if killed, and it
@@ -185,6 +185,9 @@
   DeleteRegValue HKLM "Software\BenHazmanim" "Quit"
   nsExec::Exec 'schtasks /Run /TN BenHazmanimGuard'
   ${If} $R0 == "0"
+    IfSilent skipInstallNotice 0
+      MessageBox MB_ICONINFORMATION|MB_OK "התקנת 'בין הזמנים' הושלמה בהצלחה!$\r$\n$\r$\nשימו לב: התוכנה פועלת כעת ברקע במגש המערכת (ליד השעון).$\r$\n$\r$\nכדי לפתוח אותה ולהגדיר סיסמה וזמנים:$\r$\n• לחצו על סמל המנעול ליד השעון למטה (קליק ימני/שמאלי), או$\r$\n• פתחו את 'בין הזמנים' מתפריט ההתחלה או משולחן העבודה."
+    skipInstallNotice:
     Goto relaunchDone
   ${EndIf}
   ; clean up all the relaunch flags we know about

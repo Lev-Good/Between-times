@@ -248,6 +248,7 @@ function isSessionUnlocked() {
   return true;
 }
 let manualLock = false;      // נעילה ידנית (נעל עכשיו) — מפעילה את מסך החסימה המלא
+let launchGraceUntil = 0;    // זמן חסד בעת פתיחת תוכנה מותרת (למשל אוצריא) כדי לתת לה זמן להיטען
 let shortcutsRegistered = false;
 // "תקופת צינון": עיכוב מכוון לפני שפתיחה מוקדמת נכנסת לתוקף (שליטה עצמית).
 // המחשב נשאר חסום עד תום הצינון, ואז הפתיחה מוחלת אוטומטית. הטיימר מבוסס
@@ -1057,7 +1058,7 @@ function showNetIcon(show) {
    אוצר החכמה, בר אילן ועוד) גם בזמן שהמחשב חסום לפי הלוח. הזיהוי נעשה
    לפי התוכנה שבחלון הפעיל (הפוקוס) — אם היא ברשימה המורשית, מסך החסימה
    מוסתר והתוכנה נשארת בשימוש; ברגע שעוברים לתוכנה אחרת (או סוגרים אותה)
-   החסימה חוזרת מיד. נעילה ידנית ("נעל עכשיו") תמיד חוסמת הכל. */
+   החסימה חוזרת מיד. תוכנות מותרות זמינות הן בחסימה לפי הלוח והן בנעילה ידנית. */
 
 // איתור התוכנה שבחלון הפעיל — דרך Win32 API (GetForegroundWindow) עם
 // PowerShell. הפלט הוא הנתיב המלא של קובץ ההרצה של התהליך הפעיל.
@@ -1200,12 +1201,16 @@ function exitRelaxed() {
 // בחזרה, אלא להיכנס למצב רפוי. אחרת — להחזיר את מסך החסימה לקדמת המסך.
 // בלי תוכנות מורשות מוגדרות אין טעם בבדיקת החלון הפעיל (חוסכת PowerShell).
 async function maybeStealFocus() {
-  if (manualLock) { focusBlockWindows(); return; } // נעילה ידנית — תמיד לחסום
+  if (Date.now() < launchGraceUntil) return;
   const sch = activeSchedule();
   const appsOn = sch.allowedAppsEnabled !== false && (sch.allowedApps || []).length > 0;
   if (!appsOn) { focusBlockWindows(); return; }
   const fg = await getForegroundApp();
-  if (await isAllowedApp(fg)) { enterRelaxed(); return; }
+  if (await isAllowedApp(fg)) {
+    launchGraceUntil = 0;
+    enterRelaxed();
+    return;
+  }
   focusBlockWindows();
 }
 
@@ -1213,11 +1218,11 @@ async function maybeStealFocus() {
 // אימות: חותם+מוצר לתוכנה חתומה, טביעת קובץ לתוכנה לא חתומה — כך אי אפשר
 // להריץ במקומה קובץ שהוחלף. אם התוכנה כבר רצה — מעלים את החלון לחזית
 // (לתוכנה חתומה: לפי שם התהליך, והאימות ממשיך בזמן אמת; ללא חתימה: רק לפי
-// הנתיב המלא). ההפעלה המוצלחת מכניסה מיד למצב רפוי.
+// הנתיב המלא). ההפעלה המוצלחת מכניסה מיד למצב רפוי וקובעת זמן חסד לטעינה.
 function launchAllowedApp(app) {
-  return new Promise(async (resolve) => {
+  return (async () => {
     const exe = String((app && app.exe) || '').trim();
-    if (!exe) return resolve({ ok: false, error: 'התוכנה לא הוגדרה' });
+    if (!exe) return { ok: false, error: 'התוכנה לא הוגדרה' };
     const isAbs = /^[a-zA-Z]:[\\/]/.test(exe) || /^\\\\/.test(exe);
     const base = path.basename(exe).replace(/\.exe$/i, '');
     const publisherMode = !!(app.mode === 'publisher' && app.publisher && app.product);
@@ -1231,11 +1236,11 @@ function launchAllowedApp(app) {
           if (!info || info.status !== 'Valid' ||
               cnOf(info.subject).toLowerCase() !== String(app.publisher).toLowerCase() ||
               String(info.product || '').toLowerCase() !== String(app.product).toLowerCase()) {
-            return resolve({ ok: false, error: 'התוכנה אינה תואמת את החותם המאומת — ייתכן שהוחלפה או עודכנה. בחרו אותה מחדש בהגדרות.' });
+            return { ok: false, error: 'התוכנה אינה תואמת את החותם המאומת — ייתכן שהוחלפה או עודכנה. בחרו אותה מחדש בהגדרות.' };
           }
         } else if (app.hash) {
           if (!info || !info.hash || info.hash !== String(app.hash).toLowerCase()) {
-            return resolve({ ok: false, error: 'קובץ התוכנה שונה מהגרסה שאומתה — בחרו אותה מחדש בהגדרות.' });
+            return { ok: false, error: 'קובץ התוכנה שונה מהגרסה שאומתה — בחרו אותה מחדש בהגדרות.' };
           }
         }
         startTarget = exe;
@@ -1244,10 +1249,10 @@ function launchAllowedApp(app) {
         // App Paths; האימות המלא נעשה בזמן אמת כשהתוכנה הופכת לפעילה.
         startTarget = base;
       } else {
-        return resolve({ ok: false, error: 'קובץ התוכנה לא נמצא — בחרו אותה מחדש בהגדרות.' });
+        return { ok: false, error: 'קובץ התוכנה לא נמצא — בחרו אותה מחדש בהגדרות.' };
       }
     } catch {
-      return resolve({ ok: false, error: 'אימות התוכנה נכשל — נסו שוב.' });
+      return { ok: false, error: 'אימות התוכנה נכשל — נסו שוב.' };
     }
 
     // העלאה לחזית אם כבר רצה, אחרת פתיחה. לתוכנה חתומה מזהים לפי שם התהליך
@@ -1258,16 +1263,27 @@ function launchAllowedApp(app) {
     const matchCond = publisherMode
       ? '($_.ProcessName -ieq ' + psSingleQuote(base) + ' -or $_.Path -ieq ' + psSingleQuote(exe) + ')'
       : '($_.Path -ieq ' + psSingleQuote(exe) + ')';
+    const workDir = isAbs && fs.existsSync(startTarget) ? path.dirname(startTarget) : '';
+    const startCmd = workDir
+      ? 'Start-Process -FilePath ' + psSingleQuote(startTarget) + ' -WorkingDirectory ' + psSingleQuote(workDir)
+      : 'Start-Process -FilePath ' + psSingleQuote(startTarget);
     const script =
       "Add-Type -MemberDefinition '[DllImport(\"user32.dll\")] public static extern bool SetForegroundWindow(IntPtr hWnd);' -Name U -Namespace W; " +
       'try { $p = Get-Process | Where-Object { $_.MainWindowHandle -ne 0 -and ' + matchCond + ' } | Select-Object -First 1; ' +
-      'if ($p) { [W.U]::SetForegroundWindow($p.MainWindowHandle) } else { Start-Process -FilePath ' + psSingleQuote(startTarget) + ' } } catch { Write-Error $_; exit 1 }';
-    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script], { windowsHide: true, timeout: 15000 }, (err) => {
-      if (err) return resolve({ ok: false, error: 'לא ניתן להפעיל את התוכנה — בדקו שהיא מותקנת במקום הנכון' });
-      if (!manualLock) enterRelaxed();
-      resolve({ ok: true });
+      'if ($p) { [W.U]::SetForegroundWindow($p.MainWindowHandle) } else { ' + startCmd + ' } } catch { Write-Error $_; exit 1 }';
+      
+    return new Promise((resolve) => {
+      execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script], { windowsHide: true, timeout: 15000 }, (err) => {
+        if (err) return resolve({ ok: false, error: 'לא ניתן להפעיל את התוכנה — בדקו שהיא מותקנת במקום הנכון' });
+        // איפוס מטמון פוקוס וקביעת זמן חסד של 8 שניות לטעינת התוכנה (במיוחד תוכנות כבדות כמו אוצריא)
+        fgCache.path = null;
+        fgCache.at = 0;
+        launchGraceUntil = Date.now() + 8000;
+        enterRelaxed();
+        resolve({ ok: true });
+      });
     });
-  });
+  })();
 }
 
 /* ---------- סריקה אוטומטית של תוכנות תורניות מוכרות ----------
@@ -1677,11 +1693,26 @@ function buildStatus() {
     blockBg: eff.blockBg,
     showTorahQuotes: eff.showTorahQuotes !== false,
     allowedAppsEnabled: eff.allowedAppsEnabled !== false,
-    // למסך החסימה מועברות רק תוכנות עם נתיב מלא תקין (אחרת לא ניתן לפתוח
-    // אותן ולא ניתן לאמת אותן) — רשומות ישנות חסרות נתיב נשארות בהגדרות
-    // עם סמן "בחרו מחדש" כדי שההורה יתקן אותן.
-    allowedApps: (eff.allowedApps || []).filter((a) =>
-      /^[a-zA-Z]:[\\/]/.test(String(a.exe || '')) || /^\\\\/.test(String(a.exe || ''))),
+    // למסך החסימה מועברות תוכנות עם נתיב מלא תקין (ראשיות וכן תוכנות שנוספו
+    // כנלוות, כדי לאפשר פתיחה נוחה מהמסך גם אם נוספו תחת נלוות).
+    allowedApps: (() => {
+      const list = [];
+      const seen = new Set();
+      (eff.allowedApps || []).forEach((a) => {
+        if (a && a.exe && !seen.has(String(a.exe).toLowerCase())) {
+          seen.add(String(a.exe).toLowerCase());
+          list.push(a);
+        }
+        (a.companions || []).forEach((c) => {
+          if (c && c.exe && !seen.has(String(c.exe).toLowerCase())) {
+            seen.add(String(c.exe).toLowerCase());
+            list.push(c);
+          }
+        });
+      });
+      return list.filter((a) =>
+        /^[a-zA-Z]:[\\/]/.test(String(a.exe || '')) || /^\\\\/.test(String(a.exe || '')));
+    })(),
     websiteApps: (eff.websiteApps || []).map((a) => ({ name: String(a.name || '') })),
     fileExplorerEnabled: !!(eff.fileExplorer && eff.fileExplorer.enabled)
   };
@@ -1817,10 +1848,18 @@ async function enforceCore() {
 
   // תוכנות תורניות מותרות: במצב זה מסך החסימה מוסתר, אך ה-State Machine
   // מדווח relaxed ולא blocked כדי שה-UI וה-Diagnostics ידעו מה קורה בפועל.
-  const fgAllowed = (!manualLock && eff.allowedAppsEnabled !== false && (eff.allowedApps || []).length > 0)
-    ? await isAllowedApp(await getForegroundApp())
-    : false;
-  if (fgAllowed) {
+  // תוכנות מותרות זמינות הן בחסימה לפי הלוח והן בנעילה ידנית ("נעל עכשיו").
+  const appsConfigured = eff.allowedAppsEnabled !== false && (eff.allowedApps || []).length > 0;
+  const inGrace = Date.now() < launchGraceUntil;
+  let fgAllowed = false;
+  if (appsConfigured) {
+    const fg = await getForegroundApp();
+    if (await isAllowedApp(fg)) {
+      fgAllowed = true;
+      launchGraceUntil = 0; // התוכנה עלתה וקיבלה פוקוס — זמן החסד הושלם
+    }
+  }
+  if (fgAllowed || (inGrace && relaxed)) {
     enterRelaxed();
     finishEnforcement('relaxed');
     publish();
@@ -3400,15 +3439,22 @@ function registerIpc() {
   ipcMain.handle('allowed-apps:launch', (event, candidate) => {
     if (!blockSender(event)) return senderError();
     const eff = activeSchedule();
-    if (manualLock || !eff.pinHash) {
-      return { ok: false, error: 'פתיחת תוכנות אינה זמינה בזמן נעילה ידנית או ללא סיסמת הורה' };
+    if (!eff.pinHash) {
+      return { ok: false, error: 'לא הוגדרה סיסמת הורה בהגדרות' };
     }
     const st = S.getStatus(eff, trustedDate());
-    if (!eff.enabled || st.state !== 'blocked') {
+    const isBlockedNow = manualLock || (eff.enabled && st.state === 'blocked');
+    if (!isBlockedNow) {
       return { ok: false, error: 'פתיחת תוכנות מורשות זמינה רק בזמן חסימת מחשב' };
     }
     const requested = String(candidate && candidate.exe || '').trim().toLowerCase();
-    const allowed = (eff.allowedApps || []).find((a) => String(a.exe || '').trim().toLowerCase() === requested);
+    let allowed = (eff.allowedApps || []).find((a) => String(a.exe || '').trim().toLowerCase() === requested);
+    if (!allowed) {
+      for (const a of (eff.allowedApps || [])) {
+        allowed = (a.companions || []).find((c) => String(c.exe || '').trim().toLowerCase() === requested);
+        if (allowed) break;
+      }
+    }
     if (!allowed) return { ok: false, error: 'התוכנה אינה נמצאת ברשימת ההרשאות' };
     return launchAllowedApp(allowed);
   });
@@ -4458,7 +4504,25 @@ if (isSystemWatchdog) {
 
       createMainWindow();
       tray = new Tray(trayIcon());
+      if (typeof tray.on === 'function') {
+        tray.on('click', () => showMainWindow());
+        tray.on('double-click', () => showMainWindow());
+      }
       updateTray(S.getStatus(activeSchedule(), trustedDate()));
+
+      // בהתקנה טרייה (ללא סיסמה ראשונית מוגדרת) — הכוונת המשתמש לפתיחת ההגדרות
+      if (isWin && !schedule.pinHash) {
+        setTimeout(() => {
+          try {
+            if (tray && typeof tray.displayBalloon === 'function') {
+              tray.displayBalloon({
+                title: 'בין הזמנים פועלת ברקע',
+                content: 'התוכנה פועלת במגש המערכת. לחצו כאן או על הסמל ליד השעון להגדרת סיסמה ולוח זמנים.'
+              });
+            }
+          } catch { /* ignore */ }
+        }, 3000);
+      }
 
       enforce();
       setInterval(enforce, 5000); // בדיקה כל 5 שניות

@@ -1045,6 +1045,56 @@ test('launchAllowedApp: malicious $() exe path is single-quoted in the launch sc
   }
 });
 
+test('launchAllowedApp: works during manual lock and supports companion apps', async () => {
+  const fakeExe = path.join(os.tmpdir(), 'otzaria_test.exe');
+  const fakeCompanion = path.join(os.tmpdir(), 'companion_test.exe');
+  fs.writeFileSync(fakeExe, 'fake');
+  fs.writeFileSync(fakeCompanion, 'fake');
+  try {
+    const settings = S.defaultSchedule();
+    settings.pinHash = S.sha256Hex('1234');
+    settings.allowedApps = [{
+      name: 'אוצריא',
+      exe: fakeExe,
+      companions: [{ name: 'תוסף', exe: fakeCompanion }]
+    }];
+    const m = loadMain({ settings });
+    await m.ready();
+
+    // הפעלת נעילה ידנית
+    const lockRes = await m.ipcHandlers.get('lock:now')();
+    assert.equal(lockRes.ok, true, 'נעילה ידנית הופעלה');
+
+    // בדיקה ש-status:get מחזיר גם את התוכנה הנלווית ברשימת התוכנות המותרות
+    const st = await m.ipcHandlers.get('status:get')();
+    assert.equal(st.manualLock, true);
+    assert.ok(st.allowedApps.some((a) => a.exe === fakeExe), 'אוצריא מופיעה ברשימת תוכנות מותרות');
+    assert.ok(st.allowedApps.some((a) => a.exe === fakeCompanion), 'תוכנה נלווית מופיעה ברשימת תוכנות מותרות');
+
+    // הפעלת אוצריא בזמן נעילה ידנית
+    const res = await m.ipcHandlers.get('allowed-apps:launch')({}, { exe: fakeExe });
+    assert.equal(res.ok, true, 'הפעלת תוכנה תורנית מצליחה בזמן נעילה ידנית: ' + JSON.stringify(res));
+
+    // בדיקה שהסקריפט כלל -WorkingDirectory עבור נתיב התוכנה
+    const psCall = m.state.execCalls.find((c) =>
+      c.cmd === 'powershell.exe' &&
+      String(c.args.join(' ')).includes('SetForegroundWindow') &&
+      String(c.args.join(' ')).includes(fakeExe));
+    assert.ok(psCall, 'צריכה להיות קריאת PowerShell להפעלת התוכנה');
+    const script = psCall.args[psCall.args.indexOf('-Command') + 1];
+    assert.ok(script.includes('-WorkingDirectory'), 'הסקריפט חייב להכיל -WorkingDirectory: ' + script);
+
+    // הפעלת תוכנה נלווית בזמן נעילה ידנית
+    const compRes = await m.ipcHandlers.get('allowed-apps:launch')({}, { exe: fakeCompanion });
+    assert.equal(compRes.ok, true, 'הפעלת תוכנה נלווית מצליחה בזמן נעילה ידנית: ' + JSON.stringify(compRes));
+
+    m.cleanup();
+  } finally {
+    try { fs.unlinkSync(fakeExe); } catch { /* ignore */ }
+    try { fs.unlinkSync(fakeCompanion); } catch { /* ignore */ }
+  }
+});
+
 /* ================= אכיפה זהה למנהל ולמשתמש רגיל (Phase 2.4) =================
    האכיפה של בין הזמנים היא userland: מסך החסימה, גניבת הפוקוס וחסימת
    הקיצורים אינם תלויים בהרשאות. חשבון מנהל מחובר (elevated) נחסם בדיוק כמו
