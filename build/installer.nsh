@@ -1,4 +1,4 @@
-; BenHazmanim - custom NSIS installer script
+﻿; BenHazmanim - custom NSIS installer script
 ; ---------------------------------------------------------------------------
 ; Why this exists:
 ;   The app runs a watchdog that respawns it within seconds if killed, and it
@@ -20,12 +20,23 @@
 ;
 ; NOTE: this file is UTF-8 with BOM so the Hebrew path compiles correctly.
 
-!macro preInit
+!macro customInit
   ; The app hardens its install dir with deny-delete ACLs (even for admins).
   ; The installer replaces files there — lift the deny BEFORE replacing, so
-  ; upgrades keep working. The app re-applies the hardening on its first
-  ; elevated run after the update.
-  nsExec::Exec 'cmd /c icacls "$INSTDIR" /remove:d *S-1-1-0 /T /C'
+  ; upgrades keep working. In customInit, $INSTDIR is resolved and valid.
+  ${If} "$INSTDIR" != ""
+  ${AndIf} ${FileExists} "$INSTDIR\*.*"
+    nsExec::Exec 'cmd /c icacls "$INSTDIR" /remove:d *S-1-1-0 /T /C'
+  ${EndIf}
+  ; Allow uninstaller of previous version to run during upgrade by creating the token temporarily
+  ReadEnvStr $R0 "PROGRAMDATA"
+  CreateDirectory "$R0\BenHazmanim"
+  FileOpen $0 "$R0\BenHazmanim\uninstall.token" w
+  FileWrite $0 "installer"
+  FileClose $0
+!macroend
+
+!macro preInit
   ; write quit.flag into every location the app may check, BEFORE
   ; electron-builder tries to close the running app (preInit runs before
   ; allowOnlyOneInstallerInstance).
@@ -86,6 +97,10 @@
   ; Programs" registry entry on every elevated launch, so the app is not
   ; even listed there.) This check runs FIRST — before any cleanup.
   ; ---------------------------------------------------------------------------
+  ; If uninstaller is called during an upgrade (--updated), allow it
+  ${If} ${isUpdated}
+    Goto TokenOk
+  ${EndIf}
   ReadEnvStr $R0 "PROGRAMDATA"
   IfFileExists "$R0\BenHazmanim\uninstall.token" 0 UninstallBlocked
   Goto TokenOk
@@ -184,11 +199,13 @@
   ; Leaving it behind would make the new guard exit immediately after update.
   DeleteRegValue HKLM "Software\BenHazmanim" "Quit"
   nsExec::Exec 'schtasks /Run /TN BenHazmanimGuard'
+  ; Clean up the temporary uninstall token created in customInit
+  Delete "$R1\BenHazmanim\uninstall.token"
+
   ${If} $R0 == "0"
     IfSilent skipInstallNotice 0
       MessageBox MB_ICONINFORMATION|MB_OK "התקנת 'בין הזמנים' הושלמה בהצלחה!$\r$\n$\r$\nשימו לב: התוכנה פועלת כעת ברקע במגש המערכת (ליד השעון).$\r$\n$\r$\nכדי לפתוח אותה ולהגדיר סיסמה וזמנים:$\r$\n• לחצו על סמל המנעול ליד השעון למטה (קליק ימני/שמאלי), או$\r$\n• פתחו את 'בין הזמנים' מתפריט ההתחלה או משולחן העבודה."
     skipInstallNotice:
-    Goto relaunchDone
   ${EndIf}
   ; clean up all the relaunch flags we know about
   Delete "$APPDATA\BenHazmanim\relaunch.flag"
@@ -202,7 +219,6 @@
   ${Else}
     ExecShell "" "$INSTDIR\${APP_EXECUTABLE_FILENAME}"
   ${EndIf}
-  relaunchDone:
 !macroend
 ; ---------------------------------------------------------------------------
 ; Custom License Code Verification Page (Forum Registration & Profile Code)
