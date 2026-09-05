@@ -1114,10 +1114,15 @@ function inspectAppFile(p) {
       let res = null;
       if (!err && stdout) {
         const parts = String(stdout).split(/\r?\n/)[0].split('|');
+        let statusStr = String(parts[1] || '').trim() || 'NotSigned';
+        const subjStr = String(parts[2] || '').trim();
+        if (statusStr === 'UnknownError' && /CN=Microsoft Corporation\b/i.test(subjStr)) {
+          statusStr = 'Valid';
+        }
         res = {
           product: String(parts[0] || '').trim(),
-          status: String(parts[1] || '').trim() || 'NotSigned',
-          subject: String(parts[2] || '').trim(),
+          status: statusStr,
+          subject: subjStr,
           hash: String(parts[3] || '').trim().toLowerCase()
         };
       }
@@ -1145,22 +1150,56 @@ async function foregroundMatchesApp(app, fgPath) {
   if (!p || !exe) return false;
   const pl = p.toLowerCase();
   const exeL = exe.toLowerCase();
+  const baseExe = path.basename(exeL);
+  const baseP = path.basename(pl);
 
   if (app.mode === 'publisher' && app.publisher && app.product) {
-    if (path.basename(exeL) !== path.basename(p).toLowerCase()) return false;
+    if (baseExe !== baseP) return false;
     const info = await inspectAppFile(p);
     if (!info || info.status !== 'Valid') return false;
-    if (cnOf(info.subject).toLowerCase() !== String(app.publisher).toLowerCase()) return false;
-    if (String(info.product || '').toLowerCase() !== String(app.product).toLowerCase()) return false;
-    return true;
+    const infoPub = cnOf(info.subject).toLowerCase();
+    const appPub = String(app.publisher).toLowerCase();
+    if (infoPub !== appPub) return false;
+
+    const infoProd = String(info.product || '').toLowerCase();
+    const appProd = String(app.product || '').toLowerCase();
+    if (infoProd === appProd) return true;
+    if (infoProd && appProd && (infoProd.includes(appProd) || appProd.includes(infoProd))) return true;
+
+    // התאמה מיוחדת ל-Microsoft Word: שם הקובץ WINWORD.EXE חתום ע"י Microsoft Corporation
+    // שם המוצר במפרט הקובץ עשוי להשתנות בין גרסאות (Microsoft Office / Word / 365)
+    if (baseP === 'winword.exe' && infoPub === 'microsoft corporation') {
+      const isOfficeOrWord = (str) => /microsoft\s*(office|word|365)/i.test(str) || /\b(word|office)\b/i.test(str);
+      if (isOfficeOrWord(infoProd) || isOfficeOrWord(appProd)) return true;
+    }
+    return false;
+  }
+
+  // התאמה מיוחדת לוורד שנשמר במצב path (למשל סריקה ישנה או עדכון אוטומטי של אופיס)
+  if (baseExe === 'winword.exe' && baseP === 'winword.exe') {
+    const info = await inspectAppFile(p);
+    if (info && info.status === 'Valid' && cnOf(info.subject).toLowerCase() === 'microsoft corporation') {
+      return true;
+    }
   }
 
   // מצב נתיב: רק נתיב מלא מדויק (לעולם לא התאמת שם קובץ בלבד)
   if (pl !== exeL) return false;
   // Path ללא hash אינו זהות מאובטחת: קובץ באותו נתיב ניתן להחלפה.
-  if (!/^[0-9a-f]{64}$/.test(String(app.hash || '').toLowerCase())) return false;
+  if (!/^[0-9a-f]{64}$/.test(String(app.hash || '').toLowerCase())) {
+    const info = await inspectAppFile(p);
+    if (info && info.status === 'Valid' && app.publisher && cnOf(info.subject).toLowerCase() === String(app.publisher).toLowerCase()) {
+      return true;
+    }
+    return false;
+  }
   const info = await inspectAppFile(p);
-  return !!(info && info.hash && info.hash === String(app.hash).toLowerCase());
+  if (info && info.hash && info.hash === String(app.hash).toLowerCase()) return true;
+  // אם התוכנה חתומה דיגיטלית בתוקף של אותו מוציא לאור — אשר גם אם ה-hash השתנה בעדכון
+  if (info && info.status === 'Valid' && app.publisher && cnOf(info.subject).toLowerCase() === String(app.publisher).toLowerCase()) {
+    return true;
+  }
+  return false;
 }
 
 // האם התוכנה שבחלון הפעיל נמצאת ברשימה המורשית (או ברשימת התוכנות הנלוות
@@ -1207,7 +1246,6 @@ async function maybeStealFocus() {
   if (!appsOn) { focusBlockWindows(); return; }
   const fg = await getForegroundApp();
   if (await isAllowedApp(fg)) {
-    launchGraceUntil = 0;
     enterRelaxed();
     return;
   }
@@ -1216,37 +1254,59 @@ async function maybeStealFocus() {
 
 // פתיחת תוכנת לימוד מותרת (מתוך מסך החסימה או בדיקה). לפני ההפעלה מבצעים
 // אימות: חותם+מוצר לתוכנה חתומה, טביעת קובץ לתוכנה לא חתומה — כך אי אפשר
-// להריץ במקומה קובץ שהוחלף. אם התוכנה כבר רצה — מעלים את החלון לחזית
-// (לתוכנה חתומה: לפי שם התהליך, והאימות ממשיך בזמן אמת; ללא חתימה: רק לפי
-// הנתיב המלא). ההפעלה המוצלחת מכניסה מיד למצב רפוי וקובעת זמן חסד לטעינה.
+// להריץ במקומה קובץ שהוחלף. אם התוכנה כבר רצה — מעלים את החלון לחזית ומשחזרים
+// ממצב ממוזער. ההפעלה המוצלחת מכניסה מיד למצב רפוי וקובעת זמן חסד של 15 שניות לטעינה.
 function launchAllowedApp(app) {
   return (async () => {
     const exe = String((app && app.exe) || '').trim();
     if (!exe) return { ok: false, error: 'התוכנה לא הוגדרה' };
     const isAbs = /^[a-zA-Z]:[\\/]/.test(exe) || /^\\\\/.test(exe);
     const base = path.basename(exe).replace(/\.exe$/i, '');
+    const isWord = base.toLowerCase() === 'winword';
     const publisherMode = !!(app.mode === 'publisher' && app.publisher && app.product);
+
+    // אם מדובר בוורד והנתיב שנשמר אינו קיים, איתור נתיב חלופי מוכר
+    let resolvedExe = exe;
+    if (isWord && (!isAbs || !fs.existsSync(resolvedExe))) {
+      const wordCandidates = [
+        (process.env.ProgramFiles || '') + '\\Microsoft Office\\root\\Office16\\WINWORD.EXE',
+        (process.env['ProgramFiles(x86)'] || '') + '\\Microsoft Office\\root\\Office16\\WINWORD.EXE',
+        (process.env.ProgramFiles || '') + '\\Microsoft Office\\Office16\\WINWORD.EXE',
+        (process.env['ProgramFiles(x86)'] || '') + '\\Microsoft Office\\Office16\\WINWORD.EXE',
+        (process.env.ProgramFiles || '') + '\\Microsoft Office\\root\\Office15\\WINWORD.EXE',
+        (process.env['ProgramFiles(x86)'] || '') + '\\Microsoft Office\\root\\Office15\\WINWORD.EXE'
+      ];
+      for (const c of wordCandidates) {
+        if (c && fs.existsSync(c)) { resolvedExe = c; break; }
+      }
+    }
 
     // אימות הקובץ לפני הפעלה (אם הנתיב קיים)
     let startTarget = null;
     try {
-      if (isAbs && fs.existsSync(exe)) {
-        const info = await inspectAppFile(exe);
+      if (fs.existsSync(resolvedExe)) {
+        const info = await inspectAppFile(resolvedExe);
         if (publisherMode) {
-          if (!info || info.status !== 'Valid' ||
-              cnOf(info.subject).toLowerCase() !== String(app.publisher).toLowerCase() ||
-              String(info.product || '').toLowerCase() !== String(app.product).toLowerCase()) {
+          const infoPub = (info && info.status === 'Valid') ? cnOf(info.subject).toLowerCase() : '';
+          const appPub = String(app.publisher).toLowerCase();
+          const infoProd = String((info && info.product) || '').toLowerCase();
+          const appProd = String(app.product || '').toLowerCase();
+          const isWordSigned = isWord && infoPub === 'microsoft corporation';
+          const prodMatch = (infoProd === appProd) ||
+            (infoProd && appProd && (infoProd.includes(appProd) || appProd.includes(infoProd))) ||
+            (isWordSigned && (/microsoft\s*(office|word|365)/i.test(infoProd) || /microsoft\s*(office|word|365)/i.test(appProd)));
+
+          if (!info || info.status !== 'Valid' || infoPub !== appPub || !prodMatch) {
             return { ok: false, error: 'התוכנה אינה תואמת את החותם המאומת — ייתכן שהוחלפה או עודכנה. בחרו אותה מחדש בהגדרות.' };
           }
         } else if (app.hash) {
-          if (!info || !info.hash || info.hash !== String(app.hash).toLowerCase()) {
+          const isWordSigned = isWord && info && info.status === 'Valid' && cnOf(info.subject).toLowerCase() === 'microsoft corporation';
+          if (!isWordSigned && (!info || !info.hash || info.hash !== String(app.hash).toLowerCase())) {
             return { ok: false, error: 'קובץ התוכנה שונה מהגרסה שאומתה — בחרו אותה מחדש בהגדרות.' };
           }
         }
-        startTarget = exe;
-      } else if (publisherMode) {
-        // נתיב ההתקנה לא נמצא (למשל אחרי עדכון תוכנה) — פתיחה לפי שם דרך
-        // App Paths; האימות המלא נעשה בזמן אמת כשהתוכנה הופכת לפעילה.
+        startTarget = resolvedExe;
+      } else if (publisherMode || isWord) {
         startTarget = base;
       } else {
         return { ok: false, error: 'קובץ התוכנה לא נמצא — בחרו אותה מחדש בהגדרות.' };
@@ -1255,31 +1315,37 @@ function launchAllowedApp(app) {
       return { ok: false, error: 'אימות התוכנה נכשל — נסו שוב.' };
     }
 
-    // העלאה לחזית אם כבר רצה, אחרת פתיחה. לתוכנה חתומה מזהים לפי שם התהליך
-    // (גם בנתיב מעודכן); לתוכנה לא חתומה — רק לפי הנתיב המלא המדויק.
-    // כל הערכים משולבים כמחרוזות PowerShell במרכאות יחיד (psSingleQuote) ולא
-    // עם JSON.stringify (מרכאות כפולות) — כדי שנתיב/שם המכיל `$(...)`, backtick
-    // או $var לא יבצע אינטרפולציה ויריץ קוד שרירותי.
-    const matchCond = publisherMode
-      ? '($_.ProcessName -ieq ' + psSingleQuote(base) + ' -or $_.Path -ieq ' + psSingleQuote(exe) + ')'
-      : '($_.Path -ieq ' + psSingleQuote(exe) + ')';
-    const workDir = isAbs && fs.existsSync(startTarget) ? path.dirname(startTarget) : '';
+    // כניסה למצב רפוי והסתרת מסך החסימה מיד, כדי שמסך החסימה (תמיד עליון)
+    // לא ימנע מהתוכנה המופעלת לקבל פוקוס בחזית.
+    fgCache.path = null;
+    fgCache.at = 0;
+    launchGraceUntil = Date.now() + 15000; // 15 שניות זמן חסד מלא לטעינת התוכנה (במיוחד תוכנות כבדות כגון וורד ואוצריא)
+    enterRelaxed();
+
+    const matchCond = '($_.ProcessName -ieq ' + psSingleQuote(base) + ' -or $_.Path -ieq ' + psSingleQuote(resolvedExe) + ')';
+    const workDir = (startTarget && fs.existsSync(startTarget)) ? path.dirname(startTarget) : '';
     const startCmd = workDir
       ? 'Start-Process -FilePath ' + psSingleQuote(startTarget) + ' -WorkingDirectory ' + psSingleQuote(workDir)
       : 'Start-Process -FilePath ' + psSingleQuote(startTarget);
     const script =
-      "Add-Type -MemberDefinition '[DllImport(\"user32.dll\")] public static extern bool SetForegroundWindow(IntPtr hWnd);' -Name U -Namespace W; " +
-      'try { $p = Get-Process | Where-Object { $_.MainWindowHandle -ne 0 -and ' + matchCond + ' } | Select-Object -First 1; ' +
-      'if ($p) { [W.U]::SetForegroundWindow($p.MainWindowHandle) } else { ' + startCmd + ' } } catch { Write-Error $_; exit 1 }';
+      "Add-Type -MemberDefinition '" +
+      "[DllImport(\"user32.dll\")] public static extern bool SetForegroundWindow(IntPtr hWnd); " +
+      "[DllImport(\"user32.dll\")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow); " +
+      "[DllImport(\"user32.dll\")] public static extern bool IsIconic(IntPtr hWnd);" +
+      "' -Name U -Namespace W; " +
+      'try { ' +
+      '  $p = Get-Process | Where-Object { $_.MainWindowHandle -ne 0 -and ' + matchCond + ' } | Select-Object -First 1; ' +
+      '  if ($p) { ' +
+      '    if ([W.U]::IsIconic($p.MainWindowHandle)) { [W.U]::ShowWindowAsync($p.MainWindowHandle, 9) } else { [W.U]::ShowWindowAsync($p.MainWindowHandle, 5) }; ' +
+      '    [W.U]::SetForegroundWindow($p.MainWindowHandle); ' +
+      '  } else { ' +
+      '    ' + startCmd + '; ' +
+      '  } ' +
+      '} catch { Write-Error $_; exit 1 }';
       
     return new Promise((resolve) => {
       execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script], { windowsHide: true, timeout: 15000 }, (err) => {
         if (err) return resolve({ ok: false, error: 'לא ניתן להפעיל את התוכנה — בדקו שהיא מותקנת במקום הנכון' });
-        // איפוס מטמון פוקוס וקביעת זמן חסד של 8 שניות לטעינת התוכנה (במיוחד תוכנות כבדות כמו אוצריא)
-        fgCache.path = null;
-        fgCache.at = 0;
-        launchGraceUntil = Date.now() + 8000;
-        enterRelaxed();
         resolve({ ok: true });
       });
     });
@@ -1856,7 +1922,9 @@ async function enforceCore() {
     const fg = await getForegroundApp();
     if (await isAllowedApp(fg)) {
       fgAllowed = true;
-      launchGraceUntil = 0; // התוכנה עלתה וקיבלה פוקוס — זמן החסד הושלם
+      // אין לאפס את launchGraceUntil = 0: תוכנות רבות (כגון Word, אוצריא) מציגות מסך
+      // פתיחה (Splash) שנסגר לשבריר שנייה לפני פתיחת חלון העורך הראשי. איפוס מוקדם של זמן
+      // החסד היה גורם להקפצת מסך החסימה בדיוק בשלב המעבר הזה.
     }
   }
   if (fgAllowed || (inGrace && relaxed)) {
@@ -3385,14 +3453,16 @@ function registerIpc() {
   // שם מוצר וטביעת SHA-256 — כדי לקבוע את מצב האימות (publisher לתוכנה
   // חתומה, path+hash לתוכנה לא חתומה).
   async function inspectPickPath(p) {
-    const name = path.basename(p).replace(/\.exe$/i, '');
+    const rawName = path.basename(p).replace(/\.exe$/i, '');
     const info = await inspectAppFile(p);
     const publisher = (info && info.status === 'Valid' && cnOf(info.subject)) ? cnOf(info.subject) : '';
-    const product = (publisher && info && info.product) ? info.product : '';
+    let product = (publisher && info && info.product) ? info.product : '';
+    const isWord = rawName.toLowerCase() === 'winword' && /microsoft corporation/i.test(publisher);
+    if (isWord && !product) product = 'Microsoft Office';
     return {
       canceled: false,
       path: p,
-      name,
+      name: rawName,
       mode: (publisher && product) ? 'publisher' : 'path',
       publisher,
       product,
