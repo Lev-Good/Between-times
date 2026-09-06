@@ -3056,11 +3056,9 @@ function verifyAuthenticode(file) {
 // הורדה + התקנה שקטה של העדכון. נקרא מהממשק (update:download) — עם
 // דיווח התקדמות לכל החלונות, וסגירה נקייה של התוכנה בסוף.
 async function downloadAndInstallUpdate() {
-  if (!updateNote) {
-    const chk = await checkForUpdate();
-    if (!chk.ok || !chk.update) {
-      return { ok: false, error: (chk && chk.error) || 'אין עדכון זמין' };
-    }
+  const chk = await checkForUpdate();
+  if ((!chk.ok || !chk.update) && !updateNote) {
+    return { ok: false, error: (chk && chk.error) || 'אין עדכון זמין' };
   }
   const version = updateNote.version;
   const dest = path.join(app.getPath('temp'), 'BenHazmanim-Setup-' + version + '.exe');
