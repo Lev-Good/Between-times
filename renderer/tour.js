@@ -47,6 +47,10 @@ window.BenHazmanimTour = (function () {
       overlay.classList.remove('hidden');
       document.body.classList.add('tour-active');
     }
+    const card = $('tourCard');
+    if (card) {
+      card.classList.remove('hidden');
+    }
 
     renderStep();
     window.addEventListener('resize', handleWindowResize);
@@ -198,11 +202,27 @@ window.BenHazmanimTour = (function () {
     let cardTop = rect.bottom + 16;
     let cardLeft = rect.left + (rect.width / 2) - (cardRect.width / 2);
 
-    // אם אין מספיק מקום למטה, נמקם למעלה
-    if (cardTop + cardRect.height > viewportHeight - 20) {
+    const fitsBelow = (rect.bottom + 16 + cardRect.height <= viewportHeight - 16);
+    const fitsAbove = (rect.top - 16 - cardRect.height >= 16);
+
+    if (fitsBelow) {
+      cardTop = rect.bottom + 16;
+    } else if (fitsAbove) {
       cardTop = rect.top - cardRect.height - 16;
-      if (cardTop < 10) {
-        cardTop = Math.max(10, (viewportHeight - cardRect.height) / 2);
+    } else {
+      // אם האלמנט תופס את רוב הגובה ולא נשאר מקום מעליו או מתחתיו, נמקם בצד
+      const fitsLeft = (rect.left - 16 - cardRect.width >= 16);
+      const fitsRight = (rect.right + 16 + cardRect.width <= viewportWidth - 16);
+
+      if (fitsLeft) {
+        cardLeft = rect.left - cardRect.width - 16;
+        cardTop = Math.max(16, Math.min(rect.top, viewportHeight - cardRect.height - 16));
+      } else if (fitsRight) {
+        cardLeft = rect.right + 16;
+        cardTop = Math.max(16, Math.min(rect.top, viewportHeight - cardRect.height - 16));
+      } else {
+        // עדיפות לתחתית המסך עם שוליים בטוחים
+        cardTop = Math.max(16, viewportHeight - cardRect.height - 16);
       }
     }
 
@@ -263,6 +283,10 @@ window.BenHazmanimTour = (function () {
     if (overlay) {
       overlay.classList.add('hidden');
       document.body.classList.remove('tour-active');
+    }
+    const card = $('tourCard');
+    if (card) {
+      card.classList.add('hidden');
     }
     window.removeEventListener('resize', handleWindowResize);
     window.removeEventListener('keydown', handleKeyNav);

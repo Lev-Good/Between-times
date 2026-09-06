@@ -2060,7 +2060,7 @@ button.type-badge:active { transform: scale(0.97); }
 
 .tour-card {
   position: fixed;
-  z-index: 99995;
+  z-index: 100005 !important;
   pointer-events: auto;
   width: min(440px, calc(100vw - 32px));
   background: var(--surface);

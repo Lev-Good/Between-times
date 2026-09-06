@@ -1186,9 +1186,17 @@ async function foregroundMatchesApp(app, fgPath) {
   // מצב נתיב: רק נתיב מלא מדויק (לעולם לא התאמת שם קובץ בלבד)
   if (pl !== exeL) return false;
   // Path ללא hash אינו זהות מאובטחת: קובץ באותו נתיב ניתן להחלפה.
+  const basePNoExt = path.basename(pl).replace(/\.exe$/i, '').toLowerCase();
+  const isTorahApp = basePNoExt === 'otzaria' || KNOWN_APPS.some((k) => k.exeNames.some((n) => n.toLowerCase() === basePNoExt + '.exe'));
+
   if (!/^[0-9a-f]{64}$/.test(String(app.hash || '').toLowerCase())) {
     const info = await inspectAppFile(p);
     if (info && info.status === 'Valid' && app.publisher && cnOf(info.subject).toLowerCase() === String(app.publisher).toLowerCase()) {
+      return true;
+    }
+    if (isTorahApp && info && info.hash) {
+      app.hash = info.hash;
+      saveSettings();
       return true;
     }
     return false;
@@ -1197,6 +1205,12 @@ async function foregroundMatchesApp(app, fgPath) {
   if (info && info.hash && info.hash === String(app.hash).toLowerCase()) return true;
   // אם התוכנה חתומה דיגיטלית בתוקף של אותו מוציא לאור — אשר גם אם ה-hash השתנה בעדכון
   if (info && info.status === 'Valid' && app.publisher && cnOf(info.subject).toLowerCase() === String(app.publisher).toLowerCase()) {
+    return true;
+  }
+  // עדכון גרסה של תוכנת לימוד תורנית מוכרת (כגון אוצריא) באותו נתיב מדויק
+  if (isTorahApp && info && info.hash) {
+    app.hash = info.hash;
+    saveSettings();
     return true;
   }
   return false;
@@ -1223,7 +1237,6 @@ async function isAllowedApp(fgPath) {
 // כניסה למצב רפוי: מסתירים את חלונות החסימה, מבטלים קיצורי מקשים ומתחילים
 // בדיקה תכופה (כל שנייה) כדי לחזור לחסימה מיד כשהתוכנה המותרת כבר לא פעילה.
 function enterRelaxed() {
-  if (relaxed) return;
   relaxed = true;
   hideBlockWindows();
   unregisterBlockShortcuts();
@@ -1263,20 +1276,25 @@ function launchAllowedApp(app) {
     const isAbs = /^[a-zA-Z]:[\\/]/.test(exe) || /^\\\\/.test(exe);
     const base = path.basename(exe).replace(/\.exe$/i, '');
     const isWord = base.toLowerCase() === 'winword';
+    const isOtzaria = base.toLowerCase() === 'otzaria';
+    const knownAppDef = KNOWN_APPS.find((k) => k.id === 'otzaria' || k.exeNames.some((n) => n.toLowerCase() === base.toLowerCase() + '.exe'));
+    const isKnownTorah = !!knownAppDef;
     const publisherMode = !!(app.mode === 'publisher' && app.publisher && app.product);
 
-    // אם מדובר בוורד והנתיב שנשמר אינו קיים, איתור נתיב חלופי מוכר
+    // אם מדובר בוורד או אוצריא/תוכנה תורנית והנתיב שנשמר אינו קיים, איתור נתיב חלופי מוכר
     let resolvedExe = exe;
-    if (isWord && (!isAbs || !fs.existsSync(resolvedExe))) {
-      const wordCandidates = [
-        (process.env.ProgramFiles || '') + '\\Microsoft Office\\root\\Office16\\WINWORD.EXE',
-        (process.env['ProgramFiles(x86)'] || '') + '\\Microsoft Office\\root\\Office16\\WINWORD.EXE',
-        (process.env.ProgramFiles || '') + '\\Microsoft Office\\Office16\\WINWORD.EXE',
-        (process.env['ProgramFiles(x86)'] || '') + '\\Microsoft Office\\Office16\\WINWORD.EXE',
-        (process.env.ProgramFiles || '') + '\\Microsoft Office\\root\\Office15\\WINWORD.EXE',
-        (process.env['ProgramFiles(x86)'] || '') + '\\Microsoft Office\\root\\Office15\\WINWORD.EXE'
-      ];
-      for (const c of wordCandidates) {
+    if ((isWord || isKnownTorah || isOtzaria) && (!isAbs || !fs.existsSync(resolvedExe))) {
+      const candidates = isWord
+        ? [
+            (process.env.ProgramFiles || '') + '\\Microsoft Office\\root\\Office16\\WINWORD.EXE',
+            (process.env['ProgramFiles(x86)'] || '') + '\\Microsoft Office\\root\\Office16\\WINWORD.EXE',
+            (process.env.ProgramFiles || '') + '\\Microsoft Office\\Office16\\WINWORD.EXE',
+            (process.env['ProgramFiles(x86)'] || '') + '\\Microsoft Office\\Office16\\WINWORD.EXE',
+            (process.env.ProgramFiles || '') + '\\Microsoft Office\\root\\Office15\\WINWORD.EXE',
+            (process.env['ProgramFiles(x86)'] || '') + '\\Microsoft Office\\root\\Office15\\WINWORD.EXE'
+          ]
+        : (knownAppDef ? knownAppDef.candidates : []);
+      for (const c of candidates) {
         if (c && fs.existsSync(c)) { resolvedExe = c; break; }
       }
     }
@@ -1301,12 +1319,19 @@ function launchAllowedApp(app) {
           }
         } else if (app.hash) {
           const isWordSigned = isWord && info && info.status === 'Valid' && cnOf(info.subject).toLowerCase() === 'microsoft corporation';
-          if (!isWordSigned && (!info || !info.hash || info.hash !== String(app.hash).toLowerCase())) {
-            return { ok: false, error: 'קובץ התוכנה שונה מהגרסה שאומתה — בחרו אותה מחדש בהגדרות.' };
+          const hashMatches = info && info.hash && info.hash.toLowerCase() === String(app.hash).toLowerCase();
+          if (!isWordSigned && !hashMatches) {
+            if ((isKnownTorah || isOtzaria) && info && info.hash) {
+              // עדכון אוטומטי של תוכנת לימוד תורנית (כגון אוצריא) שעברה שדרוג גרסה
+              app.hash = info.hash;
+              saveSettings();
+            } else {
+              return { ok: false, error: 'קובץ התוכנה שונה מהגרסה שאומתה — בחרו אותה מחדש בהגדרות.' };
+            }
           }
         }
         startTarget = resolvedExe;
-      } else if (publisherMode || isWord) {
+      } else if (publisherMode || isWord || isKnownTorah || isOtzaria) {
         startTarget = base;
       } else {
         return { ok: false, error: 'קובץ התוכנה לא נמצא — בחרו אותה מחדש בהגדרות.' };
@@ -1877,7 +1902,8 @@ async function enforceCore() {
 
   // בנעילה ידנית מציגים את מסך החסימה לפני המתנה להסרת חוק רשת ישן;
   // כך אין חלון פתוח בזמן שפקודת Firewall מתחלפת.
-  if (activeBlock && manualLock) {
+  // לא מציגים אם המערכת במצב רפוי (תוכנה מותרת פועלת) או בתוך זמן חסד להפעלת תוכנה.
+  if (activeBlock && manualLock && !relaxed && Date.now() >= launchGraceUntil) {
     showBlockWindows(status);
     registerBlockShortcuts();
   }
@@ -2029,13 +2055,16 @@ function showQuitPrompt() {
 
 function showMainWindow() {
   if (!win || win.isDestroyed()) createMainWindow();
-  // בזמן חסימה (כולל קובץ הגדרות פגום) חלון ההגדרות חייב להופיע מעל מסכי
-  // החסימה — אחרת אי אפשר לתקן את ההגדרות ולצאת מהחסימה. ברגע שהחסימה
-  // מסתיימת (hideBlockWindows / קריאה הבאה) הוא חוזר להיות חלון רגיל.
-  try { win.setAlwaysOnTop(!!isBlockedNow(), 'screen-saver'); } catch { /* ignore */ }
+  lockSession();
   if (win.isMinimized()) win.restore();
   win.show();
+  win.setAlwaysOnTop(true);
   win.focus();
+  if (!isBlockedNow()) {
+    win.setAlwaysOnTop(false);
+  } else {
+    try { win.setAlwaysOnTop(true, 'screen-saver'); } catch { /* ignore */ }
+  }
 }
 
 // נעילת סשן ההגדרות: כשהחלון מוסתר (סגירה, מזעור או הסתרה) הכניסה להגדרות
@@ -2097,7 +2126,7 @@ const GUARD_TASK_NAME = 'BenHazmanimGuard';
 function startupValue() {
   const exe = process.execPath;
   const dir = app.getAppPath();
-  return `"${exe}" "${dir}"`;
+  return `"${exe}" "${dir}" --autostart`;
 }
 
 function setRegistry(enabled) {
@@ -2160,7 +2189,7 @@ function launchAppPath(dir) {
 }
 function taskCommand() {
   const exe = path.join(protectedAppDir(), path.basename(process.execPath));
-  if (isWin && fs.existsSync(exe)) return `"${exe}" "${launchAppPath(protectedAppDir())}"`;
+  if (isWin && fs.existsSync(exe)) return `"${exe}" "${launchAppPath(protectedAppDir())}" --autostart`;
   return startupValue();
 }
 
@@ -4580,8 +4609,13 @@ if (isSystemWatchdog) {
       }
       updateTray(S.getStatus(activeSchedule(), trustedDate()));
 
-      // בהתקנה טרייה (ללא סיסמה ראשונית מוגדרת) — הכוונת המשתמש לפתיחת ההגדרות
-      if (isWin && !schedule.pinHash) {
+      // אם התוכנה הופעלה ידנית (משולחן העבודה / תפריט התחל / התקנה) ולא באתחול רקע של Windows או בדיקות,
+      // ואין כרגע חסימה פעילה — פתיחה מיידית של חלון ההגדרות עם דרישת סיסמה
+      const isAutostart = process.argv.includes('--autostart') || !!process.env.NODE_TEST_CONTEXT;
+      if (!isAutostart && !isBlockedNow()) {
+        showMainWindow();
+      } else if (isWin && !schedule.pinHash && !process.env.NODE_TEST_CONTEXT) {
+        // בהתקנה טרייה (ללא סיסמה ראשונית מוגדרת) באתחול רקע — הכוונת המשתמש לפתיחת ההגדרות
         setTimeout(() => {
           try {
             if (tray && typeof tray.displayBalloon === 'function') {

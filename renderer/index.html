@@ -722,28 +722,28 @@
   <!-- שכבת המלווה האישי (Interactive Tour) -->
   <div class="tour-overlay hidden" id="tourOverlay">
     <div class="tour-spotlight" id="tourSpotlight"></div>
-    <div class="tour-card" id="tourCard" role="dialog" aria-modal="true" aria-labelledby="tourTitle">
-      <div class="tour-card-header">
-        <div class="tour-badge">
-          <span class="tour-avatar">💡</span>
-          <span class="tour-badge-text">המלווה האישי שלך</span>
-        </div>
-        <div class="tour-header-actions">
-          <span class="tour-step-counter" id="tourStepCounter">שלב 1 מתוך 14</span>
-          <button class="tour-close-btn" id="tourCloseX" title="יציאה מההדרכה (Esc)">
-            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
-          </button>
-        </div>
+  </div>
+  <div class="tour-card hidden" id="tourCard" role="dialog" aria-modal="true" aria-labelledby="tourTitle">
+    <div class="tour-card-header">
+      <div class="tour-badge">
+        <span class="tour-avatar">💡</span>
+        <span class="tour-badge-text">המלווה האישי שלך</span>
       </div>
-      <h3 class="tour-title" id="tourTitle">כותרת</h3>
-      <div class="tour-text" id="tourText">תוכן הסבר</div>
-      <div class="tour-dots" id="tourDots"></div>
-      <div class="tour-actions">
-        <button class="btn btn-ghost btn-sm" id="tourSkipBtn" type="button">דלג על ההדרכה</button>
-        <div class="tour-nav-btns">
-          <button class="btn btn-ghost btn-sm hidden" id="tourPrevBtn" type="button">הקודם</button>
-          <button class="btn btn-primary btn-sm" id="tourNextBtn" type="button">הבא</button>
-        </div>
+      <div class="tour-header-actions">
+        <span class="tour-step-counter" id="tourStepCounter">שלב 1 מתוך 14</span>
+        <button class="tour-close-btn" id="tourCloseX" title="יציאה מההדרכה (Esc)">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+    </div>
+    <h3 class="tour-title" id="tourTitle">כותרת</h3>
+    <div class="tour-text" id="tourText">תוכן הסבר</div>
+    <div class="tour-dots" id="tourDots"></div>
+    <div class="tour-actions">
+      <button class="btn btn-ghost btn-sm" id="tourSkipBtn" type="button">דלג על ההדרכה</button>
+      <div class="tour-nav-btns">
+        <button class="btn btn-ghost btn-sm hidden" id="tourPrevBtn" type="button">הקודם</button>
+        <button class="btn btn-primary btn-sm" id="tourNextBtn" type="button">הבא</button>
       </div>
     </div>
   </div>
