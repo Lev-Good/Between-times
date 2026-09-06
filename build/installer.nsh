@@ -1,4 +1,4 @@
-﻿; BenHazmanim - custom NSIS installer script
+; BenHazmanim - custom NSIS installer script
 ; ---------------------------------------------------------------------------
 ; Why this exists:
 ;   The app runs a watchdog that respawns it within seconds if killed, and it
@@ -67,6 +67,10 @@
   ; give the app (checks the flag every ~3s) time to exit on its own, so the
   ; installer's own kill-loop finds it already stopped. Only wait while the
   ; process actually exists (up to ~8s), so fresh installs are not slowed down.
+  ; give the app time to exit on its own before we try to extract files.
+  ; nsProcess::_FindProcess sometimes fails to find Hebrew process names,
+  ; so we unconditionally wait to prevent silent extraction failures.
+  Sleep 4000
   StrCpy $R4 0
   WaitAppExit:
     nsProcess::_FindProcess "${APP_EXECUTABLE_FILENAME}"
