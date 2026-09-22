@@ -1543,7 +1543,7 @@ test('daily limit: no warning while the remaining quota is far from ending', asy
   m.cleanup();
 });
 
-test('daily limit: the schedule warning still wins when it expires sooner than the quota', async () => {
+test('daily limit: the schedule warning still wins when it expires sooner than the quota', async (t) => {
   const settings = S.defaultSchedule();
   settings.pinHash = S.sha256Hex('1234');
   settings.warnMinutes = 60; // חלון אזהרה גדול — שתי האזהרות "בתוך החלון"
@@ -1551,8 +1551,15 @@ test('daily limit: the schedule warning still wins when it expires sooner than t
   // הלוח חוסם את המחשב בעוד ~2 דקות — קרוב יותר מגמר המכסה (50 דקות)
   const now = new Date();
   const inTwoMin = new Date(now.getTime() + 2 * 60000);
+  // סמוך לחצות "חסימה בעוד דקותיים" אינה ניתנת לתיאור בחלון של היום הנוכחי
+  // (היא נופלת ביום הבא, והחלון של היום היה נגמר לפני שהוא מתחיל). הבדיקה
+  // חסרת משמעות בשעות האלה — עדיף דילוג מפורש על פני כשל לילי חוזר.
+  if (inTwoMin.getDate() !== now.getDate()) {
+    t.skip('סמוך לחצות — אי אפשר לתאר חסימה בעוד דקותיים בתוך היום הנוכחי');
+    return;
+  }
   const startMin = inTwoMin.getHours() * 60 + inTwoMin.getMinutes();
-  settings.week[now.getDay()].slots.push({ start: startMin === 0 ? 1 : startMin, end: 1439, type: 'blocked' });
+  settings.week[now.getDay()].slots.push({ start: startMin === 0 ? 1 : startMin, end: 1440, type: 'blocked' });
   const m = loadMain({ settings });
   seedUsage(m, 10 * 60);
   await m.ready();
