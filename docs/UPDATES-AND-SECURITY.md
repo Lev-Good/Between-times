@@ -116,27 +116,47 @@ npm run dist
 > שימו לב: `version.json` הוא הקובץ שמפעיל את העדכון אצל המשתמשים הקיימים,
 > ולכן אין לעדכן אותו מוקדם — עד שלא קיים Release עם הקובץ התואם.
 
-### שלב 6: שמירה ודחיפה ל-GitHub
-בצעו Commit ו-Push ל-Git. יש להוסיף **רק את קבצי השחרור** — אין להשתמש
+### שלב 6: Commit (בלי לפרסם עדיין)
+בצעו Commit של קבצי השחרור. יש להוסיף **רק את קבצי השחרור** — אין להשתמש
 ב-`git add .`, כי הוא עלול לכלול שינויים אחרים שבאמצע עבודה:
 ```powershell
 git add package.json version.json renderer/index.html docs/CHANGELOG.md docs/MIGRATION-1.7.0.md
 # ובנוסף, רק אם השתנו בגרסה הזו:
 # git add main.js preload.js scheduler.js locked-browser.js renderer/ build/ test/
 git commit -m "שחרור גרסה 1.7.0"
-git push origin main
 ```
 
-### שלב 7: יצירת Release ב-GitHub והעלאת הקובץ
-1. גשו לדף ה-Releases במאגר הגיטהאב:
-   `https://github.com/Lev-Good/Between-times/releases/new`
-2. ב-Tag name רשמו: `v1.7.0`
-3. ב-Release title רשמו: `בין הזמנים 1.7.0`
-4. בתיאור רשמו את השינויים (אפשר להעתיק מ-`docs/CHANGELOG.md`).
-5. גררו את הקובץ `dist\Setup.1.7.0.exe` לאזור הצירופים (Attach binaries).
-6. לחצו **Publish release**.
-7. וידוא: העדכון נחשב הושלם רק אחרי ש-`version.json` מתפרסם עם אותה גרסה
-   ואותה טביעת אצבע של הקובץ שהועלה.
+> ⚠️ **אל תדחפו את `main` לפני שיצרתם את ה-Release.** `version.json` יושב על
+> `main`, וכל לקוח מותקן קורא אותו משם. אם `main` יידחף ראשון, קיים חלון שבו
+> הלקוחות כבר רואים "גרסה 1.7.0" בעוד שהערכים ב-`releases/latest` הם של הגרסה
+> הקודמת — כל מי שיבדוק עדכון בחלון הזה יוריד קובץ שטביעתו אינה תואמת ויבטל את
+> העדכון. לכן סדר השלבים הוא: תג ← Release ← `main`.
+
+### שלב 7: דחיפת התג ויצירת Release ב-GitHub
+1. דחפו **את התג בלבד** (הקומיט כבר קיים, והענף `main` עדיין לא מתפרסם):
+   ```powershell
+git push origin HEAD:refs/tags/v1.7.0
+   ```
+2. צרו את ה-Release עם הקובץ, כשהוא מסומן כ-Latest:
+   ```powershell
+gh release create v1.7.0 "dist\Setup.1.7.0.exe" `
+  --title "גרסה 1.7.0 — תקציר השינוי" `
+  --notes-file "dist\release-notes.md" --latest
+   ```
+   (או דרך הדפדפן: `https://github.com/Lev-Good/Between-times/releases/new`,
+   Tag name `v1.7.0`, גרירת ה-EXE ל-Attach binaries, **Publish release**.)
+3. **ודאו שהנכס הועלה שלם** — גודל הנכס ב-Release חייב להיות זהה לגודל הקובץ
+   המקומי, וטביעת ה-`digest` שגיטהאב מחשבת חייבת להיות זהה לזו שב-`version.json`:
+   ```powershell
+gh api repos/Lev-Good/Between-times/releases/tags/v1.7.0 `
+  -q '.assets[] | .name + " " + (.size|tostring) + " " + (.digest // "")'
+   ```
+4. **רק עכשיו** דחפו את הענף — זה הרגע שבו העדכון נפתח למשתמשים:
+   ```powershell
+git push origin main
+   ```
+5. וידוא סופי: `releases/latest` מחזיר את התג החדש, ו-`version.json` שיושב על
+   `main` מכיל את אותה גרסה ואותה טביעת אצבע של הנכס שהועלה.
 
 **זה הכל!** 
-מיד עם סיום שלב זה, כל משתמש שיש לו את התוכנה במחשב יקבל התראה על הגרסה החדשה, ויוכל לעדכן אותה בלחיצת כפתור אחת.
+מיד עם שלב 7.4, כל משתמש שיש לו את התוכנה במחשב יקבל התראה על הגרסה החדשה, ויוכל לעדכן אותה בלחיצת כפתור אחת.
