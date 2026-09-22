@@ -100,6 +100,11 @@ UPDATE_LIVE=1 npm run test:update-live
   (1.6.5 → 1.7.0, כולל מניעת שדרוג-לאחור), ושתי בדיקות **אימות חי** שמריצות
   את נתיב העדכון של `main.js` מול ה-Release שפורסם ומורידות את המתקין בפועל.
   הן מדולגות כברירת מחדל (אין להן `UPDATE_LIVE=1`) כדי שהחבילה לא תלויה ברשת.
+- `test/installer-manifest.test.js` — "רשת ביטחון" לנתיב ההתקנה/העדכון: לוגיקת
+  תיקון מניפסט ההרשאה של המתקין (`requireAdministrator` → `asInvoker`, באותו
+  אורך), שההרמה העצמית ב-`preInit` נמצאת **לפני** כתיבת `quit.flag` (כדי שביטול
+  חלון ה-UAC לא יסגור את התוכנה), ושהיא מחוברת ל-`npm run dist` — כדי שמתקין
+  שדורש הרשאות לא ישוחרר שוב בשקט.
 
 ## בניית קובץ התקנה (EXE)
 
@@ -108,7 +113,11 @@ npm install --save-dev electron-builder
 npm run dist
 ```
 
-הקובץ ייווצר בתיקיית `dist/` (מתקין NSIS).
+הקובץ ייווצר בתיקיית `dist/` (מתקין NSIS). מעבר לבנייה, `npm run dist` מריץ גם
+את `scripts/patch-installer-manifest.js`, שמעביר את מניפסט ההרשאה של המתקין ל-
+`asInvoker` (המתקין מרים את עצמו ב-`preInit`) — וזו הסיבה שהפעלה שלו מכל גרסת
+תוכנה מותקנת מצליחה ומציגה חלון UAC במקום להיכשל בשקט. **אין לבנות עם
+`electron-builder` ישירות** — בנייה כזו מנפיקה מתקין שלא ניתן להפעיל בלי הרשאות.
 
 הפצה מחייבת חתימת Authenticode. `forceCodeSigning: true` גורם ל־electron-builder לעצור את הבנייה אם לא הוגדרה תעודה; אין fallback למתקין unsigned.
 
@@ -118,8 +127,8 @@ PowerShell לדוגמה לפני `npm run dist`:
 $env:CSC_LINK = 'C:\secure\lev-tov-code-signing.pfx'
 $env:CSC_KEY_PASSWORD = '<password-from-secret-store>'
 npm run dist
-Get-AuthenticodeSignature '.\dist\Setup.1.6.0.exe' | Format-List Status,SignerCertificate
-(Get-FileHash '.\dist\Setup.1.6.0.exe' -Algorithm SHA256).Hash.ToLower()
+Get-AuthenticodeSignature '.\dist\Setup.1.7.2.exe' | Format-List Status,SignerCertificate
+(Get-FileHash '.\dist\Setup.1.7.2.exe' -Algorithm SHA256).Hash.ToLower()
 ```
 
 מנגנון העדכונים של התוכנה מבוסס על מקור ה-GitHub הרשמי, תקשורת מוצפנת, ואימות טביעת אצבע דיגיטלית (SHA-256) מדויקת ללא עלויות רישוי מסחריות. פירוט מלא ונוהל שחרור גרסאות עתידיות נמצאים ב־[`docs/UPDATES-AND-SECURITY.md`](docs/UPDATES-AND-SECURITY.md).
@@ -129,6 +138,7 @@ Get-AuthenticodeSignature '.\dist\Setup.1.6.0.exe' | Format-List Status,SignerCe
 | מסמך | מה יש בו |
 |---|---|
 | [`docs/CHANGELOG.md`](docs/CHANGELOG.md) | רשימת השינויים לכל גרסה (מה המשתמשים מקבלים) |
+| [`docs/MIGRATION-1.7.2.md`](docs/MIGRATION-1.7.2.md) | מיגרציה 1.7.1→1.7.2 (פאץ' — אין מיגרציית נתונים): המתקין מרים את עצמו, ואין צורך בהתקנה ידנית |
 | [`docs/MIGRATION-1.7.1.md`](docs/MIGRATION-1.7.1.md) | מיגרציה 1.7.0→1.7.1 (פאץ' — אין מיגרציית נתונים) והתקנה ידנית חד-פעמית |
 | [`docs/MIGRATION-1.7.0.md`](docs/MIGRATION-1.7.0.md) | מיגרציה 1.6.5→1.7.0, שינויי התנהגות, ומטריצת בדיקות ידניות ב-VM |
 | [`docs/MIGRATION-1.6.0.md`](docs/MIGRATION-1.6.0.md) | מיגרציית הסכימה ל-v2 והמטריצה הכללית |

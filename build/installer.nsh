@@ -37,6 +37,40 @@
 !macroend
 
 !macro preInit
+  ; ---------------------------------------------------------------------------
+  ; הרמה עצמית — הדבר הראשון שרץ, לפני כל השאר.
+  ;
+  ; המתקין מופץ עם מניפסט asInvoker (ראו scripts/patch-installer-manifest.js)
+  ; ולא עם requireAdministrator, כי הפעלה של קובץ שדורש הרשאות מנהל מתהליך
+  ; שאינו מוגבר נכשלת מיד (שגיאה 740) בלי חלון UAC ובלי הודעה — וזה בדיוק
+  ; מה שהשאיר את עדכון-מתוך-התוכנה בלי התקנה. לכן המתקין מרים את עצמו כאן:
+  ; מפעיל מחדש את עצמו בפעולה "runas" (ShellExecuteEx) — הנתיב היחיד שמציג
+  ; את חלון ה-UAC — ומעביר הלאה את כל הארגומנטים (למשל /S בהתקנת עדכון
+  ; שקטה), כדי שסוג ההתקנה לא ישתנה בדרך.
+  ;
+  ; חשוב: זה רץ **לפני** כתיבת דגלי quit.flag. superviseWatchdog של התוכנה
+  ; סוגר אותה ברגע שהדגל נראה — ולכן אם נכתוב אותו כאן, ביטול חלון ה-UAC
+  ; היה מותיר את המשתמש בלי תוכנה ובלי התקנה. כאן, אם האישור לא ניתן,
+  ; התוכנה נשארת פתוחה ורק מוצגת הודעה.
+  ; ---------------------------------------------------------------------------
+  !ifndef BUILD_UNINSTALLER
+    ${IfNot} ${UAC_IsAdmin}
+      ${If} ${UAC_IsInnerInstance}
+        ; הופעלנו על ידי תהליך מרים ולא קיבלנו הרשאות (למשל סיסמת מנהל שגויה)
+        MessageBox MB_ICONSTOP|MB_OK "כדי להתקין את 'בין הזמנים' נדרש חשבון מנהל. ההתקנה לא בוצעה."
+        Quit
+      ${EndIf}
+      ClearErrors
+      ${GetParameters} $R9
+      ExecShell "runas" "$EXEPATH" "$R9"
+      ${IfNot} ${Errors}
+        Quit ; התהליך המורם ממשיך את ההתקנה במקומנו
+      ${EndIf}
+      MessageBox MB_ICONSTOP|MB_OK "כדי להתקין את 'בין הזמנים' יש לאשר את בקשת ההרשאה של Windows.$\r$\n$\r$\nהאישור לא ניתן, ולכן ההתקנה לא בוצעה. נסו שוב ואשרו את החלון."
+      Quit
+    ${EndIf}
+  !endif
+
   ; write quit.flag into every location the app may check, BEFORE
   ; electron-builder tries to close the running app (preInit runs before
   ; allowOnlyOneInstallerInstance).

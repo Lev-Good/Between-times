@@ -72,7 +72,7 @@ flowchart TD
 ```powershell
 npm test
 ```
-וודאו ש-**0 כשלים** (Pass). נכון ל-1.7.1: **324 בדיקות** — 322 עוברות ו-2
+וודאו ש-**0 כשלים** (Pass). נכון ל-1.7.2: **335 בדיקות** — 333 עוברות ו-2
 מדולגות (בדיקות האימות החי מול GitHub, ראו שלב 8). שימו לב שפלט הבדיקות
 מפוצל לכמה קבוצות הרצה (בדיקות ה-E2E מרימות Electron אמיתי) — לסכום יש לקבץ
 את כל שורות `ℹ tests`, ולא להסתפק בשורה האחרונה.
@@ -85,18 +85,41 @@ npm run test:e2e
 > הבדיקות אינן דורשות רשת. האימות היחיד שנוגע ברשת מדולג כברירת מחדל ורץ
 > בנפרד (שלב 8).
 
-### שלב 3: בניית קובץ המתקין
+### שלב 3: בניית קובץ המתקין (בנייה + תיקון המניפסט)
 הריצו את פקודת ההידור:
 ```powershell
 npm run dist
 ```
-בסיום, ייווצר הקובץ בתיקיית הפלט:
-`dist\Setup.1.6.1.exe`
+הפקודה הזו עושה **שני** דברים: בונה את המתקין ב-electron-builder, ואחר כך מתקנת
+את מניפסט ההרשאה שלו (`requireAdministrator` → `asInvoker`) דרך
+`scripts/patch-installer-manifest.js`. התיקון הכרחי: בלעדיו הפעלה של המתקין
+מתהליך שאינו מוגבר נכשלת **מיד** (שגיאה 740) בשקט — זו התקלה שתוקנה ב-1.7.2.
+המתקין מרים את עצמו להרשאות ב-`preInit` (`build/installer.nsh`), ולכן הוא
+מופץ עם `asInvoker`.
+
+בסיום ייווצר הקובץ ומיד אחריו יודפס אישור התיקון:
+```
+dist\Setup.1.7.2.exe
+patch-installer-manifest: עודכן …\dist\Setup.1.7.2.exe
+  מניפסט: level="requireAdministrator" → level="asInvoker"
+  גודל: … בתים (ללא שינוי)
+```
+
+> ⚠️ **אין לבנות עם `electron-builder --win` ישירות.** בנייה כזו מנפיקה מתקין
+> עם `requireAdministrator`, ואז עדכון מתוך התוכנה ייכשל שוב בשקט בגרסאות
+> ותיקות. בדיקה אוטומטית (`test/installer-manifest.test.js`) נכשלת על ארטיפקט
+> כזה, ובדיקה נוספת מוודאת ש-`npm run dist` אכן מריץ את התיקון.
+
+אימות מניפסט (רשות — שנייה אחת, ומחזיר תשובה חד-משמעית):
+```powershell
+$b=[IO.File]::ReadAllBytes("dist\Setup.1.7.2.exe"); $s=[Text.Encoding]::UTF8.GetString($b)
+if ($s -match 'requireAdministrator') { "לא מתוקן — אסור לפרסם" } else { "asInvoker — תקין" }
+```
 
 ### שלב 4: חישוב טביעת ה-SHA-256 של המתקין
 הריצו פקודה זו ב-PowerShell (החליפו למספר הגרסה שלכם):
 ```powershell
-(Get-FileHash .\dist\Setup.1.6.1.exe -Algorithm SHA256).Hash.ToLower()
+(Get-FileHash .\dist\Setup.1.7.2.exe -Algorithm SHA256).Hash.ToLower()
 ```
 העתיקו את המחרוזת בת 64 התווים שמתקבלת.
 
