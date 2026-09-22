@@ -11,6 +11,7 @@
     "start": "electron .",
     "test": "node --test \"test/**/*.test.js\"",
     "test:e2e": "node --test test/block-screen.e2e.test.js",
+    "test:update-live": "node --test --test-name-pattern=\"update:LIVE\" test/main-flow.test.js",
     "preview": "node scripts/build-preview.js",
     "dist": "electron-builder --win"
   },

@@ -144,7 +144,7 @@ function makeMock(config) {
     app: {
       getPath: (name) => (name === 'userData' ? path.join(tmpRoot, 'userData') : path.join(tmpRoot, 'app')),
       getAppPath: () => path.join(tmpRoot, 'app'),
-      getVersion: () => '1.2.3',
+      getVersion: () => cfg.appVersion || '1.2.3',
       requestSingleInstanceLock: () => true,
       quit: () => { state.quitCalled = true; },
       exit: () => { state.exitCalled = true; },
@@ -1595,6 +1595,220 @@ test('update:download cleans up partial file when download fails mid-stream', as
     fetchMock = null;
   }
 });
+
+/* ========== זיהוי הגרסה האמיתית: 1.6.5 → 1.7.0 ==========
+   כל הבדיקות שלמעלה משתמשות בגרסאות דמה (1.2.3 מול 9.9.9). אלה בודקות את
+   נתיב השדרוג האמיתי — לקוח מותקן של 1.6.5 מול version.json שמכריז 1.7.0.
+   זה בדיוק סוג השדרוג (העלאת מינור: 1.6 → 1.7) שהשוואה נאיבית של מחרוזות
+   או של מספרים שלמים הייתה שוברת בשקט, בעוד השוואה בין גרסאות רחוקות
+   הייתה ממשיכה לעבור. */
+
+test('update:check offers 1.7.0 to an installed 1.6.5 client', async () => {
+  fetchMock = async (url) => {
+    if (url.includes('raw.githubusercontent.com')) {
+      return {
+        ok: true,
+        json: async () => ({
+          version: '1.7.0',
+          url: 'https://github.com/Lev-Good/Between-times/releases/latest',
+          notes: 'גרסה 1.7.0 — רשימת אתרים הפוכה, דפדפן מוגבל ומכסת זמן יומית',
+          sha256: 'a'.repeat(64)
+        })
+      };
+    }
+    throw new Error('unexpected fetch: ' + url);
+  };
+  try {
+    const m = loadMain({ appVersion: '1.6.5' });
+    await m.ready();
+    const res = await m.ipcHandlers.get('update:check')();
+    assert.ok(res.ok);
+    assert.ok(res.update, '1.6.5 חייב לראות את 1.7.0 כעדכון');
+    assert.equal(res.update.version, '1.7.0');
+    assert.equal(res.update.sha256, 'a'.repeat(64), 'הטביעה מ-version.json עוברת הלאה' );
+    assert.ok(m.state.notifications.length >= 1, 'הודעת עדכון הוצגה למשתמש');
+    m.cleanup();
+  } finally {
+    fetchMock = null;
+  }
+});
+
+test('update:check offers 1.7.0 to a client on 1.5.10 (crosses the 1.5→1.7 jump)', async () => {
+  fetchMock = async (url) => {
+    if (url.includes('raw.githubusercontent.com')) {
+      return { ok: true, json: async () => ({ version: '1.7.0', sha256: 'b'.repeat(64) }) };
+    }
+    throw new Error('unexpected fetch: ' + url);
+  };
+  try {
+    const m = loadMain({ appVersion: '1.5.10' });
+    await m.ready();
+    const res = await m.ipcHandlers.get('update:check')();
+    assert.ok(res.update, '1.5.10 חייב לראות את 1.7.0 (7 > 5 במינור)' );
+    assert.equal(res.update.version, '1.7.0');
+    m.cleanup();
+  } finally {
+    fetchMock = null;
+  }
+});
+
+test('update:check does not offer 1.7.0 to a client already on 1.7.0', async () => {
+  fetchMock = async (url) => {
+    if (url.includes('raw.githubusercontent.com')) {
+      return { ok: true, json: async () => ({ version: '1.7.0', sha256: 'c'.repeat(64) }) };
+    }
+    throw new Error('unexpected fetch: ' + url);
+  };
+  try {
+    const m = loadMain({ appVersion: '1.7.0' });
+    await m.ready();
+    const res = await m.ipcHandlers.get('update:check')();
+    assert.ok(res.ok);
+    assert.equal(res.update, null, 'לקוח שכבר על 1.7.0 לא אמור לקבל הצעת עדכון');
+    assert.equal(m.state.notifications.length, 0, 'ולא אמורה להופיע הודעה');
+    m.cleanup();
+  } finally {
+    fetchMock = null;
+  }
+});
+
+test('update:check does not offer 1.6.5 to a client already on 1.7.0 (no downgrade)', async () => {
+  fetchMock = async (url) => {
+    if (url.includes('raw.githubusercontent.com')) {
+      return { ok: true, json: async () => ({ version: '1.6.5', sha256: 'd'.repeat(64) }) };
+    }
+    throw new Error('unexpected fetch: ' + url);
+  };
+  try {
+    const m = loadMain({ appVersion: '1.7.0' });
+    await m.ready();
+    const res = await m.ipcHandlers.get('update:check')();
+    assert.equal(res.update, null, 'אסור להציע הורדת גרסה (downgrade)');
+    m.cleanup();
+  } finally {
+    fetchMock = null;
+  }
+});
+
+/* ========== אימות חי מול GitHub האמיתי (opt-in) ==========
+   רץ רק עם UPDATE_LIVE=1 (npm run test:update-live); שאר חבילת הבדיקות
+   לעולם אינה נוגעת ברשת. הבדיקה מריצה את נתיב העדכון האמיתי של main.js —
+   checkForUpdate → resolveInstallerUrl → downloadInstaller ואימות ה-SHA-256
+   — מול ה-Release שפורסם בפועל, ומורידה את המתקין האמיתי (~90MB).
+   מה שנשאר מחוץ לבדיקה הוא רק הרצת המתקין עצמו (spawn ממוק), כדי ששום
+   התקנה לא תתבצע על המחשב שמריץ את הבדיקה. */
+const LIVE = process.env.UPDATE_LIVE === '1';
+const LIVE_TIMEOUT = 10 * 60 * 1000;
+
+test('update:LIVE end-to-end against the published GitHub release',
+  { skip: LIVE ? false : 'הרצה חיה מול GitHub — הפעילו עם UPDATE_LIVE=1 (npm run test:update-live)', timeout: LIVE_TIMEOUT },
+  async () => {
+    const UA = { 'User-Agent': 'BenHazmanim-verify' };
+
+    // 1) מה שלקוח מותקן קורא בפועל — אותו UPDATE_URL ש-main.js משתמש בו.
+    const metaRes = await realFetch(
+      'https://raw.githubusercontent.com/Lev-Good/Between-times/main/version.json', { headers: UA });
+    assert.equal(metaRes.status, 200, 'version.json צריך להיות נגיש');
+    const meta = await metaRes.json();
+    assert.match(meta.version || '', /^\d+\.\d+\.\d+$/, 'גרסה תקינה ב-version.json');
+    assert.match(meta.sha256 || '', /^[0-9a-f]{64}$/, 'ל-version.json חייב להיות SHA-256 תקין');
+    assert.equal(meta.url, 'https://github.com/Lev-Good/Between-times/releases/latest',
+      'כתובת העדכון חייבת להיות המהדורה האחרונה הרשמית');
+
+    // 2) מה שהמהדורה מכריזה בפועל — מקור בלתי תלוי ב-version.json.
+    const apiRes = await realFetch(
+      'https://api.github.com/repos/Lev-Good/Between-times/releases/tags/v' + meta.version,
+      { headers: UA });
+    assert.equal(apiRes.status, 200, 'צריכה להיות מהדורה לתג v' + meta.version);
+    const release = await apiRes.json();
+    assert.equal(release.draft, false, 'המהדורה חייבת להיות מפורסמת');
+    assert.equal(release.prerelease, false, 'המהדורה חייבת להיות יציבה');
+    const assetName = 'Setup.' + meta.version + '.exe';
+    const asset = (release.assets || []).find((a) => a.name === assetName);
+    assert.ok(asset, 'המהדורה חייבת להכיל ' + assetName);
+
+    // 3) הטביעה שגיטהאב עצמו חישבה לנכס שהועלה — הצלבת המקורות.
+    assert.ok(asset.digest, 'גיטהאב מחזיר digest לנכס');
+    assert.equal(asset.digest, 'sha256:' + meta.sha256,
+      'טביעת הנכס בגיטהאב חייבת להיות זו שרשומה ב-version.json');
+
+    // 4) הנתיב האמיתי: לקוח 1.6.5 מזהה, מוריד ומאמת — בקוד של main.js.
+    const m = loadMain({ appVersion: '1.6.5' });
+    try {
+      await m.ready();
+      const res = await m.ipcHandlers.get('update:download')();
+      assert.ok(res.ok, 'ההורדה החיה חייבת להצליח: ' + JSON.stringify(res));
+      assert.equal(res.installing, true, 'העדכון עבר לשלב ההתקנה');
+
+      const dest = path.join(m.tmpRoot, 'app', 'BenHazmanim-Setup-' + meta.version + '.exe');
+      assert.ok(fs.existsSync(dest), 'המתקין נשמר על הדיסק לפני ההפעלה');
+      assert.equal(fs.statSync(dest).size, asset.size,
+        'גודל הקובץ שהורד חייב להיות זהה לגודל הנכס במהדורה');
+
+      const liveHash = crypto.createHash('sha256').update(fs.readFileSync(dest)).digest('hex');
+      assert.equal(liveHash, meta.sha256,
+        'טביעת הקובץ שהורד בפועל חייבת להיות זו שפורסמה ב-version.json');
+      assert.equal(liveHash, asset.digest.replace(/^sha256:/, ''),
+        'טביעת הקובץ חייבת להיות זו שגיטהאב חישבה' );
+      assert.equal(fs.readFileSync(dest).subarray(0, 2).toString('ascii'), 'MZ',
+        'הקובץ שהורד הוא EXE אמיתי (חותמת PE)');
+
+      // המתקין שהופעל הוא בדיוק הקובץ שהורד, בשקט (/S), והתוכנה נסגרת
+      // כדי שהמתקין יוכל להחליף את הקבצים.
+      const spawn = m.state.spawnCalls.find((s) => s.cmd === dest);
+      assert.ok(spawn, 'המתקין שהורד הוא זה שהופעל: ' +
+        JSON.stringify(m.state.spawnCalls.map((s) => s.cmd)));
+      assert.deepEqual(spawn.args, ['/S'], 'התקנה שקטה');
+      assert.equal(spawn.opts.detached, true, 'תהליך נפרד — ממשיך גם אחרי סגירת התוכנה');
+      assert.equal(m.state.quitCalled, true, 'התוכנה נסגרת כדי לאפשר את ההתקנה');
+      assert.ok(fs.existsSync(path.join(m.tmpRoot, 'userData', 'quit.flag')), 'quit.flag נכתב');
+      assert.ok(fs.existsSync(path.join(m.tmpRoot, 'userData', 'relaunch.flag')),
+        'relaunch.flag נכתב — המתקין יפתח את הגרסה החדשה');
+    } finally {
+      m.cleanup();
+    }
+  });
+
+test('update:LIVE refuses the real installer when the published hash does not match the asset',
+  { skip: LIVE ? false : 'הרצה חיה מול GitHub — הפעילו עם UPDATE_LIVE=1 (npm run test:update-live)', timeout: LIVE_TIMEOUT },
+  async () => {
+    const UA = { 'User-Agent': 'BenHazmanim-verify' };
+    const metaRes = await realFetch(
+      'https://raw.githubusercontent.com/Lev-Good/Between-times/main/version.json', { headers: UA });
+    assert.equal(metaRes.status, 200);
+    const meta = await metaRes.json();
+    assert.match(meta.sha256 || '', /^[0-9a-f]{64}$/);
+
+    // התרחיש שבגללו נוהל השחרור מזהיר: הכרזה על גרסה חדשה עם טביעת אצבע
+    // שאינה של הקובץ שהועלה — למשל כש-version.json נדחק לפני שהבנייה
+    // הוחלפה, או כשמועלה קובץ אחר לשלב ה-Release. ההורדה כאן **אמיתית**
+    // (הקובץ האמיתי מהמהדורה); רק ה-metadata מוחלף — וזה חייב לעצור את
+    // ההתקנה, אחרת כל לקוח מותקן היה מריץ קובץ לא מאומת.
+    const wrongHash = meta.sha256.slice(0, -1) + (meta.sha256.endsWith('0') ? '1' : '0');
+    assert.notEqual(wrongHash, meta.sha256, 'דמה: הטביעה הוחלפה בטביעה שגויה');
+
+    fetchMock = async (url, opts) => {
+      if (String(url).includes('raw.githubusercontent.com')) {
+        return { ok: true, json: async () => Object.assign({}, meta, { sha256: wrongHash }) };
+      }
+      return realFetch(url, opts); // שאר הבקשות — לרשת האמיתית
+    };
+    const m = loadMain({ appVersion: '1.6.5' });
+    try {
+      await m.ready();
+      const res = await m.ipcHandlers.get('update:download')();
+      assert.equal(res.ok, false, 'עדכון שטביעתו אינה תואמת חייב להידחות');
+      assert.match(res.error || '', /טביעת העדכון אינה תואמת/);
+      assert.equal(m.state.quitCalled, false, 'אסור לסגור את התוכנה');
+      assert.equal(m.state.spawnCalls.filter((s) => s.args && s.args.includes('/S')).length, 0,
+        'אסור להריץ מתקין שטביעתו אינה תואמת');
+      const dest = path.join(m.tmpRoot, 'app', 'BenHazmanim-Setup-' + meta.version + '.exe');
+      assert.equal(fs.existsSync(dest), false, 'המתקין שהורד נמחק ולא הושאר על הדיסק');
+    } finally {
+      fetchMock = null;
+      m.cleanup();
+    }
+  });
 
 test('update:download reports clear error when no update is available', async () => {
   fetchMock = async (url) => {
