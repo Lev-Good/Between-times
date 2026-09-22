@@ -36,6 +36,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   inspectAllowedAppPath: (p) => ipcRenderer.invoke('allowed-apps:inspect-path', p),
   launchAllowedApp: (app) => ipcRenderer.invoke('allowed-apps:launch', app),
   openWebsiteApp: (nameOrIndex) => ipcRenderer.invoke('website-apps:open', nameOrIndex),
+  openWebsiteBrowser: () => ipcRenderer.invoke('website-browser:open'),
   openFileExplorer: () => ipcRenderer.invoke('file-explorer:open-window'),
   fileExplorerRoots: () => ipcRenderer.invoke('file-explorer:roots'),
   fileExplorerList: (rootId, rel) => ipcRenderer.invoke('file-explorer:list', rootId, rel),

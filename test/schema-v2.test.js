@@ -126,6 +126,70 @@ test('hostMatches + siteUrlAllowed: host-based allowlist with subdomain control'
   assert.equal(S.siteUrlAllowed(apps, 'https://en.wikipedia.org', false), false); // ללא תת-דומיינים
 });
 
+/* ================= מצב רשימת האתרים (היתר / חסימה) ================= */
+
+test('websiteMode: defaults to allowlist and only accepts "blocklist" explicitly', () => {
+  assert.equal(S.defaultSchedule().websiteMode, 'allowlist');
+  assert.equal(S.normalizeSchedule({}).websiteMode, 'allowlist');
+  assert.equal(S.normalizeSchedule({ websiteMode: 'blocklist' }).websiteMode, 'blocklist');
+  assert.equal(S.normalizeSchedule({ websiteMode: 'allowlist' }).websiteMode, 'allowlist');
+  assert.equal(S.normalizeSchedule({ websiteMode: 'nonsense' }).websiteMode, 'allowlist');
+});
+
+test('websiteHomeUrl: canonicalized like any site url; invalid becomes empty', () => {
+  assert.equal(S.normalizeSchedule({ websiteHomeUrl: 'Example.com' }).websiteHomeUrl, 'https://example.com');
+  assert.equal(S.normalizeSchedule({ websiteHomeUrl: 'https://a.example.com/x?y=1' }).websiteHomeUrl, 'https://a.example.com/x?y=1');
+  assert.equal(S.normalizeSchedule({ websiteHomeUrl: 'javascript:alert(1)' }).websiteHomeUrl, '');
+  assert.equal(S.normalizeSchedule({}).websiteHomeUrl, '');
+});
+
+test('siteUrlBlocked: listed hosts (and subdomains) are blocked, everything else is open', () => {
+  const apps = [{ name: 'x', urls: ['https://example.com'] }];
+  assert.equal(S.siteUrlBlocked(apps, 'https://example.com'), true);
+  assert.equal(S.siteUrlBlocked(apps, 'https://www.example.com/page'), true, 'תת-מתחם של אתר חסום נחשב חסום');
+  assert.equal(S.siteUrlBlocked(apps, 'https://example.com:8443'), false, 'פורט אחר אינו תואם לכתובת שהוגדרה');
+  assert.equal(S.siteUrlBlocked(apps, 'https://other.org'), false, 'כל שאר האתרים פתוחים');
+  assert.equal(S.siteUrlBlocked(apps, 'https://example.com.evil.org'), false, 'סיומת מזויפת אינה תואמת');
+  assert.equal(S.siteUrlBlocked([], 'https://anything.com'), false, 'רשימה ריקה = אין חסימות');
+});
+
+test('siteUrlBlocked: non-web targets are blocked (fail closed)', () => {
+  const apps = [{ name: 'x', urls: ['https://example.com'] }];
+  assert.equal(S.siteUrlBlocked(apps, 'file:///C:/Windows/system.ini'), true);
+  assert.equal(S.siteUrlBlocked(apps, 'javascript:alert(1)'), true);
+  assert.equal(S.siteUrlBlocked(apps, 'not a url'), true);
+  assert.equal(S.siteUrlAllowed(apps, 'file:///C:/x'), false);
+});
+
+/* ================= מכסת זמן שימוש יומית ================= */
+
+test('dailyLimit: defaults to disabled with a 60 minute default, clamped to 0..1440', () => {
+  assert.deepEqual(S.defaultSchedule().dailyLimit, { enabled: false, minutes: 60 });
+  assert.deepEqual(S.normalizeSchedule({}).dailyLimit, { enabled: false, minutes: 60 });
+  assert.deepEqual(S.normalizeSchedule({ dailyLimit: { enabled: true, minutes: 30 } }).dailyLimit, { enabled: true, minutes: 30 });
+  assert.deepEqual(S.normalizeSchedule({ dailyLimit: { enabled: true, minutes: 9999 } }).dailyLimit, { enabled: true, minutes: 1440 });
+  // 0 דקות = ללא הגבלה — enabled מתכבה כדי שלא תיווצר חסימה מיידית
+  assert.deepEqual(S.normalizeSchedule({ dailyLimit: { enabled: true, minutes: 0 } }).dailyLimit, { enabled: false, minutes: 0 });
+  assert.deepEqual(S.normalizeSchedule({ dailyLimit: { enabled: 1, minutes: 'x' } }).dailyLimit, { enabled: false, minutes: 60 });
+});
+
+test('dailyLimitReached: only an enabled quota with usage at/over the limit is reached', () => {
+  assert.equal(S.dailyLimitReached({ enabled: true, minutes: 30 }, 29 * 60), false);
+  assert.equal(S.dailyLimitReached({ enabled: true, minutes: 30 }, 30 * 60), true);
+  assert.equal(S.dailyLimitReached({ enabled: true, minutes: 30 }, 40 * 60), true);
+  assert.equal(S.dailyLimitReached({ enabled: false, minutes: 30 }, 99999), false);
+  assert.equal(S.dailyLimitReached({ enabled: true, minutes: 0 }, 99999), false);
+});
+
+test('dailyLimitResetAt: the quota resets at the next midnight (DST-safe fields)', () => {
+  const reset = S.dailyLimitResetAt(new Date(2026, 8, 22, 23, 59));
+  assert.equal(reset.getFullYear(), 2026);
+  assert.equal(reset.getMonth(), 8);
+  assert.equal(reset.getDate(), 23);
+  assert.equal(reset.getHours(), 0);
+  assert.equal(reset.getMinutes(), 0);
+});
+
 /* ================= fileExplorer ================= */
 
 test('fileExplorer: normalize filters roots to known keys and defaults when empty', () => {
@@ -265,10 +329,33 @@ test('effectiveSchedule: overlays the matching profile; sensitive fields always 
 
 /* ================= idempotency של השדות החדשים ================= */
 
+test('profiles: overrides normalize the site mode, home url and daily quota', () => {
+  const n = S.normalizeSchedule({
+    profiles: [{
+      name: 'p', user: 'u',
+      overrides: {
+        websiteMode: 'blocklist',
+        websiteHomeUrl: 'Example.com',
+        dailyLimit: { enabled: true, minutes: 45 }
+      }
+    }]
+  });
+  const o = n.profiles[0].overrides;
+  assert.equal(o.websiteMode, 'blocklist');
+  assert.equal(o.websiteHomeUrl, 'https://example.com');
+  assert.deepEqual(o.dailyLimit, { enabled: true, minutes: 45 });
+  const eff = S.effectiveSchedule(n, 'u');
+  assert.equal(eff.websiteMode, 'blocklist', 'הפרופיל דורס את מצב רשימת האתרים');
+  assert.deepEqual(eff.dailyLimit, { enabled: true, minutes: 45 });
+});
+
 test('schema v2: normalize is idempotent for a fully-populated v2 config', () => {
   const rich = S.normalizeSchedule({
     studyMode: { enabled: true, scope: 'always' },
     websiteApps: [{ name: 'a', urls: ['https://a.com', 'https://b.co.il/x'] }],
+    websiteMode: 'blocklist',
+    websiteHomeUrl: 'https://home.example.com',
+    dailyLimit: { enabled: true, minutes: 30 },
     fileExplorer: { enabled: true, roots: ['library', 'documents'], readonlyLibrary: false, hiddenTypes: ['.exe'] },
     accountabilityEmail: 'p@e.com', accountabilityEnabled: true,
     profiles: [{ name: 'x', user: 'x', overrides: { mode: 'allowlist', week: [{ day: 1, slots: [{ start: '01:00', end: '02:00', type: 'netblock' }] }] } }],

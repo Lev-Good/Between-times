@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <title>דפדפן מוגבל — בין הזמנים</title>
+  <style>
+    /* חלון הדפדפן המוגבל: שורת כתובת בגובה קבוע (54px — תואם ל-TOOLBAR_H בתהליך
+       הראשי), ומתחתיו תוכן האתר ב-WebContentsView נפרד שמכסה את כל יתרת החלון. */
+    :root {
+      --sb-bg: #101020;
+      --sb-bg-2: #171730;
+      --sb-border: rgba(255, 255, 255, 0.12);
+      --sb-text: #eef0ff;
+      --sb-dim: #a9aed0;
+      --sb-accent: #7b6bff;
+      --sb-field: rgba(255, 255, 255, 0.08);
+      --sb-warn-bg: rgba(251, 113, 133, 0.16);
+      --sb-warn-text: #ffc4ce;
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --sb-bg: #f4f5fb;
+        --sb-bg-2: #eceefa;
+        --sb-border: rgba(20, 20, 60, 0.14);
+        --sb-text: #1c1d33;
+        --sb-dim: #5a5f85;
+        --sb-accent: #5b4bff;
+        --sb-field: rgba(20, 20, 60, 0.06);
+        --sb-warn-bg: rgba(224, 66, 87, 0.14);
+        --sb-warn-text: #a01e32;
+      }
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; padding: 0;
+      height: 100%;
+      overflow: hidden;
+      background: var(--sb-bg);
+      color: var(--sb-text);
+      font-family: 'Segoe UI', 'Arial Hebrew', Arial, sans-serif;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    .toolbar {
+      height: 54px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 0 10px;
+      background: linear-gradient(180deg, var(--sb-bg), var(--sb-bg-2));
+      border-bottom: 1px solid var(--sb-border);
+    }
+    .tb-btn {
+      flex: 0 0 auto;
+      width: 38px; height: 38px;
+      display: inline-flex; align-items: center; justify-content: center;
+      border-radius: 10px;
+      border: 1px solid var(--sb-border);
+      background: var(--sb-field);
+      color: var(--sb-text);
+      cursor: pointer;
+      transition: background .15s, transform .1s;
+    }
+    .tb-btn:hover { background: rgba(123, 107, 255, 0.16); }
+    .tb-btn:active { transform: scale(0.96); }
+    .tb-btn svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+    .tb-title {
+      flex: 1 1 auto;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    #address {
+      width: 100%;
+      height: 36px;
+      padding: 0 12px;
+      border-radius: 10px;
+      border: 1px solid var(--sb-border);
+      background: var(--sb-field);
+      color: var(--sb-text);
+      font-size: 14px;
+      font-family: inherit;
+      outline: none;
+      user-select: text;
+      -webkit-user-select: text;
+    }
+    #address:focus { border-color: var(--sb-accent); }
+    .tb-notice {
+      flex: 0 1 auto;
+      max-width: 42%;
+      padding: 6px 10px;
+      border-radius: 8px;
+      background: var(--sb-warn-bg);
+      color: var(--sb-warn-text);
+      font-size: 12px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .tb-notice.hidden { display: none; }
+    .stage {
+      height: calc(100% - 54px);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      text-align: center;
+      color: var(--sb-dim);
+      font-size: 14px;
+      line-height: 1.7;
+    }
+    .stage .blocked-list { margin-top: 10px; font-size: 13px; }
+    .chip {
+      display: inline-block;
+      margin: 3px 4px;
+      padding: 3px 9px;
+      border-radius: 999px;
+      border: 1px solid var(--sb-border);
+      background: var(--sb-field);
+      font-size: 12px;
+    }
+  </style>
+</head>
+<body>
+  <div class="toolbar">
+    <button class="tb-btn" id="backBtn" type="button" title="חזרה">
+      <svg viewBox="0 0 24 24"><path d="M9 14 4 9l5-5"/><path d="M4 9h11a5 5 0 0 1 5 5v6"/></svg>
+    </button>
+    <button class="tb-btn" id="homeBtn" type="button" title="לדף הבית">
+      <svg viewBox="0 0 24 24"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/></svg>
+    </button>
+    <button class="tb-btn" id="reloadBtn" type="button" title="רענון">
+      <svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/></svg>
+    </button>
+    <div class="tb-title">
+      <input id="address" type="text" spellcheck="false" autocomplete="off"
+             placeholder="הקלידו כתובת אתר (או מילים לחיפוש) ולחצו Enter" />
+    </div>
+    <div class="tb-notice hidden" id="notice"></div>
+  </div>
+  <div class="stage" id="stage">
+    <div>
+      <div id="stageText">טוען את הדפדפן המוגבל…</div>
+      <div class="blocked-list" id="blockedList"></div>
+    </div>
+  </div>
+
+  <script>
+    'use strict';
+    const API = window.siteBrowser || null;
+    const address = document.getElementById('address');
+    const noticeEl = document.getElementById('notice');
+    const stageText = document.getElementById('stageText');
+    const blockedList = document.getElementById('blockedList');
+
+    function render(state) {
+      if (!state) return;
+      if (typeof state.notice === 'string') {
+        noticeEl.textContent = state.notice;
+        noticeEl.title = state.notice;
+        noticeEl.classList.toggle('hidden', !state.notice);
+      }
+      const title = state.title || state.url || '';
+      document.title = title ? title + ' — דפדפן מוגבל' : 'דפדפן מוגבל';
+      if (state.url && document.activeElement !== address) address.value = state.url;
+      stageText.textContent = (state.title || state.url)
+        ? ''
+        : 'הקלידו כתובת בשורת הכתובת כדי להתחיל לגלוש.';
+      const blocked = Array.isArray(state.blockedSites) ? state.blockedSites : [];
+      blockedList.innerHTML = '';
+      if (blocked.length) {
+        const lbl = document.createElement('div');
+        lbl.textContent = 'אתרים חסומים במחשב הזה:';
+        blockedList.appendChild(lbl);
+        blocked.forEach((name) => {
+          const chip = document.createElement('span');
+          chip.className = 'chip';
+          chip.textContent = name;
+          blockedList.appendChild(chip);
+        });
+      }
+    }
+
+    async function refresh() {
+      if (!API) { stageText.textContent = 'הדפדפן המוגבל אינו זמין בגרסה הזו.'; return; }
+      try { render(await API.getState()); } catch (e) { /* ignore */ }
+    }
+
+    if (API && API.onState) API.onState(render);
+    refresh();
+
+    document.getElementById('backBtn').onclick = () => API && API.back();
+    document.getElementById('homeBtn').onclick = () => API && API.home();
+    document.getElementById('reloadBtn').onclick = () => API && API.reload();
+    address.addEventListener('keydown', async (e) => {
+      if (e.key !== 'Enter') return;
+      const raw = address.value.trim();
+      if (!raw) return;
+      if (!API) return;
+      const res = await API.navigate(raw);
+      if (res && !res.ok && res.error) {
+        noticeEl.textContent = res.error;
+        noticeEl.title = res.error;
+        noticeEl.classList.remove('hidden');
+      }
+      address.blur();
+    });
+  </script>
+</body>
+</html>

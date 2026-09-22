@@ -947,6 +947,72 @@ test('settings:save requires session unlock when pin is set', async () => {
   m.cleanup();
 });
 
+/* ================= מכסת זמן יומית היא מדיניות חסימה =================
+   בהגיעה המחשב נחסם, ואכיפה מחייבת סיסמת הורה. בלי הסיסמה שהיא דורשת,
+   ההגדרה הייתה נשמרת ולא עושה כלום — בשקט. לכן מהלך כזה נדחה. */
+
+test('settings:save: הפעלת מכסת זמן יומית בלי סיסמת הורה נדחת ולא נשמרת', async () => {
+  const m = loadMain({ settings: S.defaultSchedule() });
+  await m.ready();
+
+  const data = S.defaultSchedule();
+  data.dailyLimit = { enabled: true, minutes: 30 };
+  const res = await m.ipcHandlers.get('settings:save')({}, data);
+  assert.equal(res.ok, false, 'המכסה דורשת סיסמה כמו כל מדיניות חסימה');
+  assert.equal(res.needPin, true, 'הדחייה מסומנת כדרישת סיסמה');
+  assert.match(res.error || '', /מכסת זמן/, 'ההודעה מזכירה את המכסה היומית: ' + res.error);
+
+  const after = await m.ipcHandlers.get('settings:get')();
+  assert.equal(after.dailyLimit.enabled, false, 'ההגדרה לא נשמרה בפועל');
+  m.cleanup();
+});
+
+test('load: מכסת זמן יומית בלי סיסמה מכובה בהעלאה — כדי לא לחסום כל שמירה', async () => {
+  // מצב שיכול להגיע מהגירה מ-1.6.x (שם אפשר היה להדליק מכסה בלי סיסמה).
+  // ב-1.7.0 המכסה נחשבת מדיניות חסימה, ובלי סיסמה השמירה הייתה נדחית תמיד.
+  const settings = S.defaultSchedule();
+  settings.dailyLimit = { enabled: true, minutes: 30 };
+  const m = loadMain({ settings });
+  await m.ready();
+
+  const got = await m.ipcHandlers.get('settings:get')();
+  assert.equal(got.dailyLimit.enabled, false, 'המכסה כובתה (ממילא אינה נאכפת בלי סיסמה)');
+  assert.equal(got.dailyLimit.minutes, 30, 'מספר הדקות נשמר למקרה שההורה יחזיר אותה');
+
+  const res = await m.ipcHandlers.get('settings:save')({}, S.defaultSchedule());
+  assert.ok(res.ok, 'שמירת הגדרות לא נחסמת אחרי ההגירה: ' + JSON.stringify(res));
+  m.cleanup();
+});
+
+test('settings:save: עם סיסמת הורה המכסה נשמרת — ואסור להסיר את הסיסמה כל עוד היא פעילה', async () => {
+  const settings = S.defaultSchedule();
+  settings.pinHash = S.sha256Hex('1234');
+  const m = loadMain({ settings });
+  await m.ready();
+  await m.ipcHandlers.get('session:unlock')({}, '1234');
+
+  const data = S.normalizeSchedule(settings);
+  data.dailyLimit = { enabled: true, minutes: 30 };
+  const res = await m.ipcHandlers.get('settings:save')({}, data);
+  assert.ok(res.ok, 'עם סיסמה השמירה מתקבלת: ' + JSON.stringify(res));
+
+  const after = await m.ipcHandlers.get('settings:get')();
+  assert.equal(after.dailyLimit.enabled, true);
+  assert.equal(after.dailyLimit.minutes, 30);
+
+  // הסרת הסיסמה הייתה מבטלת את אכיפת המכסה בשקט — לכן נחסמת
+  const clear = await m.ipcHandlers.get('pin:clear')({}, '1234');
+  assert.equal(clear.ok, false, 'אי אפשר להסיר סיסמה כשהמכסה פעילה');
+  assert.match(clear.error || '', /מכסת הזמן היומית/, clear.error);
+
+  // אחרי כיבוי המכסה — הסיסמה ניתנת להסרה כרגיל
+  const off = S.normalizeSchedule(after);
+  off.dailyLimit = { enabled: false, minutes: 30 };
+  assert.ok((await m.ipcHandlers.get('settings:save')({}, off)).ok);
+  assert.ok((await m.ipcHandlers.get('pin:clear')({}, '1234')).ok, 'בלי המכסה אין מניעה להסיר');
+  m.cleanup();
+});
+
 /* ================= נעילת סשן: חובת סיסמה בכל פתיחה מחדש =================
    סגירה/מזעור/הסתרה של חלון ההגדרות חייבים לנעול את הסשן ולהודיע לממשק —
    אחרת פתיחה חוזרת משורת המשימות או מהמגש עוקפת את הסיסמה (חור אבטחה). */

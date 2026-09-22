@@ -794,6 +794,20 @@
       <div class="quick-study-list" id="quickStudyList"></div>
     </div>
 
+    <!-- פתיחה מהירה של הדפדפן המוגבל (מצב "כל האתרים פתוחים חוץ מהרשימה") —
+         גם בזמן חסימה הדפדפן נשאר שמיש, ומסך החסימה מוסתר עד שעוזבים אותו -->
+    <div class="quick-study-wrap" id="quickBrowserWrap" style="display:none">
+      <div class="quick-study-label">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="9"></circle>
+          <path d="M3 12h18"></path>
+          <path d="M12 3a15 15 0 0 1 0 18a15 15 0 0 1 0-18z"></path>
+        </svg>
+        <span>דפדפן מוגבל (אתרים חסומים בלבד):</span>
+      </div>
+      <div class="quick-study-list" id="quickBrowserList"></div>
+    </div>
+
     <!-- ציטוט תורני מעודד במסך הנקי -->
     <div class="clean-quote-card" id="cleanQuoteCard">
       <div class="clean-quote-text" id="cleanQuoteText"></div>
@@ -970,6 +984,18 @@
     const cleanCountdownBadge = document.getElementById('cleanCountdownBadge');
     const quickStudyWrap = document.getElementById('quickStudyWrap');
     const quickStudyList = document.getElementById('quickStudyList');
+    const quickBrowserWrap = document.getElementById('quickBrowserWrap');
+    const quickBrowserList = document.getElementById('quickBrowserList');
+
+    // כפתור מהיר לפתיחת הדפדפן המוגבל מתוך המסך הנקי
+    if (quickBrowserList) {
+      const qb = document.createElement('button');
+      qb.type = 'button';
+      qb.className = 'quick-app-btn';
+      qb.innerHTML = '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a15 15 0 0 1 0 18a15 15 0 0 1 0-18z"/></svg><span>פתח את הדפדפן המוגבל</span>';
+      qb.onclick = () => API && API.openWebsiteBrowser && API.openWebsiteBrowser();
+      quickBrowserList.appendChild(qb);
+    }
     const cleanQuoteCard = document.getElementById('cleanQuoteCard');
     const cleanQuoteText = document.getElementById('cleanQuoteText');
     const cleanQuoteSource = document.getElementById('cleanQuoteSource');
@@ -1384,13 +1410,24 @@
       const resources = document.getElementById('allowedResources');
       if (resources) {
         resources.textContent = '';
-        (status.websiteApps || []).forEach((site) => {
+        if (status.websiteMode === 'blocklist') {
+          // מצב "כל האתרים פתוחים חוץ מהרשימה": כפתור אחד לפתיחת הדפדפן
+          // המוגבל. הדפדפן נשאר שמיש גם בזמן חסימה — מסך החסימה מוסתר עד
+          // שעוזבים את הדפדפן (או סוגרים אותו), ואז החסימה חוזרת מיד.
           const btn = document.createElement('button');
           btn.className = 'study-app-btn';
-          btn.textContent = 'אתר: ' + site.name;
-          btn.onclick = () => API && API.openWebsiteApp && API.openWebsiteApp(site.name);
+          btn.textContent = 'דפדפן מוגבל — כל האתרים פתוחים (חוץ מהחסומים)';
+          btn.onclick = () => API && API.openWebsiteBrowser && API.openWebsiteBrowser();
           resources.appendChild(btn);
-        });
+        } else {
+          (status.websiteApps || []).forEach((site) => {
+            const btn = document.createElement('button');
+            btn.className = 'study-app-btn';
+            btn.textContent = 'אתר: ' + site.name;
+            btn.onclick = () => API && API.openWebsiteApp && API.openWebsiteApp(site.name);
+            resources.appendChild(btn);
+          });
+        }
         if (status.fileExplorerEnabled) {
           const btn = document.createElement('button');
           btn.className = 'study-app-btn';
@@ -1399,6 +1436,10 @@
           resources.appendChild(btn);
         }
         resources.style.display = resources.childElementCount ? '' : 'none';
+      }
+      // כפתור הדפדפן המוגבל במסך הנקי — רק במצב רשימת חסימה
+      if (quickBrowserWrap) {
+        quickBrowserWrap.style.display = status.websiteMode === 'blocklist' ? '' : 'none';
       }
       // משפטי העידוד מהמקורות — ניתנים להסתרה מההגדרות (showTorahQuotes)
       const showQuotes = status.showTorahQuotes !== false;
@@ -1458,7 +1499,12 @@
       // להורה מיד למה המחשב חסום, כדי שלא ייראה כמו באג. במצב קובץ פגום
       // לא מציגים את ההסבר הזה — שם הסיבה היא תקלת הגדרות ולא ברירת מחדל
       // של הלוח, וההודעה המתאימה כבר מוצגת למעלה.
-      if (status.blockedByDefault && status.state === 'blocked' && !status.configError) {
+      // מכסת זמן שימוש יומית שנוצלה — להסביר שהחסימה אינה תקלה, ומתי היא תסתיים
+      if (status.limitReached && status.state === 'blocked' && !status.configError) {
+        const mins = (status.dailyLimit && status.dailyLimit.minutes) || 0;
+        blockReasonText.textContent = 'נגמר זמן השימוש היומי שהוגדר (מכסה של ' + mins + ' דקות ליום). המחשב ייפתח מחדש בחצות — או כעת עם סיסמת ההורה.';
+        blockReason.classList.remove('hidden');
+      } else if (status.blockedByDefault && status.state === 'blocked' && !status.configError) {
         blockReasonText.textContent = 'המחשב חסום לפי ברירת המחדל שנבחרה בהגדרות (מצב "המחשב חסום תמיד") — כדי לפתוח, הוסיפו חלון "מותר" בלוח או חזרו למצב "המחשב פתוח תמיד". פתיחה בסיסמה כאן פותחת לשעה בלבד.';
         blockReason.classList.remove('hidden');
       } else {

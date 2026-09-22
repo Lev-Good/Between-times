@@ -29,7 +29,7 @@
     <div class="warn-banner hidden" id="warnBanner">
       <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg>
       <div class="warn-banner-text">
-        <strong>המחשב עומד להיחסם</strong>
+        <strong id="warnTitle">המחשב עומד להיחסם</strong>
         <span id="warnText">שמרו את הקבצים וסיימו את העבודה — החסימה מתחילה בעוד 5 דקות</span>
       </div>
       <span class="warn-count" id="warnCount">--:--</span>
@@ -159,6 +159,28 @@
       <div class="mode-warning hidden" id="modeWarning">
         <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg>
         <span id="modeWarningText"></span>
+      </div>
+
+      <div class="card-head" style="margin-top:24px">
+        <h2>מכסת זמן שימוש יומית</h2>
+        <p class="hint">הגבלת סך זמן השימוש ביום — למשל חצי שעה ביום. הזמן נספר רק כשהמחשב באמת פתוח לשימוש (לא בזמן חסימה), נשמר גם אחרי אתחול המחשב, ומתאפס בחצות. כשהמכסה נגמרת המחשב נחסם עד חצות, ופתיחה בסיסמת ההורה פותחת את המשך היום.</p>
+      </div>
+      <div class="setting">
+        <div class="setting-text">
+          <strong>הפעלת מכסת זמן יומית</strong>
+          <span>חסימת המחשב כשנגמר הזמן שהוגדר להיום (דורש סיסמת הורה)</span>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="dailyLimitToggle" />
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="setting">
+        <div class="setting-text">
+          <strong>זמן שימוש מקסימלי ביום (דקות)</strong>
+          <span id="dailyLimitInfo">לדוגמה: 30 = חצי שעה ביום, 90 = שעה וחצי</span>
+        </div>
+        <input type="number" id="dailyLimitMinutes" min="5" max="1440" step="5" value="60" class="num-input" />
       </div>
 
       <div class="card-head" style="margin-top:22px">
@@ -391,8 +413,25 @@
           <!-- 3. אתרים וקבצים -->
           <div class="settings-subpanel hidden" data-subpanel="web">
             <div class="card-head">
-              <h2>אתרים מאושרים (אתר נעול)</h2>
-              <p class="hint">רשימת אתרים שההורה מאשר. פתיחת "אתר נעול" פותחת דפדפן מוגבל שאפשר לגלוש בו רק לאתרים שברשימה — כל ניווט לאתר אחר, פתיחת חלון חדש או בקשת הרשאה (מצלמה/מיקרופון) נחסמים. מתאים לאתרי לימוד. הגלישה מותרת לפי שם המתחם (כולל תת-מתחמים).</p>
+              <h2>אתרים בדפדפן המוגבל</h2>
+              <p class="hint" id="websiteModeHint"></p>
+            </div>
+            <div class="setting">
+              <div class="setting-text">
+                <strong>מה הרשימה עושה?</strong>
+                <span id="websiteModeExplain"></span>
+              </div>
+              <select id="websiteModeSelect" class="select-input">
+                <option value="allowlist">רק האתרים שברשימה פתוחים</option>
+                <option value="blocklist">כל האתרים פתוחים חוץ מהרשימה</option>
+              </select>
+            </div>
+            <div class="setting hidden" id="websiteHomeRow">
+              <div class="setting-text">
+                <strong>כתובת הבית של הדפדפן</strong>
+                <span>העמוד שייפתח כשהדפדפן המוגבל עולה (ריק = דף חיפוש כללי). הניווט בדפדפן מוגבל לאתרים שאינם ברשימת החסימה.</span>
+              </div>
+              <input type="text" id="websiteHomeUrl" class="text-input wide" placeholder="למשל: hebrewbooks.org" />
             </div>
             <div class="website-apps">
               <div class="website-apps-list" id="websiteAppsList"></div>
@@ -400,6 +439,10 @@
                 <input type="text" id="websiteAppName" class="text-input" placeholder="שם האתר (למשל: אתר הלימוד)" maxlength="80" />
                 <input type="text" id="websiteAppUrl" class="text-input wide" placeholder="כתובת (למשל: hebrewbooks.org)" />
                 <button class="btn btn-primary btn-sm" id="addWebsiteAppBtn">הוסף אתר</button>
+              </div>
+              <div class="override-controls" id="websiteBrowserRow">
+                <button class="btn btn-ghost btn-sm" id="openWebsiteBrowserBtn" type="button">פתח את הדפדפן המוגבל</button>
+                <span class="hint" id="websiteBrowserHint">האתר שנפתח נשאר שמיש גם בזמן שהמחשב חסום.</span>
               </div>
             </div>
 
@@ -491,7 +534,7 @@
             <div class="setting">
               <div class="setting-text">
                 <strong>אזהרה לפני החסימה</strong>
-                <span>כמה דקות לפני שהמחשב נחסם — להציג הודעה שמזהירה לשמור קבצים ולסיים את העבודה (0 = ללא אזהרה; ברירת מחדל: 5 דקות)</span>
+                <span>כמה דקות לפני שהמחשב נחסם — להציג הודעה שמזהירה לשמור קבצים ולסיים את העבודה (0 = ללא אזהרה; ברירת מחדל: 5 דקות). האזהרה חלה גם לפני גמר מכסת הזמן היומית (מכסת הזמן היומית מוגדרת בלשונית "לוח זמנים").</span>
               </div>
               <input type="number" id="warnInput" min="0" max="60" step="1" value="5" class="num-input" />
             </div>
@@ -591,7 +634,7 @@
                 <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
               </div>
               <div>
-                <h2>בין הזמנים <span class="version">v<span id="version">1.1.0</span></span></h2>
+                <h2>בין הזמנים <span class="version">v<span id="version">1.7.0</span></span></h2>
                 <p class="hint">נוצר באהבה על ידי <strong>לב טוב דיגיטל</strong>
                   <svg class="icon inline-heart" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
                 </p>
@@ -622,7 +665,7 @@
     </section>
 
     <footer class="footer">
-      <span>בין הזמנים v<span id="version2">1.1.0</span> • לב טוב דיגיטל</span>
+      <span>בין הזמנים v<span id="version2">1.7.0</span> • לב טוב דיגיטל</span>
       <span class="save-indicator" id="saveIndicator">
         <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
         נשמר

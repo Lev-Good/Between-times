@@ -156,6 +156,28 @@ function confirmDialog({ title, message, okLabel, danger }) {
 }
 
 /* ---------- שמירה ---------- */
+
+// החזרת הממשק למצב שנשמר בפועל בתהליך הראשי. משמשת אחרי ביטול שמירה
+// ואחרי שמירה שנדחתה (למשל מכסת זמן יומית בלי סיסמת הורה) — כדי שלא יישאר
+// במסך מצב "רפאים" שההגדרות האמיתיות אינן מכירות.
+async function restoreScheduleFromServer() {
+  if (API) {
+    try {
+      const data = await API.getSettings();
+      schedule = T.normalizeSchedule(data);
+      schedule.pinSet = !!(data && data.pinSet);
+    } catch { /* ignore */ }
+  } else {
+    try {
+      const raw = localStorage.getItem('ben-hazmanim-settings');
+      if (raw) schedule = T.normalizeSchedule(JSON.parse(raw));
+    } catch { /* ignore */ }
+  }
+  renderWeek();
+  applySettingsToUI();
+  refreshStatus();
+}
+
 async function persist() {
   // הגנה מפני נעילה פתאומית בזמן הגדרה: אם הלוח החדש חוסם את המחשב (או את
   // האינטרנט) בשעה הנוכחית — השמירה תפעיל את החסימה מיד, בעוד המשתמש באמצע
@@ -179,21 +201,7 @@ async function persist() {
     });
     if (!ok) {
       // ביטול — לחזור למצב שנשמר בפועל (הממשק כבר מציג את הלוח החדש)
-      if (API) {
-        try {
-          const data = await API.getSettings();
-          schedule = T.normalizeSchedule(data);
-          schedule.pinSet = !!(data && data.pinSet);
-        } catch { /* ignore */ }
-      } else {
-        try {
-          const raw = localStorage.getItem('ben-hazmanim-settings');
-          if (raw) schedule = T.normalizeSchedule(JSON.parse(raw));
-        } catch { /* ignore */ }
-      }
-      renderWeek();
-      applySettingsToUI();
-      refreshStatus();
+      await restoreScheduleFromServer();
       return false;
     }
   }
@@ -612,7 +620,10 @@ function updateCountdown(st) {
   const label = el.closest('.countdown-row').querySelector('.countdown-label');
   if (st.secondsUntilNext != null && st.nextAt) {
     el.textContent = fmtCountdown(st.secondsUntilNext);
-    label.textContent = blocked ? 'עד לפתיחה' : netblocked ? 'עד לפתיחת האינטרנט' : 'עד למעבר הבא';
+    label.textContent = blocked ? 'עד לפתיחה'
+      : netblocked ? 'עד לפתיחת האינטרנט'
+        : st.warningReason === 'limit' ? 'עד גמר המכסה היומית'
+          : 'עד למעבר הבא';
     el.parentElement.classList.remove('hidden');
   } else {
     el.textContent = st.enabled === false ? 'האכיפה מושבתת' : '—';
@@ -640,9 +651,15 @@ function applyStatus(st) {
   warnEl.classList.toggle('hidden', !warnOn);
   if (warnOn) {
     const net = st.next === 'netblock';
-    $('warnText').textContent = net
-      ? 'האינטרנט עומד להיחסם — המחשב יישאר פתוח לשימוש. החסימה מתחילה בעוד ' + T.formatDuration(st.warningSeconds)
-      : 'שמרו את הקבצים וסיימו את העבודה — החסימה מתחילה בעוד ' + T.formatDuration(st.warningSeconds);
+    const limitWarn = st.warningReason === 'limit';
+    if ($('warnTitle')) {
+      $('warnTitle').textContent = limitWarn ? 'מכסת הזמן היומית עומדת להסתיים' : (net ? 'האינטרנט עומד להיחסם' : 'המחשב עומד להיחסם');
+    }
+    $('warnText').textContent = limitWarn
+      ? 'הזמן שהוגדר לשימוש היום עומד להסתיים — שמרו את הקבצים וסיימו את העבודה. המחשב ייחסם בעוד ' + T.formatDuration(st.warningSeconds)
+      : net
+        ? 'האינטרנט עומד להיחסם — המחשב יישאר פתוח לשימוש. החסימה מתחילה בעוד ' + T.formatDuration(st.warningSeconds)
+        : 'שמרו את הקבצים וסיימו את העבודה — החסימה מתחילה בעוד ' + T.formatDuration(st.warningSeconds);
     $('warnCount').textContent = fmtCountdown(st.warningSeconds);
   }
 
@@ -650,7 +667,7 @@ function applyStatus(st) {
   // ללא סיסמה — החסימה אינה פעילה (הגנה מפני נעילה בלי מוצא)
   const noPin = !st.pinSet;
   $('statusTitle').textContent = blocked
-    ? (st.manualLock ? 'המחשב חסום (נעילה ידנית)' : (noPin ? 'החסימה אינה פעילה — אין סיסמה' : 'המחשב חסום בשעה זו'))
+    ? (st.manualLock ? 'המחשב חסום (נעילה ידנית)' : (noPin ? 'החסימה אינה פעילה — אין סיסמה' : st.limitReached ? 'נגמר זמן השימוש היומי' : 'המחשב חסום בשעה זו'))
     : netFailed
       ? 'חסימת האינטרנט לא הופעלה בפועל'
       : netblocked
@@ -666,13 +683,17 @@ function applyStatus(st) {
       ? 'נעילה ידנית — פתחו עם סיסמה'
       : noPin
         ? 'המחשב לא ננעל בפועל — הגדירו סיסמה כדי שהחסימה תופעל'
-        : 'הגישה תיפתח ' + atLabel + ' • בעוד ' + inLabel;
+        : st.limitReached
+          ? 'נוצלה מכסת הזמן היומית (' + ((st.dailyLimit && st.dailyLimit.minutes) || 0) + ' דקות) — הפתיחה ' + atLabel + ' • בעוד ' + inLabel
+          : 'הגישה תיפתח ' + atLabel + ' • בעוד ' + inLabel;
   } else if (netFailed) {
     $('statusDetail').textContent = st.netBlockError || 'נדרש אישור מנהל או שחומת האש אינה זמינה — בדקו את ההודעה והפעילו מחדש את הבדיקה';
   } else if (netblocked) {
     $('statusDetail').textContent = noPin
       ? 'האינטרנט לא נחסם בפועל — הגדירו סיסמה כדי שחסימת האינטרנט תופעל'
       : 'האינטרנט ייפתח ' + atLabel + ' • בעוד ' + inLabel;
+  } else if (st.warningReason === 'limit') {
+    $('statusDetail').textContent = 'הזמן שהוגדר להיום עומד להסתיים: ' + atLabel + ' • בעוד ' + inLabel;
   } else if (st.nextAt) {
     const dir = st.next === 'blocked'
       ? 'המעבר הבא לחסימה'
@@ -686,6 +707,7 @@ function applyStatus(st) {
 
   // כפתור הפתיחה מוצג כשהמחשב חסום או שהאינטרנט חסום בלבד — כשהוא פתוח
   // לגמרי הוא חסר משמעות
+  updateDailyLimitUI();
   $('unlockBtn').classList.toggle('hidden', !(blocked || netblocked));
   const unlockLbl = $('unlockBtnLabel');
   if (unlockLbl) unlockLbl.textContent = netblocked ? 'פתח את האינטרנט (סיסמה)' : 'פתח את המחשב (סיסמה)';
@@ -720,6 +742,13 @@ function applySettingsToUI() {
   if ($('coolOffInput')) $('coolOffInput').value = schedule.coolOffMinutes || 0;
   if ($('studyModeToggle')) $('studyModeToggle').checked = !!(schedule.studyMode && schedule.studyMode.enabled);
   if ($('studyModeScope')) $('studyModeScope').value = (schedule.studyMode && schedule.studyMode.scope === 'always') ? 'always' : 'blocked';
+  if ($('websiteModeSelect')) $('websiteModeSelect').value = websiteModeBlocklist() ? 'blocklist' : 'allowlist';
+  if ($('websiteHomeUrl')) $('websiteHomeUrl').value = schedule.websiteHomeUrl || '';
+  const dl = schedule.dailyLimit || { enabled: false, minutes: 60 };
+  if ($('dailyLimitToggle')) $('dailyLimitToggle').checked = dl.enabled === true;
+  if ($('dailyLimitMinutes')) $('dailyLimitMinutes').value = dl.minutes || 60;
+  updateWebsiteModeUI();
+  updateDailyLimitUI();
   updateStudyModeWarning();
   const fe = schedule.fileExplorer || {};
   if ($('fileExplorerToggle')) $('fileExplorerToggle').checked = fe.enabled === true;
@@ -741,6 +770,57 @@ function updateMasterLabel() {
   const label = $('masterLabel');
   label.textContent = schedule.enabled ? 'האכיפה פעילה' : 'האכיפה מושבתת';
   label.classList.toggle('off', !schedule.enabled);
+}
+
+/* ---------- אתרים בדפדפן המוגבל: רשימת היתר או רשימת חסימה ---------- */
+function websiteModeBlocklist() {
+  return schedule.websiteMode === 'blocklist';
+}
+
+function updateWebsiteModeUI() {
+  const blocklist = websiteModeBlocklist();
+  const hint = $('websiteModeHint');
+  if (hint) {
+    hint.textContent = blocklist
+      ? 'רשימת חסימה (ההפך מרשימת היתר): הדפדפן המוגבל של בין הזמנים פותח את כל האתרים — חוץ מהאתרים שתגדירו כאן. כל ניווט לאתר שברשימה נחסם, כולל הפניות, חלונות חדשים ותת-מתחמים. מתאים לחסום אתרים בודדים בלי לחסום את כל הגלישה. הדפדפן זמין מההגדרות וממסך החסימה, ונשאר שמיש גם כשהמחשב חסום.'
+      : 'רשימת היתר: פתיחת "אתר נעול" פותחת דפדפן מוגבל שאפשר לגלוש בו רק לאתרים שברשימה — כל ניווט לאתר אחר, פתיחת חלון חדש או בקשת הרשאה (מצלמה/מיקרופון) נחסמים. מתאים לאתרי לימוד. הגלישה מותרת לפי שם המתחם (כולל תת-מתחמים).';
+  }
+  const explain = $('websiteModeExplain');
+  if (explain) {
+    explain.textContent = blocklist
+      ? 'כל האתרים פתוחים לשימוש, ורק האתרים שברשימה למטה חסומים'
+      : 'רק האתרים שברשימה למטה פתוחים לשימוש, וכל השאר חסומים';
+  }
+  const homeRow = $('websiteHomeRow');
+  if (homeRow) homeRow.classList.toggle('hidden', !blocklist);
+  const browserRow = $('websiteBrowserRow');
+  if (browserRow) browserRow.classList.toggle('hidden', !blocklist);
+  const nameEl = $('websiteAppName');
+  if (nameEl) nameEl.placeholder = blocklist ? 'שם האתר לחסימה (למשל: אתר X)' : 'שם האתר (למשל: אתר הלימוד)';
+  const addBtn = $('addWebsiteAppBtn');
+  if (addBtn) addBtn.textContent = blocklist ? 'הוסף לחסימה' : 'הוסף אתר';
+}
+
+/* ---------- מכסת זמן שימוש יומית ---------- */
+// כמה זמן נוצל היום וכמה נותר — לפי הסטטוס האמיתי מהתהליך הראשי.
+function updateDailyLimitUI() {
+  const info = $('dailyLimitInfo');
+  if (!info) return;
+  const dl = schedule.dailyLimit || {};
+  if (!dl.enabled) {
+    info.textContent = 'לדוגמה: 30 = חצי שעה ביום, 90 = שעה וחצי';
+    return;
+  }
+  const used = status && status.dailyLimit ? status.dailyLimit.usedSeconds : null;
+  const remain = status && status.dailyLimit ? status.dailyLimit.remainingSeconds : null;
+  // "מוגדרת" ולא "פעילה" — בלי סיסמת הורה זו הגדרה בלבד והאכיפה לא רצה
+  let txt = (hasPin() ? 'מכסה פעילה: ' : 'מכסה מוגדרת: ') + (dl.minutes || 0) + ' דקות ליום';
+  if (used != null) txt += ' • נוצלו היום ' + T.formatDuration(used);
+  if (remain != null) txt += ' • נותרו ' + T.formatDuration(remain);
+  if (status && status.limitReached) txt += ' — המכסה נגמרה, המחשב חסום עד חצות';
+  else if (status && status.warning && status.warningReason === 'limit') txt += ' — המכסה עומדת להסתיים';
+  if (!hasPin()) txt += ' • כדי לאכוף אותה יש להגדיר סיסמת הורה';
+  info.textContent = txt;
 }
 
 // אזהרת מצב "רק תוכנות מאושרות" — בולטת כשהמצב פעיל תמיד (סוגר הכל).
@@ -1219,10 +1299,13 @@ function renderWebsiteApps() {
   if (apps.length === 0) {
     const empty = document.createElement('div');
     empty.className = 'override-empty';
-    empty.textContent = 'לא הוגדרו אתרים מאושרים — הוסיפו אתר כדי לפתוח אותו בדפדפן נעול';
+    empty.textContent = websiteModeBlocklist()
+      ? 'לא הוגדרו אתרים חסומים — כל האתרים פתוחים בדפדפן המוגבל'
+      : 'לא הוגדרו אתרים מאושרים — הוסיפו אתר כדי לפתוח אותו בדפדפן נעול';
     list.appendChild(empty);
     return;
   }
+  const blocklist = websiteModeBlocklist();
   apps.forEach((app, i) => {
     const row = document.createElement('div');
     row.className = 'override-row allowed-app-row';
@@ -1230,6 +1313,13 @@ function renderWebsiteApps() {
     info.className = 'override-info';
     const name = document.createElement('strong');
     name.textContent = app.name;
+    if (blocklist) {
+      const badge = document.createElement('span');
+      badge.className = 'app-badge danger';
+      badge.textContent = 'חסום';
+      name.appendChild(document.createTextNode(' '));
+      name.appendChild(badge);
+    }
     info.appendChild(name);
     (app.urls || []).forEach((u) => {
       const url = document.createElement('span');
@@ -1243,10 +1333,11 @@ function renderWebsiteApps() {
     openBtn.textContent = 'פתח';
     openBtn.title = 'פתיחת האתר בדפדפן נעול';
     openBtn.onclick = async () => {
-      if (!API || !API.openWebsiteApp) { toast('פתיחה זמינה רק בגרסת המחשב המלאה'); return; }
+      if (!API || !API.openWebsiteApp) { toast('פתיחה זמינה רק בגרסת המחשב המלאה'); return; };
       const r = await API.openWebsiteApp(app.name);
       if (r && !r.ok) toast(r.error || 'פתיחת האתר נכשלה', 'error');
     };
+    // במצב רשימת חסימה אין משמעות לפתיחת אתר חסום — מציגים רק את הרשימה
 
     const addUrlBtn = document.createElement('button');
     addUrlBtn.className = 'btn btn-ghost btn-sm';
@@ -1274,7 +1365,8 @@ function renderWebsiteApps() {
       persist();
     };
 
-    row.append(info, openBtn, addUrlBtn, del);
+    if (blocklist) row.append(info, del);
+    else row.append(info, openBtn, addUrlBtn, del);
     list.appendChild(row);
   });
 }
@@ -1790,7 +1882,43 @@ function init() {
     };
   }
 
-  /* ---------- אתרים מאושרים (אתר נעול) ---------- */
+  /* ---------- אתרים בדפדפן המוגבל (רשימת היתר / רשימת חסימה) ---------- */
+  if ($('websiteModeSelect')) {
+    $('websiteModeSelect').onchange = async () => {
+      const desired = $('websiteModeSelect').value === 'blocklist' ? 'blocklist' : 'allowlist';
+      if (!(await verifyPinSession())) { $('websiteModeSelect').value = websiteModeBlocklist() ? 'blocklist' : 'allowlist'; return; }
+      schedule.websiteMode = desired;
+      updateWebsiteModeUI();
+      renderWebsiteApps();
+      await persist();
+      toast(desired === 'blocklist'
+        ? 'מצב רשימת חסימה: כל האתרים פתוחים חוץ מהרשימה'
+        : 'מצב רשימת היתר: רק האתרים שברשימה פתוחים', 'success');
+    };
+  }
+  if ($('websiteHomeUrl')) {
+    $('websiteHomeUrl').addEventListener('change', async () => {
+      if (!(await verifyPinSession())) { $('websiteHomeUrl').value = schedule.websiteHomeUrl || ''; return; }
+      const raw = $('websiteHomeUrl').value.trim();
+      const normalized = raw ? (T.normalizeUrl ? T.normalizeUrl(raw) : raw) : '';
+      if (raw && !normalized) {
+        toast('כתובת לא תקינה — הזינו כתובת אתר מלאה (למשל example.com)', 'error');
+        $('websiteHomeUrl').value = schedule.websiteHomeUrl || '';
+        return;
+      }
+      schedule.websiteHomeUrl = normalized || '';
+      $('websiteHomeUrl').value = normalized || '';
+      await persist();
+      toast('כתובת הבית של הדפדפן נשמרה', 'success');
+    });
+  }
+  if ($('openWebsiteBrowserBtn')) {
+    $('openWebsiteBrowserBtn').onclick = async () => {
+      if (!API || !API.openWebsiteBrowser) { toast('זמין רק בגרסת המחשב המלאה'); return; }
+      const r = await API.openWebsiteBrowser();
+      if (r && !r.ok) toast(r.error || 'פתיחת הדפדפן נכשלה', 'error');
+    };
+  }
   if ($('addWebsiteAppBtn')) {
     $('addWebsiteAppBtn').onclick = async () => {
       if (!(await verifyPinSession())) return;
@@ -1806,8 +1934,53 @@ function init() {
       urlEl.value = '';
       renderWebsiteApps();
       await persist();
-      toast('האתר נוסף לרשימת האתרים המאושרים', 'success');
+      toast(websiteModeBlocklist() ? 'האתר נוסף לרשימת החסימה' : 'האתר נוסף לרשימת האתרים המאושרים', 'success');
     };
+  }
+
+  /* ---------- מכסת זמן שימוש יומית ---------- */
+  if ($('dailyLimitToggle')) {
+    $('dailyLimitToggle').onchange = async () => {
+      const desired = $('dailyLimitToggle').checked;
+      if (!(await verifyPinSession())) { $('dailyLimitToggle').checked = !!(schedule.dailyLimit && schedule.dailyLimit.enabled); return; }
+      // מכסת זמן יומית היא מדיניות חסימה: בלי סיסמת הורה היא אינה נאכפת,
+      // והתהליך הראשי דוחה שמירה כזו. לא מאפשרים להדליק אותה סתם.
+      if (desired && !hasPin()) {
+        // מחזירים את המתג למצב האמיתי שבהגדרות (ולא סתם ל"כבוי") כדי שלא
+        // ייווצר פער בין מה שרואים למה ששמור
+        $('dailyLimitToggle').checked = !!(schedule.dailyLimit && schedule.dailyLimit.enabled);
+        toast('כדי להפעיל מכסת זמן יומית יש להגדיר קודם סיסמת הורה', 'error');
+        return;
+      }
+      if (!schedule.dailyLimit) schedule.dailyLimit = { enabled: false, minutes: 60 };
+      if (desired && !(Number(schedule.dailyLimit.minutes) > 0)) schedule.dailyLimit.minutes = 60;
+      schedule.dailyLimit.enabled = desired;
+      $('dailyLimitMinutes').value = schedule.dailyLimit.minutes;
+      updateDailyLimitUI();
+      const saved = await persist();
+      if (!saved) { await restoreScheduleFromServer(); return; }
+      refreshStatus();
+      toast(desired ? 'מכסת זמן שימוש יומית הופעלה' : 'מכסת זמן שימוש יומית כובתה', 'success');
+    };
+  }
+  if ($('dailyLimitMinutes')) {
+    $('dailyLimitMinutes').addEventListener('change', async () => {
+      if (!(await verifyPinSession())) { $('dailyLimitMinutes').value = (schedule.dailyLimit && schedule.dailyLimit.minutes) || 60; return; }
+      const minutes = Math.max(0, Math.min(1440, Math.round(Number($('dailyLimitMinutes').value) || 0)));
+      if (!schedule.dailyLimit) schedule.dailyLimit = { enabled: false, minutes: 60 };
+      schedule.dailyLimit.minutes = minutes;
+      // הפעלה אוטומטית של המכסה מותרת רק כשיש סיסמת הורה (אחרת התהליך הראשי
+      // דוחה את השמירה). בלי סיסמה רק מספר הדקות מתעדכן.
+      if (minutes > 0 && !schedule.dailyLimit.enabled && hasPin()) schedule.dailyLimit.enabled = true;
+      $('dailyLimitMinutes').value = schedule.dailyLimit.minutes;
+      if ($('dailyLimitToggle')) $('dailyLimitToggle').checked = schedule.dailyLimit.enabled === true;
+      updateDailyLimitUI();
+      const saved = await persist();
+      if (!saved) { await restoreScheduleFromServer(); return; }
+      refreshStatus();
+      updateDailyLimitUI();
+      toast('מכסת הזמן היומית נשמרה: ' + minutes + ' דקות ביום', 'success');
+    });
   }
 
   /* ---------- פרופילים (לפי משתמש Windows) ---------- */
@@ -1834,6 +2007,9 @@ function init() {
         allowedAppsEnabled: schedule.allowedAppsEnabled !== false,
         studyMode: clone(schedule.studyMode || { enabled: false, scope: 'blocked' }),
         websiteApps: clone(schedule.websiteApps || []),
+        websiteMode: websiteModeBlocklist() ? 'blocklist' : 'allowlist',
+        websiteHomeUrl: schedule.websiteHomeUrl || '',
+        dailyLimit: clone(schedule.dailyLimit || { enabled: false, minutes: 60 }),
         fileExplorer: clone(schedule.fileExplorer || {})
       };
       if (!schedule.profiles) schedule.profiles = [];

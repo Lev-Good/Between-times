@@ -48,6 +48,7 @@ function makeMock(config) {
     readyCallbacks: [],
     windowsCreated: 0,
     windows: [],
+    views: [],          // WebContentsView שנוצרו (דפדפן מוגבל)
     notifications: [],
     tooltips: [],
     focusCalls: []      // קריאות focus() על חלונות — לבדיקת גניבת פוקוס
@@ -117,14 +118,19 @@ function makeMock(config) {
         loadURL: () => {}
       };
       this.blockDisplayId = null;
+      this.contentView = { addChildView: () => {}, removeChildView: () => {} };
     }
     isDestroyed() { return !!this._destroyed; }
     on(ev, cb) { (this._listeners[ev] = this._listeners[ev] || []).push(cb); }
     emit(ev, arg) { (this._listeners[ev] || []).forEach((l) => l(arg)); }
     show() { this.visible = true; }
-    focus() { state.focusCalls.push(this); }
+    focus() { state.focusCalls.push(this); MockBrowserWindow._focused = this; }
     hide() { this.visible = false; }
-    destroy() { this._destroyed = true; this.emit('closed'); }
+    destroy() {
+      this._destroyed = true;
+      if (MockBrowserWindow._focused === this) MockBrowserWindow._focused = null;
+      this.emit('closed');
+    }
     setAlwaysOnTop(flag) { this.alwaysOnTop = !!flag; }
     setVisibleOnAllWorkspaces() {}
     loadFile() {}
@@ -132,7 +138,36 @@ function makeMock(config) {
     restore() {}
     isMinimized() { return false; }
     isVisible() { return !!this.visible; }
+    isFocused() { return MockBrowserWindow._focused === this; }
+    getContentBounds() { return { x: 0, y: 0, width: 1200, height: 800 }; }
     setBackgroundColor() {}
+    static getFocusedWindow() { return MockBrowserWindow._focused || null; }
+  }
+  MockBrowserWindow._focused = null;
+
+  // WebContentsView — תוכן הרשת של הדפדפן המוגבל (מצב רשימת חסימה)
+  class MockWebContentsView {
+    constructor(opts) {
+      this.opts = opts || {};
+      this._listeners = {};
+      this.bounds = null;
+      this.loadedUrls = [];
+      this.webContents = {
+        _url: '',
+        _title: '',
+        on: (ev, cb) => { (this._listeners[ev] = this._listeners[ev] || []).push(cb); },
+        emit: (ev, ...args) => { (this._listeners[ev] || []).forEach((l) => l(...args)); },
+        loadURL: (u) => { this.loadedUrls.push(u); this.webContents._url = u; },
+        getURL: () => this.webContents._url,
+        getTitle: () => this.webContents._title,
+        setWindowOpenHandler: (fn) => { this.windowOpenHandler = fn; },
+        reload: () => {},
+        close: () => {},
+        navigationHistory: { canGoBack: () => false, goBack: () => {} }
+      };
+      state.views.push(this);
+    }
+    setBounds(b) { this.bounds = b; }
   }
 
   const electron = {
@@ -145,9 +180,12 @@ function makeMock(config) {
       exit: () => { state.exitCalled = true; },
       whenReady: () => ({ then: (cb) => { state.readyCallbacks.push(cb); } }),
       setAppUserModelId: () => {},
-      on: () => {}
+      listeners: {},
+      on: function (ev, cb) { (this.listeners[ev] = this.listeners[ev] || []).push(cb); },
+      emit: function (ev, ...args) { (this.listeners[ev] || []).forEach((cb) => cb(...args)); }
     },
     BrowserWindow: MockBrowserWindow,
+    WebContentsView: MockWebContentsView,
     Tray: class {
       setToolTip(t) { state.tooltips.push(String(t || '')); }
       setContextMenu() {}
@@ -273,6 +311,8 @@ test.after(() => {
   global.setInterval = realSetInterval;
 });
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 function blockNowSchedule() {
   const now = new Date();
   const day = now.getDay();
@@ -280,6 +320,11 @@ function blockNowSchedule() {
   settings.pinHash = S.sha256Hex('1234');
   for (let d = 0; d < 7; d++) settings.week[d].slots.push({ start: 0, end: 1440, type: 'blocked' });
   return settings;
+}
+
+// חלונות מסך החסימה שעוד חיים (אחד לכל מסך)
+function liveBlockWindows(m) {
+  return m.state.windows.filter((w) => w.blockDisplayId === 1 && !w.isDestroyed());
 }
 
 /* ================= Netblock Reconciliation Edge Cases ================= */
@@ -1354,6 +1399,219 @@ test('locked site: open by index works and rejects unknown / url-less sites', as
   assert.ok((await m.ipcHandlers.get('website-apps:open')({}, 0)).ok, 'open by index 0');
   const bad = await m.ipcHandlers.get('website-apps:open')({}, 'לא קיים');
   assert.equal(bad.ok, false, 'unknown site rejected');
+  m.cleanup();
+});
+
+/* ================= דפדפן מוגבל — מצב "כל האתרים פתוחים חוץ מהרשימה" ================= */
+
+test('website blocklist: opening a site from the list opens the restricted browser', async () => {
+  const settings = S.defaultSchedule();
+  settings.pinHash = S.sha256Hex('1234');
+  settings.websiteMode = 'blocklist';
+  settings.websiteApps = [{ name: 'אתר חסום', urls: ['https://example.com'] }];
+  const m = loadMain({ settings });
+  await m.ready();
+  const res = await m.ipcHandlers.get('website-apps:open')({}, 0);
+  assert.ok(res.ok, JSON.stringify(res));
+  assert.equal(m.state.views.length, 1, 'נוצר WebContentsView אחד לדפדפן המוגבל');
+  const view = m.state.views[0];
+  assert.equal(view.opts.webPreferences.contextIsolation, true, 'contextIsolation חייב להיות true');
+  assert.equal(view.opts.webPreferences.nodeIntegration, false, 'nodeIntegration חייב להיות false');
+  assert.equal(view.opts.webPreferences.sandbox, true, 'sandbox חייב להיות true');
+  assert.ok(!view.opts.webPreferences.preload, 'לתוכן רשתי אין preload');
+  assert.ok(view.bounds && view.bounds.y > 0, 'התוכן ממוקם מתחת לשורת הכתובת');
+  m.cleanup();
+});
+
+test('website blocklist: navigation to a listed host is blocked, other hosts stay open', async () => {
+  const settings = S.defaultSchedule();
+  settings.pinHash = S.sha256Hex('1234');
+  settings.websiteMode = 'blocklist';
+  settings.websiteApps = [{ name: 'אתר חסום', urls: ['https://example.com'] }];
+  const m = loadMain({ settings });
+  await m.ready();
+  await m.ipcHandlers.get('website-browser:open')({});
+  const view = m.state.views[0];
+  let blocked = 0;
+  let allowed = 0;
+  view.webContents.emit('will-navigate', { preventDefault: () => blocked++ }, 'https://example.com/news');
+  view.webContents.emit('will-navigate', { preventDefault: () => allowed++ }, 'https://example.com.evil.org/x');
+  view.webContents.emit('will-navigate', { preventDefault: () => allowed++ }, 'https://other.org/page');
+  assert.equal(blocked, 1, 'ניווט לאתר שברשימת החסימה נחסם (כולל תת-מתחמים)');
+  assert.equal(allowed, 0, 'כל שאר האתרים פתוחים');
+  const denied = view.windowOpenHandler({ url: 'https://example.com/popup' });
+  assert.equal(denied.action, 'deny', 'פתיחת חלון חדש נדחית');
+  m.cleanup();
+});
+
+test('website blocklist during a block: the browser stays visible and the block screen returns after closing it', async () => {
+  const settings = blockNowSchedule();
+  settings.websiteMode = 'blocklist';
+  settings.websiteApps = [{ name: 'אתר חסום', urls: ['https://example.com'] }];
+  const m = loadMain({ settings });
+  await m.ready();
+  await sleep(80);
+  assert.ok(liveBlockWindows(m).length > 0, 'מסך החסימה מוצג בזמן חסימה');
+  const res = await m.ipcHandlers.get('website-browser:open')({});
+  assert.ok(res.ok, JSON.stringify(res));
+  assert.equal(liveBlockWindows(m).length, 0, 'מסך החסימה מוסתר כשהדפדפן המוגבל פתוח — האתר לא נעלם מאחוריו');
+  const browserWin = m.state.windows.find((w) => w.title && w.title.indexOf('דפדפן מוגבל') >= 0);
+  assert.ok(browserWin && browserWin.isVisible(), 'חלון הדפדפן גלוי ובחזית');
+  browserWin.destroy();
+  await sleep(2200);
+  assert.ok(liveBlockWindows(m).length > 0, 'החסימה חוזרת מיד אחרי סגירת הדפדפן');
+  m.cleanup();
+});
+
+test('locked site (allowlist) during a block: the approved site window is not hidden behind the block screen', async () => {
+  const settings = blockNowSchedule();
+  settings.websiteApps = [{ name: 'לימוד', urls: ['https://hebrewbooks.org'] }];
+  const m = loadMain({ settings });
+  await m.ready();
+  await sleep(80);
+  assert.ok(liveBlockWindows(m).length > 0, 'מסך החסימה מוצג בזמן חסימה');
+  const res = await m.ipcHandlers.get('website-apps:open')({}, 'לימוד');
+  assert.ok(res.ok, JSON.stringify(res));
+  assert.equal(liveBlockWindows(m).length, 0, 'האתר המאושר מוצג מעל — מסך החסימה מוסתר');
+  m.cleanup();
+});
+
+/* ================= מכסת זמן שימוש יומית ================= */
+
+test('daily limit: an exhausted quota blocks the computer and reports limitReached', async () => {
+  const settings = S.defaultSchedule();
+  settings.pinHash = S.sha256Hex('1234');
+  settings.dailyLimit = { enabled: true, minutes: 30 };
+  const m = loadMain({ settings });
+  // שימוש יומי שכבר נוצל היום (כמו קובץ usage.json שנשמר לפני אתחול המחשב)
+  seedUsage(m, 30 * 60 + 5);
+  await m.ready();
+  const st = await m.ipcHandlers.get('status:get')({});
+  assert.equal(st.state, 'blocked', 'מכסה שנוצלה חוסמת את המחשב');
+  assert.equal(st.warning, false, 'אין אזהרה כשהמכסה כבר נגמרה (המחשב חסום)');
+  assert.equal(st.limitReached, true, 'המכסה מדווחת כנגמרת');
+  assert.equal(st.dailyLimit.minutes, 30, 'המכסה המדווחת היא שהוגדרה');
+  assert.equal(st.dailyLimit.remainingSeconds, 0, 'לא נותר זמן היום');
+  await sleep(80);
+  assert.ok(liveBlockWindows(m).length > 0, 'מסך החסימה מוצג כשהמכסה נגמרה');
+  m.cleanup();
+});
+
+// הזנת שימוש יומי קיים לקובץ usage.json (לפני עליית התוכנה)
+function seedUsage(m, usedSeconds, day) {
+  fs.writeFileSync(path.join(m.tmpRoot, 'userData', 'usage.json'),
+    JSON.stringify({ day: day || S.dateKey(new Date()), seconds: usedSeconds }), 'utf8');
+}
+
+test('daily limit: a warning with a live countdown is raised before the quota runs out', async () => {
+  const settings = S.defaultSchedule();
+  settings.pinHash = S.sha256Hex('1234');
+  settings.warnMinutes = 5;
+  settings.dailyLimit = { enabled: true, minutes: 30 };
+  const m = loadMain({ settings });
+  seedUsage(m, 27 * 60); // נותרו 3 דקות — בתוך חלון האזהרה של 5 דקות
+  await m.ready();
+  const st = await m.ipcHandlers.get('status:get')({});
+  assert.equal(st.state, 'allowed', 'המחשב עדיין פתוח');
+  assert.equal(st.warning, true, 'מופעלת אזהרה לפני גמר מכסת הזמן היומית');
+  assert.equal(st.warningReason, 'limit', 'סיבת האזהרה היא המכסה היומית');
+  assert.ok(st.warningSeconds > 0 && st.warningSeconds <= 3 * 60,
+    'הספירה לאחור היא הזמן שנותר במכסה: ' + st.warningSeconds);
+  assert.equal(st.next, 'blocked', 'המעבר הבא שהוצג הוא לחסימה (גמר המכסה)');
+  assert.ok(st.nextAt && st.nextAtLabel, 'מועד החסימה הבא מוצג למשתמש');
+  await sleep(80);
+  assert.equal(m.state.notifications.length, 1, 'נשלחת התראת Windows אחת על סיום המכסה');
+  // אכיפה חוזרת לא שולחת את ההתראה שוב
+  m.electron.powerMonitor.emit('resume');
+  await sleep(80);
+  assert.equal(m.state.notifications.length, 1, 'ההתראה נשלחת פעם אחת בלבד');
+  m.cleanup();
+});
+
+test('daily limit: no warning while the remaining quota is far from ending', async () => {
+  const settings = S.defaultSchedule();
+  settings.pinHash = S.sha256Hex('1234');
+  settings.warnMinutes = 5;
+  settings.dailyLimit = { enabled: true, minutes: 30 };
+  const m = loadMain({ settings });
+  seedUsage(m, 10 * 60); // נותרו 20 דקות
+  await m.ready();
+  const st = await m.ipcHandlers.get('status:get')({});
+  assert.equal(st.warning, false, 'אין אזהרה כשהמכסה רחוקה מסיומה');
+  assert.equal(st.warningReason, null);
+  assert.equal(st.dailyLimit.remainingSeconds, 20 * 60, 'הזמן שנותר מדווח לממשק');
+  m.cleanup();
+});
+
+test('daily limit: the schedule warning still wins when it expires sooner than the quota', async () => {
+  const settings = S.defaultSchedule();
+  settings.pinHash = S.sha256Hex('1234');
+  settings.warnMinutes = 60; // חלון אזהרה גדול — שתי האזהרות "בתוך החלון"
+  settings.dailyLimit = { enabled: true, minutes: 60 };
+  // הלוח חוסם את המחשב בעוד ~2 דקות — קרוב יותר מגמר המכסה (50 דקות)
+  const now = new Date();
+  const inTwoMin = new Date(now.getTime() + 2 * 60000);
+  const startMin = inTwoMin.getHours() * 60 + inTwoMin.getMinutes();
+  settings.week[now.getDay()].slots.push({ start: startMin === 0 ? 1 : startMin, end: 1439, type: 'blocked' });
+  const m = loadMain({ settings });
+  seedUsage(m, 10 * 60);
+  await m.ready();
+  const st = await m.ipcHandlers.get('status:get')({});
+  assert.equal(st.warning, true, 'אזהרה פעילה');
+  assert.equal(st.warningReason, 'schedule', 'הסיבה היא הלוח ולא המכסה');
+  assert.equal(st.next, 'blocked');
+  assert.ok(st.warningSeconds <= 2 * 60 + 5, 'הספירה לאחור היא של הלוח (המועד הקרוב): ' + st.warningSeconds);
+  await sleep(80);
+  assert.equal(m.state.notifications.length, 1, 'התראה אחת');
+  assert.equal(m.state.notifications[0].o.title, 'המחשב עומד להיחסם', 'ההתראה מתייחסת לחסימה של הלוח');
+  m.cleanup();
+});
+
+test('daily limit: the Windows notification for the quota warning names the daily quota', async () => {
+  const settings = S.defaultSchedule();
+  settings.pinHash = S.sha256Hex('1234');
+  settings.warnMinutes = 5;
+  settings.dailyLimit = { enabled: true, minutes: 30 };
+  const m = loadMain({ settings });
+  seedUsage(m, 29 * 60);
+  await m.ready();
+  await sleep(80);
+  assert.equal(m.state.notifications.length, 1, 'התראה אחת');
+  assert.equal(m.state.notifications[0].o.title, 'מכסת הזמן היומית עומדת להסתיים');
+  assert.ok(/מכסת הזמן|הזמן שהוגדר/.test(m.state.notifications[0].o.body), 'גוף ההתראה מתייחס למכסה היומית');
+  m.cleanup();
+});
+
+test('daily limit: usage from a previous day is reset and does not block', async () => {
+  const settings = S.defaultSchedule();
+  settings.pinHash = S.sha256Hex('1234');
+  settings.dailyLimit = { enabled: true, minutes: 30 };
+  const m = loadMain({ settings });
+  fs.writeFileSync(path.join(m.tmpRoot, 'userData', 'usage.json'),
+    JSON.stringify({ day: '2020-01-01', seconds: 9999 }), 'utf8');
+  await m.ready();
+  const st = await m.ipcHandlers.get('status:get')({});
+  assert.equal(st.state, 'allowed', 'שימוש של יום קודם אינו נספר להיום');
+  assert.equal(st.limitReached, false);
+  assert.equal(st.dailyLimit.usedSeconds, 0, 'המכסה מתאפסת ביום חדש');
+  m.cleanup();
+});
+
+/* ================= הפעלה עם Windows — בלי חלון קופץ ================= */
+
+test('second-instance from Windows startup never opens the settings window', async () => {
+  const m = loadMain({});
+  await m.ready();
+  const settingsWin = m.state.windows.find((w) => w.title && w.title.indexOf('ניהול זמן מחשב') >= 0);
+  assert.ok(settingsWin, 'חלון ההגדרות נוצר (מוסתר) באתחול');
+  const handlers = (m.electron.app.listeners || {})['second-instance'] || [];
+  assert.ok(handlers.length > 0, 'מאזין second-instance נרשם');
+  // הפעלה כפולה של מנגנוני ההפעלה עם Windows — חייבת להישאר שקטה לגמרי
+  handlers[0](null, ['app.exe', 'app', '--autostart']);
+  assert.equal(settingsWin.isVisible(), false, 'הפעלה של Windows אינה פותחת חלון על המסך');
+  // הפעלה מפורשת של המשתמש — פותחת את חלון ההגדרות
+  handlers[0](null, ['app.exe', 'app']);
+  assert.equal(settingsWin.isVisible(), true, 'הפעלה של המשתמש כן פותחת את ההגדרות');
   m.cleanup();
 });
 

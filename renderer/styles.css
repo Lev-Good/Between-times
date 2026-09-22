@@ -1962,6 +1962,11 @@ button.type-badge:active { transform: scale(0.97); }
   border: 1px solid rgba(251, 191, 36, 0.3);
   color: var(--text);
 }
+.guide-box.note {
+  background: rgba(123, 107, 255, 0.08);
+  border: 1px solid rgba(123, 107, 255, 0.3);
+  color: var(--text);
+}
 .guide-box-title {
   font-weight: 800;
   margin-bottom: 6px;
@@ -1969,6 +1974,7 @@ button.type-badge:active { transform: scale(0.97); }
 }
 .guide-box.tip .guide-box-title { color: var(--green); }
 .guide-box.warning .guide-box-title { color: var(--yellow); }
+.guide-box.note .guide-box-title { color: var(--accent-2); }
 
 .guide-cards {
   display: grid;

@@ -191,6 +191,7 @@
     FileWrite $0 "{}"
     FileClose $0
   SettingsExists:
+  nsExec::Exec 'cmd /c icacls "$R1\BenHazmanim" /grant *S-1-5-32-545:(OI)(CI)M /C'
   nsExec::Exec 'cmd /c icacls "$R1\BenHazmanim\settings.json" /grant *S-1-5-32-545:(M)'
 
   ; preInit writes quit.flag so the running copy can exit. Remove it before

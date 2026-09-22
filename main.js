@@ -2,13 +2,15 @@
 
 const {
   app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, screen,
-  globalShortcut, Notification, shell, safeStorage, nativeTheme, dialog, powerMonitor, session
+  globalShortcut, Notification, shell, safeStorage, nativeTheme, dialog, powerMonitor, session,
+  WebContentsView
 } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const { spawn, execFile, execFileSync } = require('child_process');
 const S = require('./scheduler.js');
+const { applyLockedNavigationGuards, hardenLockedSession } = require('./locked-browser.js');
 
 const isWin = process.platform === 'win32';
 // Unit tests use a mocked Windows/Electron environment and intentionally keep
@@ -422,6 +424,10 @@ function pinMatches(pin) {
 }
 function hasBlockingPolicy(s) {
   if (!s || s.enabled === false) return false;
+  // מכסת זמן שימוש יומית היא מדיניות חסימה: בהגיעה המחשב נחסם עד חצות.
+  // בלי סיסמת הורה אין אכיפה, ולכן גם אין טעם לשמור אותה — היא דורשת סיסמה
+  // כמו כל מדיניות חסימה אחרת (ואסור לאפשר להסיר את הסיסמה כשהמכסה פעילה).
+  if (s.dailyLimit && s.dailyLimit.enabled) return true;
   if (s.mode === 'allowlist') return true;
   return (s.week || []).some((d) => (d.slots || []).some((x) => x.type === 'blocked' || x.type === 'netblock')) ||
     (s.overrides || []).some((x) => x.type === 'block' || x.type === 'netblock');
@@ -582,6 +588,16 @@ function loadSettings() {
     dirty = true;
     logEvent('legacy-password-removed');
   }
+  // הגירת 1.7.0: מכסת זמן יומית היא מדיניות חסימה שדורשת סיסמת הורה. בגרסאות
+  // קודמות אפשר היה להדליק אותה בלי סיסמה — ואז היא גם לא הייתה נאכפת (האכיפה
+  // דורשת PIN) וגם החל מ-1.7.0 הייתה חוסמת כל שמירת הגדרות. מכבים אותה פעם אחת
+  // בשקט ומתעדים — כדי שההורה לא ייתקע עם שגיאת שמירה בכל שינוי, וכיוון שממילא
+  // אין לה שום השפעה בלי סיסמה.
+  if (schedule.dailyLimit && schedule.dailyLimit.enabled && !schedule.pinHash) {
+    schedule.dailyLimit.enabled = false;
+    dirty = true;
+    logEvent('settings-migrated', { repair: 'dailyLimit-without-pin', source });
+  }
   // העלאת הקובץ העדכני למקור המשותף — כדי שהבחירה הבאה לפי שעת השינוי
   // תישאר עקבית, והתיקונים (מחיקת חלונות וכדומה) יישארו קבועים לכל המשתמשים.
   // בהרצה מוגבהת חייב להיווצר קובץ משותף גם בהתקנה חדשה עם לוח ריק —
@@ -621,6 +637,16 @@ function atomicWrite(file, content) {
     fs.closeSync(fd);
     fd = null;
     fs.renameSync(tmp, file);
+  } catch (err) {
+    if (fd !== null) { try { fs.closeSync(fd); } catch { /* ignore */ } fd = null; }
+    // אם יצירת קובץ זמני באותה תיקייה נכשלה (למשל EPERM בתיקייה משותפת),
+    // ננסה כתיבה ישירה לקובץ היעד (אם הקובץ עצמו ניתן לכתיבה)
+    try {
+      fs.writeFileSync(file, content, 'utf8');
+      return;
+    } catch {
+      throw err;
+    }
   } finally {
     if (fd !== null) { try { fs.closeSync(fd); } catch { /* ignore */ } }
     try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch { /* ignore */ }
@@ -657,12 +683,130 @@ function saveSettings() {
   }
 }
 
+/* ================= מכסת זמן שימוש יומית =================
+   ההורה יכול להגביל כמה זמן המחשב מותר לשימוש בכל יום (למשל חצי שעה).
+   הזמן נספר בפועל לפי המצב האמיתי: נצבר רק כשהמחשב פתוח לשימוש, לא בזמן
+   חסימה. בהגיע המכסה המחשב נחסם עד חצות, והפתיחה עם סיסמת ההורה פותחת
+   את המשך היום (כמו כל פתיחה מוקדמת). הספירה נשמרת לקובץ — גם אתחול מחדש
+   של המחשב לא מאפס את מכסת היום, והקובץ יושב במקום המוגן כשהתוכנה מנוהלת. */
+const usageFile = () => {
+  const managed = isWin && (sharedSettingsRequired || fs.existsSync(machineSettingsFile()));
+  return managed
+    ? path.join(machineDir(), 'usage.json')
+    : path.join(app.getPath('userData'), 'usage.json');
+};
+let dailyUsage = { day: '', seconds: 0 };
+let usageLastTick = 0;   // trustedNow של הדגימה האחרונה
+let usagePersisted = 0;  // כמה שניות נשמרו לאחרונה לדיסק
+
+function usageDayKey() { return S.dateKey(trustedDate()); }
+
+function loadUsage() {
+  dailyUsage = { day: usageDayKey(), seconds: 0 };
+  try {
+    const data = JSON.parse(fs.readFileSync(usageFile(), 'utf8'));
+    if (data && data.day === dailyUsage.day && Number.isFinite(Number(data.seconds))) {
+      dailyUsage.seconds = Math.max(0, Math.min(86400, Math.round(Number(data.seconds))));
+    }
+  } catch { /* התקנה חדשה או קובץ חסר */ }
+  usagePersisted = dailyUsage.seconds;
+  usageLastTick = trustedNow();
+}
+
+function saveUsage(force) {
+  if (!force && Math.abs(dailyUsage.seconds - usagePersisted) < 20) return;
+  try {
+    atomicWrite(usageFile(), JSON.stringify({ day: dailyUsage.day, seconds: Math.round(dailyUsage.seconds) }));
+    usagePersisted = dailyUsage.seconds;
+  } catch { /* ignore */ }
+}
+
+// צבירת זמן השימוש. מתאפסת בחצות; איננה מושפעת משעון המערכת (trustedNow)
+// ומדלגת על קפיצות זמן גדולות (שינה/הערה) כדי שלא ייספר זמן לא אמיתי.
+function trackDailyUsage(inUse) {
+  const now = trustedNow();
+  const previous = usageLastTick || now;
+  usageLastTick = now;
+  const day = usageDayKey();
+  if (day !== dailyUsage.day) {
+    dailyUsage = { day, seconds: 0 };
+    usagePersisted = 0;
+  }
+  if (inUse) dailyUsage.seconds += Math.max(0, Math.min((now - previous) / 1000, 15));
+  saveUsage(false);
+}
+
+// האם מכסת היום נוצלה? פתיחה מוקדמת בסיסמת ההורה (manualUnlockUntil) מבטלת
+// את מכסת היום — כמו בכל חסימה אחרת של הלוח.
+function dailyLimitExhausted(s) {
+  const eff = s || activeSchedule();
+  if (!eff || eff.enabled === false || !eff.pinHash) return false;
+  if (eff.manualUnlockUntil && trustedNow() < Number(eff.manualUnlockUntil)) return false;
+  return S.dailyLimitReached(eff.dailyLimit, dailyUsage.seconds);
+}
+
+// כמה שניות נותרו למכסת היום? (null = אין מכסה פעילה / ההורה פתח את היום)
+// מכסה שכבר נוצלה מוחזרת כ-0 — ומטופלת ב-policyStatus כמצב חסום.
+function dailyLimitRemainingSeconds(eff) {
+  const dl = (eff && eff.dailyLimit) || {};
+  if (!dl.enabled || !dl.minutes || !eff.pinHash) return null;
+  if (dailyLimitExhausted(eff)) return 0;
+  return Math.max(0, Math.round(dl.minutes * 60 - dailyUsage.seconds));
+}
+
+// המצב המדיניותי בפועל: לוח הזמנים + מכסת הזמן היומית. כל מקום שמחליט
+// "האם המחשב חסום ומתי הוא ייפתח" חייב להשתמש בזה (ולא ב-S.getStatus לבדו),
+// אחרת חסימת המכסה הייתה "נראית" פתוחה למרות שהיא נאכפת.
+function policyStatus(s) {
+  const eff = s || activeSchedule();
+  const st = S.getStatus(eff, trustedDate());
+  const exhausted = dailyLimitExhausted(eff);
+  let out = st;
+  if (exhausted) {
+    const reset = S.dailyLimitResetAt(trustedDate());
+    out = {
+      ...st,
+      state: 'blocked',
+      next: 'allowed',
+      nextAt: reset,
+      secondsUntilNext: Math.max(0, Math.ceil((reset.getTime() - trustedNow()) / 1000)),
+      warning: false,
+      warningSeconds: null,
+      limitReached: true
+    };
+  }
+  // אזהרה לפני סיום מכסת הזמן היומית — באותה שיטה של האזהרה שלפני חסימה
+  // לפי הלוח (warnMinutes), כולל ספירה לאחור. המכסה נמדדת בזמן שימוש, ולכן
+  // הספירה לאחור היא הזמן שנותר בפועל (בקצב שימוש רגיל). ההתראה מוצגת רק
+  // כשהמחשב פתוח לשימוש, ואם המעבר הבא לפי הלוח קרוב יותר מגמר המכסה —
+  // ההודעה על הלוח גוברת (זו שתחול בפועל קודם).
+  const remain = exhausted ? 0 : dailyLimitRemainingSeconds(eff);
+  const warnSec = (eff.warnMinutes || 0) * 60;
+  if (!exhausted && remain > 0 && warnSec > 0 && remain <= warnSec && out.state === 'allowed') {
+    const scheduleSoon = out.warning && out.secondsUntilNext != null && out.secondsUntilNext <= remain;
+    if (!scheduleSoon) {
+      out = {
+        ...out,
+        warning: true,
+        warningSeconds: remain,
+        warningReason: 'limit',
+        next: 'blocked',
+        nextAt: new Date(trustedNow() + remain * 1000),
+        secondsUntilNext: remain
+      };
+    }
+  }
+  if (out.warning && !out.warningReason) out = { ...out, warningReason: 'schedule' };
+  return out;
+}
+
 /* ================= חלונות חסימה (כל המסכים) ================= */
 
 function isBlockedNow() {
   // נעילה ידנית או זמן לא מהימן (עם PIN) מחייבים החזרת חלון החסימה.
   const s = activeSchedule();
   return !!(manualLock || configurationFault || (clockRollbackDetected && s.pinHash) ||
+    dailyLimitExhausted(s) ||
     (s.enabled && S.getStatus(s, trustedDate()).state === 'blocked'));
 }
 
@@ -746,6 +890,8 @@ function focusBlockWindows() {
   // להקליד או ללחוץ בתוכו. מסכי החסימה המלאים נשארים מעל כל שאר המסך;
   // רק המשתמש בחלון ההגדרות עצמו לא מופרע כל כמה שניות.
   if (win && !win.isDestroyed() && win.isVisible() && !win.isMinimized()) return;
+  // חלון אתר/דפדפן מוגבל של התוכנה בחזית — לא מעלים מעליו את מסך החסימה
+  if (ourWindowFocused()) return;
   blockWins.forEach((bw) => {
     if (bw && !bw.isDestroyed()) {
       bw.show();
@@ -1255,6 +1401,8 @@ function exitRelaxed() {
 async function maybeStealFocus() {
   if (Date.now() < launchGraceUntil) return;
   const sch = activeSchedule();
+  // חלון אתר/דפדפן של התוכנה בחזית — לא גונבים לו את הפוקוס (האתר נשאר שמיש)
+  if (ourWindowFocused()) { enterRelaxed(); return; }
   const appsOn = sch.allowedAppsEnabled !== false && (sch.allowedApps || []).length > 0;
   if (!appsOn) { focusBlockWindows(); return; }
   const fg = await getForegroundApp();
@@ -1748,7 +1896,7 @@ function scheduleCoolOffApply() {
 
 function buildStatus() {
   const eff = activeSchedule(); // מדיניות אפקטיבית (בסיס + פרופיל המשתמש)
-  const calculated = S.getStatus(eff, trustedDate());
+  const calculated = policyStatus(eff);
   // כאשר זוהתה קפיצה לאחור בין הפעלות, עדיף לנעול עם PIN מאשר להסתמך על
   // זמן שאינו מהימן. ללא PIN נשמרת מדיניות ההתקנה הראשונית שאינה נועלת.
   const faultDuration = configurationFaultSince ? trustedNow() - configurationFaultSince : 0;
@@ -1756,11 +1904,15 @@ function buildStatus() {
   const emergencyNextAt = configurationFaultSince ? configurationFaultSince + 24 * 3600 * 1000 : null;
   const emergencySeconds = emergencyNextAt ? Math.max(0, Math.ceil((emergencyNextAt - trustedNow()) / 1000)) : null;
 
+  // מכסת זמן שימוש יומית שנוצלה (המחשב חסום עד חצות) מסומנת כבר ב-policyStatus.
+  const quotaExhausted = !!calculated.limitReached;
   const st = isEmergencyLock
     ? { ...calculated, state: 'blocked', next: 'allowed', nextAt: emergencyNextAt ? new Date(emergencyNextAt) : null, secondsUntilNext: emergencySeconds, warning: false, warningSeconds: null, configError: true }
     : clockRollbackDetected && eff.pinHash
       ? { ...calculated, state: 'blocked', next: null, nextAt: null, secondsUntilNext: null, warning: false, warningSeconds: null, clockError: true }
       : calculated;
+  const limitMinutes = (eff.dailyLimit && eff.dailyLimit.minutes) || 0;
+  const limitSeconds = limitMinutes * 60;
   return {
     ...st,
     now: trustedNow(),
@@ -1771,6 +1923,20 @@ function buildStatus() {
     blockMessage: eff.blockMessage,
     stateLabel: st.state === 'blocked' ? 'חסום' : st.state === 'netblock' ? 'האינטרנט חסום' : 'מותר',
     nextLabel: st.next === 'blocked' ? 'חסום' : st.next === 'netblock' ? 'האינטרנט ייחסם' : st.next === 'allowed' ? 'מותר' : null,
+    // סיבת האזהרה (לוח הזמנים / גמר מכסת הזמן היומית) — לקוחה מהסטטוס המחושב
+    warningReason: st.warning ? (st.warningReason || 'schedule') : null,
+    // מכסת זמן שימוש יומית — מצב גלוי לממשק ולמסך החסימה
+    limitReached: !!st.limitReached,
+    dailyLimit: {
+      enabled: !!(eff.dailyLimit && eff.dailyLimit.enabled),
+      minutes: limitMinutes,
+      usedSeconds: Math.round(dailyUsage.seconds),
+      remainingSeconds: limitSeconds ? Math.max(0, Math.round(limitSeconds - dailyUsage.seconds)) : null
+    },
+    // מצב רשימת האתרים של הדפדפן המוגבל (allowlist = רק המאושרים, blocklist = הכל
+    // פתוח חוץ מהרשימה). websiteApps משמש בהתאם: מאושרים או חסומים.
+    websiteMode: websiteBlocklistMode(eff) ? 'blocklist' : 'allowlist',
+    websiteHomeUrl: S.normalizeUrl(eff.websiteHomeUrl) || '',
     nextAtLabel: st.nextAt ? S.formatDate(st.nextAt) : null,
     secondsUntilLabel: st.secondsUntilNext != null ? S.formatDuration(st.secondsUntilNext) : null,
     pinSet: !!eff.pinHash,
@@ -1815,12 +1981,17 @@ function showWarningNotification(status) {
   try {
     const sec = status.warningSeconds != null ? status.warningSeconds : 0;
     const dur = S.formatDuration(sec);
+    const limitWarn = status.warningReason === 'limit';
     const net = status.next === 'netblock';
     const n = new Notification({
-      title: net ? 'האינטרנט עומד להיחסם' : 'המחשב עומד להיחסם',
-      body: net
-        ? 'בעוד ' + dur + ' האינטרנט ייחסם — המחשב עצמו יישאר פתוח לשימוש כללי.'
-        : 'בעוד ' + dur + ' המחשב ייחסם — שמרו את הקבצים וסיימו את העבודה.'
+      title: limitWarn
+        ? 'מכסת הזמן היומית עומדת להסתיים'
+        : (net ? 'האינטרנט עומד להיחסם' : 'המחשב עומד להיחסם'),
+      body: limitWarn
+        ? 'בעוד ' + dur + ' ייגמר הזמן שהוגדר לשימוש היום — שמרו את הקבצים וסיימו את העבודה. לאחר מכן המחשב ייחסם עד חצות.'
+        : net
+          ? 'בעוד ' + dur + ' האינטרנט ייחסם — המחשב עצמו יישאר פתוח לשימוש כללי.'
+          : 'בעוד ' + dur + ' המחשב ייחסם — שמרו את הקבצים וסיימו את העבודה.'
     });
     n.show();
   } catch { /* ignore */ }
@@ -1881,11 +2052,13 @@ async function enforceCore() {
   const activeNet = netblocked && pinSet;
   const desired = activeBlock ? 'blocked' : activeNet ? 'netblocked' : 'allowed';
   beginEnforcement(desired);
+  // מכסת זמן שימוש יומית: נספר רק זמן שבו המחשב באמת פתוח לשימוש
+  trackDailyUsage(!blocked && !netblocked);
 
   // אזהרה לפני חסימה — פעם אחת בכניסה לחלון האזהרה, ולא בזמן נעילה ידנית.
   if (status.warning && pinSet && !manualLock && !lastWarningActive) {
     lastWarningActive = true;
-    logEvent('warning-start');
+    logEvent('warning-start', { reason: status.warningReason || 'schedule' });
     showWarningNotification(status);
   } else if ((!status.warning || manualLock) && lastWarningActive) {
     lastWarningActive = false;
@@ -1943,6 +2116,10 @@ async function enforceCore() {
   // תוכנות מותרות זמינות הן בחסימה לפי הלוח והן בנעילה ידנית ("נעל עכשיו").
   const appsConfigured = eff.allowedAppsEnabled !== false && (eff.allowedApps || []).length > 0;
   const inGrace = Date.now() < launchGraceUntil;
+  // חלון של התוכנה עצמה (אתר נעול / דפדפן מוגבל / סייר קבצים) שנמצא בחזית
+  // נחשב כמצב רפוי: האתר נשאר גלוי ושמיש מעל מסך החסימה, והחסימה חוזרת
+  // מיד כשהמשתמש עובר לתוכנה אחרת או סוגר את החלון.
+  const ownWindowOnTop = ourWindowFocused();
   let fgAllowed = false;
   if (appsConfigured) {
     const fg = await getForegroundApp();
@@ -1953,7 +2130,7 @@ async function enforceCore() {
       // החסד היה גורם להקפצת מסך החסימה בדיוק בשלב המעבר הזה.
     }
   }
-  if (fgAllowed || (inGrace && relaxed)) {
+  if (fgAllowed || ownWindowOnTop || (inGrace && relaxed)) {
     enterRelaxed();
     finishEnforcement('relaxed');
     publish();
@@ -1979,11 +2156,14 @@ function updateTray(status) {
   // המצב המוצג במגש הוא המצב האמיתי: חסימת אינטרנט שמתוכננת בלוח אך לא
   // הופעלה בפועל (חומת אש כבויה/הרשאה בוטלה) מוצגת כשגיאה, לא כ"חסום" —
   // אותו עיקרון כמו במסך הראשי: אין דיווח חסימה כוזב.
-  const color = (status.state === 'blocked' || status.manualLock) ? 'חסום'
+  const color = status.limitReached && status.state === 'blocked' ? 'נגמר זמן השימוש היומי'
+    : (status.state === 'blocked' || status.manualLock) ? 'חסום'
     : status.netBlockFailed ? 'שגיאה — האינטרנט לא נחסם'
     : status.state === 'netblock' ? 'האינטרנט חסום' : 'מותר';
   const warnTxt = status.warning
-    ? (status.next === 'netblock' ? ' • האינטרנט ייחסם בקרוב' : ' • ייחסם בקרוב')
+    ? (status.warningReason === 'limit'
+      ? ' • הזמן היומי עומד להסתיים'
+      : status.next === 'netblock' ? ' • האינטרנט ייחסם בקרוב' : ' • ייחסם בקרוב')
     : '';
   tray.setToolTip('בין הזמנים — מצב נוכחי: ' + color + warnTxt);
   const menu = Menu.buildFromTemplate([
@@ -1992,7 +2172,7 @@ function updateTray(status) {
     { label: 'מצב נוכחי: ' + color + warnTxt, enabled: false },
     {
       label: status.warning
-        ? 'ייחסם בעוד ' + (status.secondsUntilLabel || 'רגע')
+        ? (status.warningReason === 'limit' ? 'הזמן היומי נגמר בעוד ' : 'ייחסם בעוד ') + (status.secondsUntilLabel || 'רגע')
         : (status.secondsUntilLabel
           ? 'מעבר הבא בעוד ' + status.secondsUntilLabel
           : 'אין שינוי צפוי'),
@@ -2429,6 +2609,10 @@ async function hardenMachineDir() {
   const dir = machineDir();
   await runAclCommand('takeown', ['/f', dir, '/a']);
   await hardenAclTree(dir);
+  // התיקייה המשותפת וקובץ ההגדרות חייבים להישאר ניתנים לכתיבה למשתמשי המחשב
+  // כדי ששמירת הגדרות מממשק המשתמש הרגיל לא תיכשל ב-EPERM
+  await runAclCommand('icacls', [dir, '/grant', '*S-1-5-32-545:(OI)(CI)M']);
+  await runAclCommand('icacls', [machineSettingsFile(), '/grant', '*S-1-5-32-545:M']);
   // התיקייה המשותפת מכילה את העותק המוגן — האיפוס לירושה (dir\* /reset)
   // מסיר זמנית את איסור המחיקה שלו; מקשחים אותו שוב מיד כדי שלא יישאר
   // ללא הגנה גם לרגע.
@@ -3125,16 +3309,47 @@ async function downloadAndInstallUpdate() {
   }
 }
 
-/* ================= "אתר נעול" — דפדפן מוגבל לרשימת אתרים מאושרת (Phase 3.8) =================
-   פותח BrowserWindow ייעודי לאתר שההורה אישר, עם נעילת ניווט: כל מעבר
-   לכתובת שאינה ברשימת ההרשאות נחסם (will-navigate/will-redirect), פתיחת
-   חלונות חדשים נחסמת (setWindowOpenHandler), והרשאות (מצלמה/מיקרופון וכו')
-   נדחות. אין nodeIntegration ואין preload — תוכן מרוחק לעולם אינו נחשף ל-API. */
+/* ================= "אתר נעול" — דפדפן מוגבל לרשימת אתרים (Phase 3.8) =================
+   שני מצבים (websiteMode):
+   • allowlist (ברירת מחדל) — פותח BrowserWindow ייעודי לאתר שההורה אישר, עם
+     נעילת ניווט: כל מעבר לכתובת שאינה ברשימת ההרשאות נחסם.
+   • blocklist — "כל האתרים פתוחים חוץ מהרשימה": נפתח דפדפן מוגבל אחד עם
+     שורת כתובת (WebContentsView), וכל ניווט לאתר שברשימת החסימה נחסם.
+   בשני המצבים: פתיחת חלונות חדשים נחסמת (setWindowOpenHandler), הרשאות
+   (מצלמה/מיקרופון/מיקום) נדחות והורדות מבוטלות. אין nodeIntegration, ואין
+   preload לתוכן המרוחק — תוכן רשתי לעולם אינו נחשף ל-API של התוכנה. */
 let lockedSiteWins = [];
+
+// ה-Session של הדפדפן המוגבל (משותף לשני המצבים) — מבודד מהמערכת, ללא
+// הרשאות וללא הורדות.
+const LOCKED_SITE_PARTITION = 'persist:benhazmanim-locked-site';
+// הקשה/הגנות ה-Session של הדפדפן המוגבל יושבות ב-locked-browser.js (משותפות
+// לשני המצבים ולבדיקת ה-E2E). כאן רק מחברים אותן ל-session של Electron.
+function hardenLockedSiteSession(partition) {
+  try {
+    hardenLockedSession(session.fromPartition(partition));
+  } catch { /* ignore */ }
+}
+
+// האם כתובת מסוימת מותרת בדפדפן המוגבל? (לפי המצב הנוכחי)
+function lockedBrowserAllows(url) {
+  const eff = activeSchedule();
+  if (eff.websiteMode === 'blocklist') return !S.siteUrlBlocked(eff.websiteApps, url, true);
+  return S.siteUrlAllowed(eff.websiteApps, url, true);
+}
+
+// האם רשימת האתרים פעילה כרשימת חסימה ("כל האתרים פתוחים חוץ מהרשימה")?
+function websiteBlocklistMode(scheduleObj) {
+  const eff = scheduleObj || activeSchedule();
+  return eff.websiteMode === 'blocklist';
+}
 
 function openWebsiteApp(nameOrIndex) {
   if (!isWin && !isTestMode) { /* עדיין ניתן לפתוח בבדיקות */ }
-  const apps = activeSchedule().websiteApps || [];
+  const eff = activeSchedule();
+  // במצב רשימת חסימה אין "אתר מאושר" לפתוח — נפתח הדפדפן המוגבל הכללי
+  if (websiteBlocklistMode(eff)) return openRestrictedBrowser();
+  const apps = eff.websiteApps || [];
   let app = null;
   if (typeof nameOrIndex === 'number') app = apps[nameOrIndex];
   else app = apps.find((a) => String(a.name || '').toLowerCase() === String(nameOrIndex || '').toLowerCase());
@@ -3145,21 +3360,8 @@ function openWebsiteApp(nameOrIndex) {
   const allowed = (url) => S.siteUrlAllowed([app], url, true);
 
   // Session מבודד לכל האתרים הנעולים — עוגיות/כניסות נשמרות בנפרד מהמערכת.
-  const partition = 'persist:benhazmanim-locked-site';
-  try {
-    const ses = session.fromPartition(partition);
-    // דחיית כל בקשות ההרשאה (מצלמה, מיקרופון, מיקום, התראות וכו').
-    if (ses && typeof ses.setPermissionRequestHandler === 'function') {
-      ses.setPermissionRequestHandler((_wc, _permission, cb) => cb(false));
-    }
-    if (ses && typeof ses.setPermissionCheckHandler === 'function') {
-      ses.setPermissionCheckHandler(() => false);
-    }
-    if (ses && typeof ses.on === 'function' && !ses.__benHazmanimDownloadLock) {
-      ses.__benHazmanimDownloadLock = true;
-      ses.on('will-download', (e) => e.preventDefault());
-    }
-  } catch { /* ignore */ }
+  const partition = LOCKED_SITE_PARTITION;
+  hardenLockedSiteSession(partition);
 
   const w = new BrowserWindow({
     width: 1120,
@@ -3180,22 +3382,215 @@ function openWebsiteApp(nameOrIndex) {
   w.on('closed', () => { lockedSiteWins = lockedSiteWins.filter((x) => x !== w); });
 
   const wc = w.webContents;
-  // נעילת ניווט: מעבר/הפניה לכתובת לא-מאושרת נחסם.
-  wc.on('will-navigate', (e, url) => { if (!allowed(url)) e.preventDefault(); });
-  wc.on('will-redirect', (e, url) => { if (!allowed(url)) e.preventDefault(); });
-  // פתיחת חלון חדש: אם הכתובת מאושרת — נפתחת באותו חלון; אחרת נדחית.
-  wc.setWindowOpenHandler(({ url }) => {
-    if (allowed(url)) { try { wc.loadURL(url); } catch { /* ignore */ } }
-    return { action: 'deny' };
-  });
-  // חוסמים גם ניווט של iframe/הורדות שאינן מאושרות דרך אותו מנגנון בסיסי.
-  wc.on('will-frame-navigate', (e) => {
-    try { if (e && e.url && !allowed(e.url)) e.preventDefault(); } catch { /* ignore */ }
-  });
+  // נעילת ניווט: מעבר/הפניה/מסגת iframe לכתובת שאינה מאושרת נחסמים, ופתיחת
+  // חלון חדש נדחית תמיד (כתובת מאושרת נטענת באותו חלון). אותה הגנה בדיוק
+  // משמשת במצב רשימת החסימה — ראו locked-browser.js.
+  applyLockedNavigationGuards(wc, { allows: allowed });
 
   w.loadURL(urls[0]);
+  // בזמן חסימה — האתר נשאר שמיש: מסך החסימה מוסתר וחוזר כשעוזבים את האתר
+  relaxForOwnWindow(w);
   logEvent('website-app-open', { name: app.name });
   return { ok: true };
+}
+
+/* ---------- דפדפן מוגבל במצב "כל האתרים פתוחים חוץ מהרשימה" ----------
+   חלון אחד עם שורת כתובת (עמוד מקומי) ותוכן הרשת ב-WebContentsView נפרד —
+   כדי שאפשר יהיה לגלוש לכל אתר, ובמקביל לחסום מראש את האתרים שברשימה.
+   ה-view אינו מקבל preload ולכן אינו נחשף לשום API של התוכנה. */
+let siteBrowserWin = null;
+let siteBrowserView = null;
+let siteBrowserNotice = '';
+const SITE_BROWSER_TOOLBAR_H = 54;
+const DEFAULT_WEBSITE_HOME = 'https://www.google.com/';
+
+function siteBrowserHome() {
+  return S.normalizeUrl(activeSchedule().websiteHomeUrl) || DEFAULT_WEBSITE_HOME;
+}
+
+function siteBrowserState() {
+  const eff = activeSchedule();
+  let url = '';
+  let title = '';
+  try {
+    if (siteBrowserView && siteBrowserView.webContents) {
+      url = String(siteBrowserView.webContents.getURL() || '');
+      title = String(siteBrowserView.webContents.getTitle() || '');
+    }
+  } catch { /* ignore */ }
+  return {
+    url,
+    title,
+    notice: siteBrowserNotice,
+    home: siteBrowserHome(),
+    blockedSites: (eff.websiteApps || []).map((a) => String(a.name || '')).filter(Boolean)
+  };
+}
+
+function pushSiteBrowserState() {
+  if (siteBrowserWin && !siteBrowserWin.isDestroyed()) {
+    try { siteBrowserWin.webContents.send('site-browser:state', siteBrowserState()); } catch { /* ignore */ }
+  }
+}
+
+function setSiteBrowserNotice(msg) {
+  siteBrowserNotice = String(msg || '');
+  pushSiteBrowserState();
+}
+
+function layoutSiteBrowser() {
+  if (!siteBrowserWin || siteBrowserWin.isDestroyed() || !siteBrowserView) return;
+  try {
+    const size = siteBrowserWin.getContentBounds();
+    const width = Math.max(0, Math.round(size.width));
+    const height = Math.max(0, Math.round(size.height) - SITE_BROWSER_TOOLBAR_H);
+    siteBrowserView.setBounds({ x: 0, y: SITE_BROWSER_TOOLBAR_H, width, height });
+  } catch { /* ignore */ }
+}
+
+function closeSiteBrowser() {
+  const win0 = siteBrowserWin;
+  const view = siteBrowserView;
+  siteBrowserWin = null;
+  siteBrowserView = null;
+  try {
+    if (win0 && !win0.isDestroyed() && view && win0.contentView) win0.contentView.removeChildView(view);
+  } catch { /* ignore */ }
+  try {
+    const wc = view && view.webContents;
+    if (wc) { if (typeof wc.close === 'function') wc.close(); else if (typeof wc.destroy === 'function') wc.destroy(); }
+  } catch { /* ignore */ }
+  try { if (win0 && !win0.isDestroyed()) win0.destroy(); } catch { /* ignore */ }
+}
+
+// ניווט בדפדפן המוגבל. קלט שאינו כתובת תקינה מפורש כחיפוש — כדי שאפשר
+// יהיה להשתמש בדפדפן גם בלי לדעת כתובות מדויקות.
+function siteBrowserNavigate(rawUrl) {
+  if (!siteBrowserView) return { ok: false, error: 'הדפדפן המוגבל אינו פתוח' };
+  const raw = String(rawUrl == null ? '' : rawUrl).trim();
+  if (!raw) return { ok: false, error: 'הזינו כתובת' };
+  const normalized = S.normalizeUrl(raw);
+  const target = normalized || ('https://www.google.com/search?q=' + encodeURIComponent(raw));
+  if (!lockedBrowserAllows(target)) {
+    setSiteBrowserNotice('האתר חסום לפי רשימת החסימה: ' + target);
+    return { ok: false, error: 'האתר חסום לפי רשימת החסימה' };
+  }
+  setSiteBrowserNotice('');
+  try { siteBrowserView.webContents.loadURL(target); } catch (e) {
+    return { ok: false, error: 'לא ניתן לטעון את הכתובת' };
+  }
+  return { ok: true };
+}
+
+function openRestrictedBrowser() {
+  try {
+    return openRestrictedBrowserCore();
+  } catch (err) {
+    // כשל בהקמת החלון/ה-view אסור שישאיר חלון חצי-בנוי או יפיל את התהליך
+    closeSiteBrowser();
+    logEvent('website-browser-error', { error: String((err && err.message) || err) });
+    return { ok: false, error: 'פתיחת הדפדפן המוגבל נכשלה: ' + String((err && err.message) || err) };
+  }
+}
+
+function openRestrictedBrowserCore() {
+  const eff = activeSchedule();
+  if (!websiteBlocklistMode(eff)) {
+    return { ok: false, error: 'פתיחת דפדפן כללי זמינה במצב "כל האתרים פתוחים חוץ מהרשימה"' };
+  }
+  if (siteBrowserWin && !siteBrowserWin.isDestroyed()) {
+    try { siteBrowserWin.show(); siteBrowserWin.focus(); } catch { /* ignore */ }
+    return { ok: true };
+  }
+  // WebContentsView קיים מ-Electron 30; בגרסאות ישנות יותר אין דפדפן מוגבל
+  if (typeof WebContentsView !== 'function') {
+    return { ok: false, error: 'דפדפן מוגבל אינו נתמך בגרסת התוכנה הזו' };
+  }
+  hardenLockedSiteSession(LOCKED_SITE_PARTITION);
+  siteBrowserNotice = '';
+  const w = new BrowserWindow({
+    width: 1180,
+    height: 840,
+    minWidth: 720,
+    minHeight: 480,
+    title: 'דפדפן מוגבל — בין הזמנים',
+    autoHideMenuBar: true,
+    backgroundColor: windowBg(),
+    webPreferences: {
+      preload: path.join(__dirname, 'renderer', 'site-browser-preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true
+    }
+  });
+  siteBrowserWin = w;
+  w.loadFile(path.join(__dirname, 'renderer', 'site-browser.html'));
+  lockLocalWindowNavigation(w);
+
+  const view = new WebContentsView({
+    webPreferences: {
+      partition: LOCKED_SITE_PARTITION,
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webviewTag: false
+      // אין preload — תוכן רשתי אינו נחשף ל-API של התוכנה
+    }
+  });
+  siteBrowserView = view;
+  try { w.contentView.addChildView(view); } catch { /* ignore */ }
+
+  const wc = view.webContents;
+  // חסימת ניווט לאתר שברשימת החסימה — גם בניווט רגיל, בהפניות ובמסגות.
+  // ההגנות עצמן משותפות עם מצב רשימת ההיתר (locked-browser.js).
+  applyLockedNavigationGuards(wc, {
+    allows: lockedBrowserAllows,
+    onBlocked: (url) => setSiteBrowserNotice('האתר חסום לפי רשימת החסימה: ' + url)
+  });
+  wc.on('did-navigate', () => { siteBrowserNotice = ''; pushSiteBrowserState(); });
+  wc.on('did-navigate-in-page', () => pushSiteBrowserState());
+  wc.on('page-title-updated', () => pushSiteBrowserState());
+  wc.on('did-fail-load', (_e, code, _desc, _url, isMainFrame) => {
+    if (isMainFrame && code !== -3) setSiteBrowserNotice('לא ניתן לטעון את הכתובת (קוד ' + code + ')');
+  });
+
+  w.on('resize', layoutSiteBrowser);
+  w.on('maximize', layoutSiteBrowser);
+  w.on('unmaximize', layoutSiteBrowser);
+  w.on('closed', () => { closeSiteBrowser(); });
+  layoutSiteBrowser();
+
+  try { wc.loadURL(siteBrowserHome()); } catch { /* ignore */ }
+  // בזמן חסימה הדפדפן נשאר שמיש: מסך החסימה מוסתר וחוזר כשעוזבים אותו
+  relaxForOwnWindow(w);
+  logEvent('website-browser-open', { home: siteBrowserHome() });
+  return { ok: true };
+}
+
+// האם חלון של התוכנה עצמה (אתר נעול / דפדפן מוגבל / סייר קבצים) הוא החלון
+// הפעיל? אם כן, גם בזמן חסימה המשתמש יכול להשתמש בו — בדיוק כמו בתוכנות
+// התורניות המותרות. אחרת חלון החסימה היה מכסה את האתר והופך אותו לחסר תועלת.
+function ourWindowFocused() {
+  const ours = [siteBrowserWin, fileExplorerWin, ...lockedSiteWins].filter((w) => w && !w.isDestroyed());
+  if (!ours.length) return false;
+  try {
+    const focused = typeof BrowserWindow.getFocusedWindow === 'function' ? BrowserWindow.getFocusedWindow() : null;
+    if (focused && ours.indexOf(focused) >= 0) return true;
+  } catch { /* ignore */ }
+  return ours.some((w) => typeof w.isFocused === 'function' && w.isFocused());
+}
+
+// פתיחת חלון שלנו בזמן חסימה: מסתירים את מסך החסימה כדי שהחלון לא ייבלע
+// מאחוריו. אין זמן חסד כאן: מרגע שהחלון פתוח וזוכה לפוקוס המצב נשאר רפוי
+// דרך ourWindowFocused, וברגע שעוזבים או סוגרים — בדיקת האכיפה (כל שנייה)
+// מחזירה את מסך החסימה. בלי זה היה נוצר חלון זמן שבו החסימה לא נאכפת לאחר
+// סגירת החלון.
+function relaxForOwnWindow(w) {
+  fgCache.path = null;
+  fgCache.at = 0;
+  try { if (w && !w.isDestroyed()) { w.show(); w.focus(); } } catch { /* ignore */ }
+  if (!isBlockedNow()) return;
+  enterRelaxed();
 }
 
 /* ================= סייר קבצים מוגבל + ספרייה לקריאה בלבד (Phase 3.10) =================
@@ -3417,7 +3812,11 @@ function registerIpc() {
     if (weakensPartner) unlockApproval = { hash: null, until: 0, failures: 0, purpose: null };
     if (!schedule.pinHash && hasAnyBlockingPolicy(schedule)) {
       schedule = previousObject;
-      return { ok: false, error: 'יש להגדיר סיסמת הורה לפני הפעלת לוח חסימה או חסימת אינטרנט' };
+      return {
+        ok: false,
+        needPin: true,
+        error: 'יש להגדיר סיסמת הורה לפני הפעלת לוח חסימה, חסימת אינטרנט או מכסת זמן שימוש יומית'
+      };
     }
     // "פתוח עד המעבר הבא" (manualUnlockUntil) שייך ללוח שקבע אותו. אחרי כל
     // שמירת הגדרות מסנכרנים אותו עם הלוח החדש — רק אם כבר קיימת פתיחה
@@ -3539,7 +3938,7 @@ function registerIpc() {
     if (!eff.pinHash) {
       return { ok: false, error: 'לא הוגדרה סיסמת הורה בהגדרות' };
     }
-    const st = S.getStatus(eff, trustedDate());
+    const st = policyStatus(eff);
     const isBlockedNow = manualLock || (eff.enabled && st.state === 'blocked');
     if (!isBlockedNow) {
       return { ok: false, error: 'פתיחת תוכנות מורשות זמינה רק בזמן חסימת מחשב' };
@@ -3556,12 +3955,50 @@ function registerIpc() {
     return launchAllowedApp(allowed);
   });
 
-  // פתיחת "אתר נעול" — דפדפן מוגבל לרשימת האתרים המאושרת. ניתן לפתיחה
-  // מחלון ההגדרות או ממסך החסימה (כמו תוכנות מורשות). זהו דפדפן קורא-בלבד
-  // שרשימת האתרים שלו נקבעה מראש על ידי ההורה, ולכן אינו דורש סשן פתוח.
+  // פתיחת "אתר נעול" — דפדפן מוגבל לרשימת האתרים. ניתן לפתיחה מחלון
+  // ההגדרות או ממסך החסימה (כמו תוכנות מורשות). זהו דפדפן שרשימת האתרים
+  // שלו נקבעה מראש על ידי ההורה, ולכן אינו דורש סשן פתוח.
   ipcMain.handle('website-apps:open', (event, nameOrIndex) => {
     if (!senderAllowed(event, [win, ...blockWins])) return senderError();
     return openWebsiteApp(typeof nameOrIndex === 'number' ? nameOrIndex : String(nameOrIndex || ''));
+  });
+
+  // פתיחת הדפדפן המוגבל (מצב "כל האתרים פתוחים חוץ מהרשימה") — מההגדרות
+  // וממסך החסימה. גם במצב רשימת היתר אפשר לפתוח דפדפן כזה רק אם הוגדר כך.
+  ipcMain.handle('website-browser:open', (event) => {
+    if (!senderAllowed(event, [win, ...blockWins])) return senderError();
+    return openRestrictedBrowser();
+  });
+
+  /* ---------- שורת הכתובת של הדפדפן המוגבל ---------- */
+  function siteBrowserSender(event) { return senderAllowed(event, [siteBrowserWin]); }
+
+  ipcMain.handle('site-browser:state', (event) => {
+    if (!siteBrowserSender(event)) return senderError();
+    return { ok: true, ...siteBrowserState() };
+  });
+  ipcMain.handle('site-browser:navigate', (event, url) => {
+    if (!siteBrowserSender(event)) return senderError();
+    return siteBrowserNavigate(url);
+  });
+  ipcMain.handle('site-browser:home', (event) => {
+    if (!siteBrowserSender(event)) return senderError();
+    return siteBrowserNavigate(siteBrowserHome());
+  });
+  ipcMain.handle('site-browser:back', (event) => {
+    if (!siteBrowserSender(event)) return senderError();
+    try {
+      const wc = siteBrowserView && siteBrowserView.webContents;
+      const nav = wc && wc.navigationHistory;
+      const canGoBack = nav && typeof nav.canGoBack === 'function' ? nav.canGoBack() : (wc && wc.canGoBack && wc.canGoBack());
+      if (canGoBack) { if (nav && nav.goBack) nav.goBack(); else wc.goBack(); }
+    } catch { /* ignore */ }
+    return { ok: true };
+  });
+  ipcMain.handle('site-browser:reload', (event) => {
+    if (!siteBrowserSender(event)) return senderError();
+    try { siteBrowserView.webContents.reload(); } catch { /* ignore */ }
+    return { ok: true };
   });
 
   // סייר הקבצים המוגבל — נפתח מחלון ההגדרות/החסימה; הרשימה/פתיחה נקראות
@@ -3608,7 +4045,7 @@ function registerIpc() {
     // יהיה מצב של חסימה בלי דרך החוצה (גם אם חלון חסימה נפתח בהיעדר סיסמה).
     if (!eff.pinHash) {
       manualLock = false;
-      const st = S.getStatus(eff, trustedDate());
+      const st = policyStatus(eff);
       schedule.manualUnlockUntil = isLockedState(st)
         ? (st.nextAt ? st.nextAt.getTime() : trustedNow() + 3600 * 1000)
         : null;
@@ -3639,7 +4076,10 @@ function registerIpc() {
     // מכוון לשליטה עצמית (המשתמש מוכיח כוונה אך ממתין).
     const coolMin = Math.max(0, Number(eff.coolOffMinutes) || 0);
     const rawNow = S.stateAt(eff, trustedDate());
-    const blockedContext = manualLock || rawNow === 'blocked' || rawNow === 'netblock';
+    // מכסת זמן יומית שנוצלה נחשבת הקשר חסימה — כולל תקופת הצינון והיעד
+    // של "פתוח עד המעבר הבא".
+    const quotaNow = dailyLimitExhausted(eff);
+    const blockedContext = manualLock || rawNow === 'blocked' || rawNow === 'netblock' || quotaNow;
     if (coolMin > 0 && blockedContext) {
       if (coolOffActive()) {
         // צינון כבר פעיל — מחזירים את הזמן שנותר בלי לאפס אותו
@@ -3649,6 +4089,8 @@ function registerIpc() {
       if (rawNow === 'blocked' || rawNow === 'netblock') {
         const t = S.nextTransition(eff, trustedDate());
         target = t.at ? t.at.getTime() : trustedNow() + 3600 * 1000;
+      } else if (quotaNow) {
+        target = S.dailyLimitResetAt(trustedDate()).getTime();
       }
       unlockApproval = { hash: null, until: 0, failures: 0, purpose: null }; // קוד האישור (אם היה) נוצל
       coolOffTarget = target;
@@ -3664,10 +4106,15 @@ function registerIpc() {
     manualLock = false; // סיום נעילה ידנית
     const now = trustedDate();
     const raw = S.stateAt(eff, now);
+    const quotaOnlyBlocked = dailyLimitExhausted(eff) && raw !== 'blocked' && raw !== 'netblock';
     // "פתוח עד המעבר הבא" נשמר רק כשהמצב לפי הלוח הוא חסום (מחשב או
-    // אינטרנט) — אחרת אין צורך. בדיקה לפי מצב הלוח הגולמי (ולא לפי הסטטוס
-    // שכבר "פתוח"): פתיחה חוזרת בזמן שפתיחה קיימת לא מבטלת אותה.
-    if (raw === 'blocked' || raw === 'netblock') {
+    // אינטרנט) או שמכסת הזמן היומית נוצלה — אחרת אין צורך. בדיקה לפי מצב הלוח
+    // הגולמי (ולא לפי הסטטוס שכבר "פתוח"): פתיחה חוזרת בזמן שפתיחה קיימת
+    // לא מבטלת אותה.
+    if (quotaOnlyBlocked) {
+      // מכסת היום נוצלה — הפתיחה תקפה עד איפוס המכסה (חצות)
+      schedule.manualUnlockUntil = S.dailyLimitResetAt(now).getTime();
+    } else if (raw === 'blocked' || raw === 'netblock') {
       const t = S.nextTransition(eff, now);
       if (t.at) {
         schedule.manualUnlockUntil = t.at.getTime();
@@ -3730,7 +4177,7 @@ function registerIpc() {
       if (!v.ok) return { ok: false, error: v.error };
     }
     if (hasAnyBlockingPolicy(schedule)) {
-      return { ok: false, error: 'אי אפשר להסיר את סיסמת ההורה כאשר לוח החסימה פעיל' };
+      return { ok: false, error: 'אי אפשר להסיר את סיסמת ההורה כאשר לוח החסימה או מכסת הזמן היומית פעילים' };
     }
     const previous = JSON.stringify(schedule);
     schedule.pinHash = null;
@@ -4141,6 +4588,18 @@ function clearRelaunchFlags() {
   for (const p of relaunchFlagPaths()) forceUnlinkFlag(p);
 }
 
+// הודעת ההפעלה הראשונה ("התוכנה פועלת ברקע") מוצגת פעם אחת בלבד — כדי
+// שתוכנה שלא מגדירה עדיין נעילה לא תקפוץ על המסך בכל אתחול של המחשב.
+const firstRunFlagFile = () => path.join(app.getPath('userData'), 'first-run.done');
+function balloonShownOnce() {
+  try {
+    if (fs.existsSync(firstRunFlagFile())) return true;
+    fs.mkdirSync(path.dirname(firstRunFlagFile()), { recursive: true });
+    fs.writeFileSync(firstRunFlagFile(), String(Date.now()));
+  } catch { /* ignore */ }
+  return false;
+}
+
 function writeHeartbeat(file) {
   try { fs.writeFileSync(file, JSON.stringify({ pid: process.pid, ts: Date.now() })); } catch { /* ignore */ }
 }
@@ -4161,8 +4620,10 @@ function heartbeatStale(file, maxAgeMs) {
 }
 
 function spawnMainApp() {
-  // הקפצה של האפליקציה הראשית (בפורמט זהה ל-Run key)
-  const child = spawn(process.execPath, [app.getAppPath()], {
+  // הקפצה של האפליקציה הראשית (בפורמט זהה ל-Run key). חובה להעביר
+  // --autostart: הקפצה של השומר היא הפעלה ברקע, ואסור שהיא תיפתח על המסך
+  // כחלון הגדרות באמצע העבודה של המשתמש.
+  const child = spawn(process.execPath, [app.getAppPath(), '--autostart'], {
     detached: true, windowsHide: true, stdio: 'ignore'
   });
   child.on('error', () => { /* אם ההקפצה נכשלת — לא לקרוס */ });
@@ -4486,6 +4947,7 @@ async function runSystemWatchdog() {
 
 async function gracefulQuit() {
   isQuitting = true;
+  saveUsage(true); // שמירת מכסת זמן השימוש היומית לפני יציאה
   logEvent('app-quit');
   writeQuitFlag(); // בכל הנתיבים — כדי שהמתקין/השומר יראו את דגל העצירה
   if (ownWatchdogPid && isProcessAlive(ownWatchdogPid)) {
@@ -4518,7 +4980,16 @@ if (isSystemWatchdog) {
   if (!gotLock) {
     app.quit();
   } else {
-    app.on('second-instance', () => showMainWindow());
+    // הפעלה נוספת של התוכנה כבר בזמן שהיא רצה:
+    // • הפעלה של המשתמש (קיצור דרך / קובץ ההרצה) — פותחת את חלון ההגדרות.
+    // • הפעלה כפולה של מנגנוני ההפעלה עם Windows (Registry + משימה מתוזמנת
+    //   + רישום לכל המשתמשים) — לעולם לא פותחת חלון על המסך. בלי ההבחנה הזו
+    //   חלון ההגדרות היה קופץ על המסך בכל הפעלה מחדש של המחשב, גם כשהתוכנה
+    //   לא מגדירה שום נעילה ואין שום סיבה להפריע למשתמש.
+    app.on('second-instance', (_event, argv) => {
+      if (Array.isArray(argv) && argv.includes('--autostart')) return;
+      showMainWindow();
+    });
 
     // איבוד מיקוד מכל חלון בזמן חסימה = החזרת מסך החסימה (מניעת Alt+Tab וכיו"ב)
     app.on('browser-window-blur', () => {
@@ -4540,6 +5011,7 @@ if (isSystemWatchdog) {
 
       loadClockState();
       loadSettings();
+      loadUsage(); // מכסת זמן השימוש היומית ממשיכה לצבור מאותו היום (לא מתאפסת באתחול)
       loadPinLock(); // טעינת נעילה זמנית קיימת (אינה מתאפסת בהרצה מחדש)
       registerIpc();
       // סנכרון עם חוק חומת האש הקיים (אם נשאר מסשן קודם) — כך שהאכיפה
@@ -4610,11 +5082,17 @@ if (isSystemWatchdog) {
       // אם התוכנה הופעלה ידנית (משולחן העבודה / תפריט התחל / התקנה) ולא באתחול רקע של Windows או בדיקות,
       // ואין כרגע חסימה פעילה — פתיחה מיידית של חלון ההגדרות עם דרישת סיסמה
       const isAutostart = process.argv.includes('--autostart') || !!process.env.NODE_TEST_CONTEXT;
-      if (!isAutostart && !isBlockedNow()) {
+      // "לא הוגדרה שום נעילה": אין סיסמה ואין שום חלון חסימה או חסימת
+      // אינטרנט — התוכנה אינה עושה דבר בפועל. במצב כזה אין להפריע למשתמש
+      // בהפעלה מחדש של המחשב: התוכנה עולה בשקט ברקע (במגש) בלבד.
+      const nothingConfigured = !schedule.pinHash && !hasAnyBlockingPolicy(schedule);
+      if (!isAutostart && !isBlockedNow() && !nothingConfigured) {
         showMainWindow();
-      } else if (isWin && !schedule.pinHash && !process.env.NODE_TEST_CONTEXT) {
-        // בהתקנה טרייה (ללא סיסמה ראשונית מוגדרת) באתחול רקע — הכוונת המשתמש לפתיחת ההגדרות
+      } else if (isWin && !schedule.pinHash && !nothingConfigured && !process.env.NODE_TEST_CONTEXT) {
+        // סיסמה חסרה כשיש מדיניות/תוכנות/אתרים מוגדרים — הכוונה חד-פעמית
+        // לפתיחת ההגדרות. לא מציגים את ההודעה שוב בכל אתחול של המחשב.
         setTimeout(() => {
+          if (balloonShownOnce()) return; // הודעה חד-פעמית — לא בכל אתחול מחשב
           try {
             if (tray && typeof tray.displayBalloon === 'function') {
               tray.displayBalloon({

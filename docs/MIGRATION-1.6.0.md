@@ -13,6 +13,25 @@ Version 1.6.0 introduces `schemaVersion: 2`. Loading a 1.5.10 settings file is s
 
 The migration is covered by `test/schema-v2.test.js` and the managed-load integration test in `test/main-flow.test.js`.
 
+## Additive policy fields after 1.6.0 (schema stays v2)
+
+Later builds add three policy fields without bumping `schemaVersion` (the same
+silent, additive normalization described above applies):
+
+- `websiteMode`: `"allowlist"` (default — only the listed sites open in the
+  restricted browser) or `"blocklist"` (everything opens except the listed
+  sites). In `blocklist` mode the restricted browser is a single window with an
+  address bar; remote content runs in a separate `WebContentsView` without a
+  preload.
+- `websiteHomeUrl`: optional start page for the restricted browser.
+- `dailyLimit`: `{ enabled, minutes }` — a per-day usage quota. Usage is
+  accumulated only while the computer is actually open, persisted in
+  `usage.json` (in the protected shared directory on managed installs), and
+  reset at midnight.
+
+Because an older build would ignore these fields, they must be verified again
+whenever the protected settings are restored from an older backup.
+
 ## New Policy Fields
 
 ```json
@@ -20,6 +39,9 @@ The migration is covered by `test/schema-v2.test.js` and the managed-load integr
   "schemaVersion": 2,
   "studyMode": { "enabled": false, "scope": "blocked" },
   "websiteApps": [],
+  "websiteMode": "allowlist",
+  "websiteHomeUrl": "",
+  "dailyLimit": { "enabled": false, "minutes": 60 },
   "fileExplorer": {
     "enabled": false,
     "roots": ["documents", "downloads"],
@@ -42,7 +64,7 @@ Profiles are normalized records keyed by a stable `id`; automatic profiles also 
 
 1. The project uses cryptographic SHA-256 hashing and GitHub Release official origin checks for updates without requiring commercial Authenticode certificates.
 2. (Optional) If an Authenticode code-signing certificate is available in the future, it can be loaded into `CSC_LINK` and `CSC_KEY_PASSWORD`, and verified.
-3. Run `npm test` and require zero failures (118/118 tests).
+3. Run `npm test` and require zero failures (315/315 tests in three run groups — see [MIGRATION-1.7.0.md](MIGRATION-1.7.0.md) for the current gate).
 4. Run `npm run dist`.
 5. Compute SHA-256 over the installer: `(Get-FileHash .\dist\Setup.1.6.0.exe -Algorithm SHA256).Hash.ToLower()`.
 6. Update `version.json` with the SHA-256, version, and notes, and push to GitHub.
@@ -102,3 +124,15 @@ npm test
 ```
 
 It covers scheduler/schema migration, profile overlays, PowerShell quoting, recovery regex, accountability, cool-off, governor process classification, locked-site hardening, explorer sandbox/hidden types, Authenticode update rejection, IPC sender validation, and the existing Electron block-screen E2E flow.
+
+Additional suites added after 1.6.0 (see [MIGRATION-1.7.0.md](MIGRATION-1.7.0.md)):
+
+- `test/wiring.test.js` — every DOM id used by the renderer code, every IPC channel
+  in both directions, every event sent from the main process against its preload
+  listener, and every relative `require` in `main.js` against `build.files` in
+  `package.json` (a file missing from the package breaks only installed clients).
+- `test/locked-browser.e2e.test.js` — real Chromium E2E of the restricted browser
+  and the approved-site window against a local HTTP server, covering direct
+  navigation, 302 redirects, `meta-refresh`, iframe navigation and `window.open`
+  in both website-list modes, plus a positive check that allowed navigation is
+  not over-blocked.

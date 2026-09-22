@@ -77,8 +77,16 @@
       // מצב "רק תוכנות מאושרות" (Process Governor). scope: 'always' = תמיד |
       // 'blocked' = רק בחלונות חסימה. כבוי כברירת מחדל (בטוח).
       studyMode: { enabled: false, scope: 'blocked' },
-      // "אתר נעול" — רשימת אתרים מאושרים שההורה בוחר, כל אחד עם רשימת כתובות.
+      // "אתר נעול" — רשימת אתרים שההורה בוחר, כל אחד עם רשימת כתובות.
+      // websiteMode קובע את משמעות הרשימה:
+      //   'allowlist' (ברירת מחדל) — רק האתרים שברשימה נפתחים בדפדפן המוגבל.
+      //   'blocklist' — כל האתרים פתוחים בדפדפן המוגבל חוץ מהאתרים שברשימה.
       websiteApps: [],          // [{ name, urls: [...] }]
+      websiteMode: 'allowlist', // allowlist = היתר בלבד | blocklist = חסימה ממוקדת
+      websiteHomeUrl: '',       // כתובת הבית של הדפדפן המוגבל (ריק = ברירת מחדל מובנית)
+      // מכסת זמן שימוש יומית: כמה זמן המחשב מותר לשימוש ביום (0 = ללא הגבלה).
+      // הספירה מצטברת בזמן שהמחשב פתוח בפועל, ומתאפסת בחצות.
+      dailyLimit: { enabled: false, minutes: 60 },
       // סייר קבצים מוגבל + ספרייה לקריאה בלבד. כבוי כברירת מחדל.
       fileExplorer: { enabled: false, roots: ['documents', 'downloads'], readonlyLibrary: true, hiddenTypes: [], libraryPath: '' },
       // שותף אחריות (Accountability) — כבוי כברירת מחדל.
@@ -139,6 +147,22 @@
       enabled: o.enabled === true,
       scope: o.scope === 'always' ? 'always' : 'blocked'
     };
+  }
+
+  // מצב רשימת האתרים של הדפדפן המוגבל. כל ערך שאינו 'blocklist' נופל ל-'allowlist'
+  // (ברירת המחדל ההיסטורית — רק אתרים מאושרים נפתחים).
+  function normalizeWebsiteMode(v) {
+    return v === 'blocklist' ? 'blocklist' : 'allowlist';
+  }
+
+  // מכסת זמן שימוש יומית. minutes: 0 = ללא הגבלה; enabled כבוי כאשר אין מכסה.
+  function normalizeDailyLimit(v) {
+    const o = (v && typeof v === 'object') ? v : {};
+    const raw = Number(o.minutes);
+    // ברירת מחדל 60 דקות; 0 מפורש = ללא הגבלה
+    let minutes = Number.isFinite(raw) && raw > 0 ? raw : (o.minutes === 0 || o.minutes === '0' ? 0 : 60);
+    minutes = Math.max(0, Math.min(1440, Math.round(minutes)));
+    return { enabled: o.enabled === true && minutes > 0, minutes };
   }
 
   // נורמליזציה של כתובת אתר יחידה. מקבלת http/https (או שם דומיין ללא סכימה),
@@ -208,12 +232,13 @@
     try { return new URL(String(u)).hostname.toLowerCase(); } catch (e) { return ''; }
   }
 
-  // האם כתובת יעד מותרת לפי רשימת האתרים? (ברירת מחדל: התאמת תת-דומיינים).
-  // Default-deny: כתובת שאינה http/https או שאינה תואמת לאף מארח — נדחית.
-  function siteUrlAllowed(websiteApps, targetUrl, allowSubdomains) {
+  // האם כתובת יעד תואמת לאחת הכתובות ברשימה?
+  // מחזיר true = תואמת, false = אינה תואמת, null = אינה כתובת רשת (לא http/https)
+  // או שאינה ניתנת לניתוח — כל מחזיק מחליט את ברירת המחדל שלו (Fail-Closed).
+  function siteListMatches(websiteApps, targetUrl, allowSubdomains) {
     let target;
-    try { target = new URL(String(targetUrl)); } catch (e) { return false; }
-    if (target.protocol !== 'http:' && target.protocol !== 'https:') return false;
+    try { target = new URL(String(targetUrl)); } catch (e) { return null; }
+    if (target.protocol !== 'http:' && target.protocol !== 'https:') return null;
     const host = target.hostname.toLowerCase();
     for (const app of (Array.isArray(websiteApps) ? websiteApps : [])) {
       for (const u of ((app && app.urls) || [])) {
@@ -226,6 +251,19 @@
       }
     }
     return false;
+  }
+
+  // האם כתובת יעד מותרת לפי רשימת האתרים? (ברירת מחדל: התאמת תת-דומיינים).
+  // Default-deny: כתובת שאינה http/https או שאינה תואמת לאף מארח — נדחית.
+  function siteUrlAllowed(websiteApps, targetUrl, allowSubdomains) {
+    return siteListMatches(websiteApps, targetUrl, allowSubdomains) === true;
+  }
+
+  // האם כתובת יעד חסומה לפי רשימת האתרים? (מצב "כל האתרים פתוחים חוץ מהרשימה").
+  // כל דבר שאינו כתובת רשת תקינה (למשל file:// או פרוטוקול מותאם) נחשב חסום —
+  // אין לאפשר לדפדפן המוגבל לנווט למקורות מקומיים או לפרוטוקולים זרים.
+  function siteUrlBlocked(websiteApps, targetUrl, allowSubdomains) {
+    return siteListMatches(websiteApps, targetUrl, allowSubdomains) !== false;
   }
 
   // סיומת קובץ קנונית (אותיות קטנות, עם נקודה מובילה) — או '' אם לא תקינה.
@@ -283,6 +321,19 @@
     return list.indexOf(ext) >= 0;
   }
 
+  // האם מכסת הזמן היומית נוצלה? (usedSeconds = שניות שימוש שנצברו היום)
+  function dailyLimitReached(dailyLimit, usedSeconds) {
+    const dl = normalizeDailyLimit(dailyLimit);
+    if (!dl.enabled || !dl.minutes) return false;
+    return Number(usedSeconds) >= dl.minutes * 60;
+  }
+
+  // מתי מכסת היום מתאפסת — חצות של היום הבא.
+  function dailyLimitResetAt(date) {
+    const d = date || new Date();
+    return new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1);
+  }
+
   // מבנה שבועי מנורמל — מופרד לפונקציה כדי שגם פרופילים יוכלו להשתמש בו.
   function normalizeWeek(week) {
     const out = [];
@@ -317,6 +368,9 @@
     if ('allowedAppsEnabled' in o) out.allowedAppsEnabled = o.allowedAppsEnabled !== false;
     if ('studyMode' in o) out.studyMode = normalizeStudyMode(o.studyMode);
     if ('websiteApps' in o) out.websiteApps = normalizeWebsiteApps(o.websiteApps);
+    if ('websiteMode' in o) out.websiteMode = normalizeWebsiteMode(o.websiteMode);
+    if ('websiteHomeUrl' in o) out.websiteHomeUrl = normalizeUrl(o.websiteHomeUrl) || '';
+    if ('dailyLimit' in o) out.dailyLimit = normalizeDailyLimit(o.dailyLimit);
     if ('fileExplorer' in o) out.fileExplorer = normalizeFileExplorer(o.fileExplorer);
     return out;
   }
@@ -360,7 +414,8 @@
 
   // שדות שפרופיל רשאי לדרוס (מדיניות בלבד — לא סיסמה/שחזור/שותף/צינון).
   var PROFILE_OVERRIDE_KEYS = ['enabled', 'mode', 'warnMinutes', 'blockMessage', 'blockBg',
-    'showTorahQuotes', 'week', 'allowedApps', 'allowedAppsEnabled', 'studyMode', 'websiteApps', 'fileExplorer'];
+    'showTorahQuotes', 'week', 'allowedApps', 'allowedAppsEnabled', 'studyMode', 'websiteApps',
+    'websiteMode', 'websiteHomeUrl', 'dailyLimit', 'fileExplorer'];
 
   // המדיניות ה"אפקטיבית": הבסיס עם דריסות הפרופיל הפעיל (לפי משתמש Windows).
   // שדות רגישים (pinHash/שחזור/manualUnlockUntil/accountability/coolOff) לעולם
@@ -438,6 +493,9 @@
       /* ---------- שדות סכימה v2 (מיגרציה שקטה, ברירות מחדל בטוחות) ---------- */
       studyMode: normalizeStudyMode(s.studyMode),
       websiteApps: normalizeWebsiteApps(s.websiteApps),
+      websiteMode: normalizeWebsiteMode(s.websiteMode),
+      websiteHomeUrl: normalizeUrl(s.websiteHomeUrl) || '',
+      dailyLimit: normalizeDailyLimit(s.dailyLimit),
       fileExplorer: normalizeFileExplorer(s.fileExplorer),
       accountabilityEmail: String(s.accountabilityEmail || '').trim().slice(0, 200),
       accountabilityEnabled: s.accountabilityEnabled === true,
@@ -715,6 +773,11 @@
     normalizeUrl,
     hostMatches,
     siteUrlAllowed,
+    siteUrlBlocked,
+    normalizeWebsiteMode,
+    normalizeDailyLimit,
+    dailyLimitReached,
+    dailyLimitResetAt,
     normalizeExtension,
     resolveProfile,
     effectiveSchedule,
