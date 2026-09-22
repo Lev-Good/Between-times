@@ -64,7 +64,7 @@ Profiles are normalized records keyed by a stable `id`; automatic profiles also 
 
 1. The project uses cryptographic SHA-256 hashing and GitHub Release official origin checks for updates without requiring commercial Authenticode certificates.
 2. (Optional) If an Authenticode code-signing certificate is available in the future, it can be loaded into `CSC_LINK` and `CSC_KEY_PASSWORD`, and verified.
-3. Run `npm test` and require zero failures (321 tests — 319 pass, 2 skipped (live-network), in three run groups — see [MIGRATION-1.7.0.md](MIGRATION-1.7.0.md) for the current gate).
+3. Run `npm test` and require zero failures (324 tests — 322 pass, 2 skipped (live-network), in three run groups — see [MIGRATION-1.7.1.md](MIGRATION-1.7.1.md) for the current gate).
 4. Run `npm run dist`.
 5. Compute SHA-256 over the installer: `(Get-FileHash .\dist\Setup.1.6.0.exe -Algorithm SHA256).Hash.ToLower()`.
 6. Update `version.json` with the SHA-256, version, and notes, and push to GitHub.

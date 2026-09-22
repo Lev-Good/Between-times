@@ -61,10 +61,18 @@ function makeMock(config) {
   // — בלי בידוד שלו, בדיקות מוגבהות היו כותבות לקובץ האמיתי של המחשב!)
   const origAppData = process.env.APPDATA;
   const origProgramData = process.env.PROGRAMDATA;
+  const origResourcesPath = process.resourcesPath;
   process.env.APPDATA = path.join(tmpRoot, 'appdata');
   process.env.PROGRAMDATA = path.join(tmpRoot, 'programdata');
   fs.mkdirSync(process.env.APPDATA, { recursive: true });
   fs.mkdirSync(process.env.PROGRAMDATA, { recursive: true });
+
+  // elevate.exe נארז ליד האפליקציה (resources/elevate.exe) ומשמש להרמה של
+  // פעולות שדורשות מנהל. הבדיקות מדמות אותו כדי שמסלול ההרמה ייבחן בדיוק
+  // כמו בפרודקשן (וללא תלות בסביבה שבה אין קובץ כזה).
+  process.resourcesPath = path.join(tmpRoot, 'resources');
+  fs.mkdirSync(process.resourcesPath, { recursive: true });
+  fs.writeFileSync(path.join(process.resourcesPath, 'elevate.exe'), 'fake-elevate');
 
   // הרצאת קובץ הגדרות ראשוני (אם ביקשו)
   if (cfg.settings) {
@@ -96,6 +104,23 @@ function makeMock(config) {
     }
     return { err: null, stdout: '', stderr: '' };
   }
+  // ההרמה של המתקין/המסיר (launchElevated) מאמתת שהתהליך באמת עלה דרך
+  // tasklist. הבדיקות עונות לזה באופן אחיד — גם בבדיקות שמחליפות את exec —
+  // כדי שמסלול ההרמה ייבחן תמיד; cfg.noInstallerProcess מדמה הרמה שנכשלה
+  // (למשל ביטול UAC) ואז אין תהליך שרץ.
+  function tasklistImpl(args) {
+    const filter = args.find((a) => typeof a === 'string' && a.startsWith('IMAGENAME eq ')) || '';
+    const procName = filter.slice('IMAGENAME eq '.length);
+    const running = procName && !cfg.noInstallerProcess;
+    return {
+      err: null,
+      stdout: running
+        ? procName + '   4242 Console   1   10,000 K\n'
+        : 'INFO: No tasks are running which match the specified criteria.\n',
+      stderr: ''
+    };
+  }
+
   const execImpl = cfg.exec || defaultExec;
 
   function defaultExecSync(cmd, args) {
@@ -196,7 +221,7 @@ function makeMock(config) {
       // חלק מקריאות ה-execFile כוללות אופציות (למשל windowsHide ל-PowerShell)
       if (typeof opts === 'function') { cb = opts; }
       state.execCalls.push({ cmd, args });
-      const r = execImpl(cmd, args);
+      const r = cmd === 'tasklist' ? tasklistImpl(args) : execImpl(cmd, args);
       cb(r.err, r.stdout, r.stderr);
     },
     execFileSync: (cmd, args, opts) => {
@@ -214,13 +239,14 @@ function makeMock(config) {
   };
 
   const m = {
-    tmpRoot, origAppData, origProgramData, ipcHandlers, state,
+    tmpRoot, origAppData, origProgramData, origResourcesPath, ipcHandlers, state,
     electron, childProcess,
     cleanup() {
       Module._load = origLoad;
       delete require.cache[require.resolve('../main.js')];
       process.env.APPDATA = this.origAppData;
       process.env.PROGRAMDATA = this.origProgramData;
+      process.resourcesPath = this.origResourcesPath;
       try { fs.rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* ignore */ }
     },
     async ready() {
@@ -233,6 +259,15 @@ function makeMock(config) {
 }
 
 // טעינת main.js פעם אחת לכל בדיקה
+// המתקין/המסיר מופעלים בהרמה (elevate.exe) כשאין הרשאות מנהל, או ישירות
+// כשהתהליך מוגבר — הבדיקות מחפשות את הקובץ בשני המסלולים.
+function launchedVia(m, file) {
+  return m.state.spawnCalls.find((s) => s.cmd === file || (s.args || []).includes(file));
+}
+function launchedViaCount(m, file) {
+  return m.state.spawnCalls.filter((s) => s.cmd === file || (s.args || []).includes(file)).length;
+}
+
 function loadMain(cfg) {
   const m = makeMock(cfg);
   delete require.cache[require.resolve('../main.js')];
@@ -580,7 +615,7 @@ test('uninstall: הסרה כותבת אסימון חד-פעמי ומעבירה �
     const token = fs.readFileSync(tokenFile, 'utf8').trim();
     assert.ok(token.length >= 32, 'אסימון אקראי באורך תקין');
 
-    const spawn = m.state.spawnCalls.find((s) => s.cmd === uninstallerPath);
+    const spawn = launchedVia(m, uninstallerPath);
     assert.ok(spawn, 'ה-Uninstaller הופעל');
     assert.ok(spawn.args.includes('/S'), 'הפעלה שקטה');
     const tokenArg = spawn.args.find((a) => a.startsWith('/TOKEN='));
@@ -615,7 +650,7 @@ test('uninstall: ההסרה מסתיימת במלואה גם כשדגל העצי
     // שלבי ההסרה שאחרי כתיבת הדגל — כולם בוצעו:
     const tokenFile = path.join(process.env.PROGRAMDATA, 'BenHazmanim', 'uninstall.token');
     assert.ok(fs.existsSync(tokenFile), 'קובץ האסימון נכתב — התהליך לא נקטע לפניו');
-    const spawn = m.state.spawnCalls.find((s) => s.cmd === uninstallerPath);
+    const spawn = launchedVia(m, uninstallerPath);
     assert.ok(spawn, 'ה-Uninstaller הופעל');
     const regDels = m.state.execCalls.filter((c) => c.cmd === 'reg' && c.args.includes('delete'));
     assert.ok(regDels.length > 0, 'רישומי ההפעלה הוסרו מהרישום');
@@ -723,7 +758,7 @@ test('uninstall: works without password when no pin is set (blocked schedule)', 
 
     // 2) ה-Uninstaller הופעל בשקט (detached)
     assert.ok(m.state.spawnCalls.length >= 1, 'ה-Uninstaller צריך להיות מופעל');
-    const spawn = m.state.spawnCalls.find((s) => s.cmd === uninstallerPath);
+    const spawn = launchedVia(m, uninstallerPath);
     assert.ok(spawn, 'ה-Uninstaller צריך להיות קובץ ההסרה שנמצא');
     assert.ok(spawn.args.includes('/S'), 'הפעלה שקטה');
     assert.equal(spawn.opts.detached, true, 'תהליך נפרד — חייב להמשיך גם אחרי סגירת התוכנה');
@@ -755,7 +790,7 @@ test('uninstall: refuses with wrong password when pin is set', async () => {
     const res = await m.ipcHandlers.get('app:uninstall')({}, 'wrong');
     assert.equal(res.ok, false);
     assert.match(res.error || '', /סיסמה/);
-    const uninstSpawns = m.state.spawnCalls.filter((s) => s.cmd === uninstallerPath);
+    const uninstSpawns = m.state.spawnCalls.filter((s) => s.cmd === uninstallerPath || (s.args || []).includes(uninstallerPath));
     assert.equal(uninstSpawns.length, 0, 'אסור להפעיל Uninstaller עם סיסמה שגויה');
     m.cleanup();
   } finally {
@@ -776,7 +811,7 @@ test('uninstall: succeeds with correct password when no block is active', async 
 
     const res = await m.ipcHandlers.get('app:uninstall')({}, '1234');
     assert.ok(res.ok, 'סיסמה נכונה צריכה לאפשר הסרה: ' + JSON.stringify(res));
-    const spawn = m.state.spawnCalls.find((s) => s.cmd === uninstallerPath);
+    const spawn = launchedVia(m, uninstallerPath);
     assert.ok(spawn, 'ה-Uninstaller הופעל');
     assert.ok(m.state.quitCalled, 'התוכנה נסגרה');
     m.cleanup();
@@ -1184,6 +1219,21 @@ function fakeInstallerBytes(fill = 7) {
   bytes[0] = 0x4d; bytes[1] = 0x5a;
   return bytes;
 }
+// fetchMock סטנדרטי להורדת עדכון 9.9.9: metadata + GitHub API + קובץ תקין
+function updateFetchMock(installer, installerHash) {
+  return async (url) => {
+    const api = githubApiRelease(url);
+    if (api) return api;
+    if (url.includes('raw.githubusercontent.com')) {
+      return { ok: true, json: async () => ({ version: '9.9.9', sha256: installerHash }) };
+    }
+    if (url.includes('releases/download/v9.9.9/Setup.9.9.9.exe')) {
+      return { ok: true, headers: { get: () => String(installer.length) }, body: fakeStream([installer]) };
+    }
+    throw new Error('unexpected fetch: ' + url);
+  };
+}
+
 function fakeInstallerHash(bytes) {
   return crypto.createHash('sha256').update(bytes).digest('hex');
 }
@@ -1243,7 +1293,7 @@ test('update:download downloads installer and starts silent install', async () =
 
     // המתקין שהורד הופעל בשקט (/S) בתהליך נפרד
     // שם הקובץ: BenHazmanim-Setup-9.9.9.exe (מקפים, לא נקודות)
-    const spawn = m.state.spawnCalls.find((s) => s.cmd && /BenHazmanim-Setup-9\.9\.9\.exe$/.test(s.cmd));
+    const spawn = m.state.spawnCalls.find((s) => (s.args || []).some((a) => /BenHazmanim-Setup-9\.9\.9\.exe$/.test(String(a))));
     assert.ok(spawn, 'המתקין שהורד צריך להיות מופעל');
     assert.ok(spawn.args.includes('/S'), 'התקנה שקטה');
     assert.equal(spawn.opts.detached, true, 'תהליך נפרד — ממשיך גם אחרי סגירת התוכנה');
@@ -1287,7 +1337,7 @@ test('update:download writes relaunch flag so the installer reopens the app', as
     const res = await m.ipcHandlers.get('update:download')();
     assert.ok(res.ok);
     // המתקין מופעל בשקט — והדגל יורה ל-NSIS להריץ את האפליקציה בסוף
-    const spawn = m.state.spawnCalls.find((s) => s.cmd && /BenHazmanim-Setup-9\.9\.9\.exe$/.test(s.cmd));
+    const spawn = m.state.spawnCalls.find((s) => (s.args || []).some((a) => /BenHazmanim-Setup-9\.9\.9\.exe$/.test(String(a))));
     assert.ok(spawn, 'המתקין הופעל');
     assert.ok(spawn.args.includes('/S'));
     assert.ok(fs.existsSync(path.join(m.tmpRoot, 'userData', 'relaunch.flag')));
@@ -1755,10 +1805,10 @@ test('update:LIVE end-to-end against the published GitHub release',
 
       // המתקין שהופעל הוא בדיוק הקובץ שהורד, בשקט (/S), והתוכנה נסגרת
       // כדי שהמתקין יוכל להחליף את הקבצים.
-      const spawn = m.state.spawnCalls.find((s) => s.cmd === dest);
+      const spawn = launchedVia(m, dest);
       assert.ok(spawn, 'המתקין שהורד הוא זה שהופעל: ' +
         JSON.stringify(m.state.spawnCalls.map((s) => s.cmd)));
-      assert.deepEqual(spawn.args, ['/S'], 'התקנה שקטה');
+      assert.ok(spawn.args.includes('/S'), 'התקנה שקטה');
       assert.equal(spawn.opts.detached, true, 'תהליך נפרד — ממשיך גם אחרי סגירת התוכנה');
       assert.equal(m.state.quitCalled, true, 'התוכנה נסגרת כדי לאפשר את ההתקנה');
       assert.ok(fs.existsSync(path.join(m.tmpRoot, 'userData', 'quit.flag')), 'quit.flag נכתב');
@@ -1809,6 +1859,84 @@ test('update:LIVE refuses the real installer when the published hash does not ma
       m.cleanup();
     }
   });
+
+/* ===== הרמה של המתקין (הרגרסיה של 1.7.0) =====
+   המתקין נושא מניפסט requireAdministrator. CreateProcess אינו מרים הרשאות,
+   ולכן spawn של המתקין מתהליך שאינו מוגבר נכשל מיד עם שגיאה 740 — **בלי
+   חלון UAC**. לפני התיקון התוכנה דיווחה "מתקין", נסגרה, והמתקין מעולם לא רץ.
+   הבדיקות האלה נועללות את התיקון: הרמה כשאין הרשאות, הפעלה ישירה כשמוגבר,
+   וכשל מדווח (בלי לסגור את התוכנה) כשההרמה לא מצליחה. */
+
+test('update:download launches the installer through elevate.exe when not elevated', async () => {
+  const installer = fakeInstallerBytes();
+  fetchMock = updateFetchMock(installer, fakeInstallerHash(installer));
+  try {
+    const m = loadMain({}); // ללא הרשאות מנהל
+    await m.ready();
+    const res = await m.ipcHandlers.get('update:download')();
+    assert.equal(res.ok, true, 'העדכון צריך להצליח: ' + JSON.stringify(res));
+    const dest = path.join(m.tmpRoot, 'app', 'BenHazmanim-Setup-9.9.9.exe');
+    // המפעיל הוא elevate.exe (הכלי שנארז בחבילה) — ורק הוא מציג UAC
+    const launcher = m.state.spawnCalls.find((s) => /elevate\.exe$/i.test(String(s.cmd)));
+    assert.ok(launcher, 'בלי הרשאות מנהל המתקין חייב להיות מורם: ' +
+      JSON.stringify(m.state.spawnCalls.map((s) => s.cmd)));
+    assert.ok(launcher.args.includes(dest), 'המתקין שהורד מועבר למרים');
+    assert.ok(launcher.args.includes('/S'), 'התקנה שקטה מועברת הלאה');
+    assert.equal(launcher.opts.detached, true, 'תהליך נפרד');
+    // המתקין עצמו **לא** הורץ ישירות (זו בדיוק הפעולה שנכשלת בשקט)
+    assert.equal(m.state.spawnCalls.filter((s) => s.cmd === dest).length, 0,
+      'אסור להריץ את המתקין ישירות מתהליך שאינו מוגבר');
+    m.cleanup();
+  } finally {
+    fetchMock = null;
+  }
+});
+
+test('update:download launches the installer directly when already elevated', async () => {
+  const installer = fakeInstallerBytes();
+  fetchMock = updateFetchMock(installer, fakeInstallerHash(installer));
+  try {
+    const m = loadMain({ elevate: true }); // התהליך מוגבר — ההרשאה עוברת בירושה
+    await m.ready();
+    const res = await m.ipcHandlers.get('update:download')();
+    assert.equal(res.ok, true);
+    const dest = path.join(m.tmpRoot, 'app', 'BenHazmanim-Setup-9.9.9.exe');
+    assert.ok(launchedVia(m, dest), 'המתקין מופעל ישירות (אין צורך בהרמה)');
+    assert.equal(m.state.spawnCalls.filter((s) => /elevate\.exe$/i.test(String(s.cmd))).length, 0,
+      'לא מרימים כשכבר יש הרשאות (ולא מקפיצים UAC מיותר)');
+    m.cleanup();
+  } finally {
+    fetchMock = null;
+  }
+});
+
+test('update:download stays open and reports failure when the installer never starts', async () => {
+  // הרגרסיה המדויקת: המתקין לא עלה (למשל המשתמש ביטל את ה-UAC). אסור
+  // לסגור את התוכנה ולא לדווח הצלחה — אחרת המשתמש מאבד את התוכנה באמצע
+  // היום בלי שום התקנה, וזו התקלה שדווחה מגרסה 1.7.0.
+  const installer = fakeInstallerBytes();
+  fetchMock = updateFetchMock(installer, fakeInstallerHash(installer));
+  try {
+    const m = loadMain({ noInstallerProcess: true });
+    await m.ready();
+    const res = await m.ipcHandlers.get('update:download')();
+    assert.equal(res.ok, false, 'הרמה שלא הצליחה חייבת להיות מדווחת ככשל');
+    assert.match(res.error || '', /UAC|הרשאות/, 'ההודעה צריכה להפנות לאישור ההרשאות: ' + res.error);
+    assert.equal(m.state.quitCalled, false, 'אסור לסגור את התוכנה כשהמתקין לא רץ');
+    // דגלי העצירה/ההפעלה מחדש נכתבים רק אחרי אימות — גם הם לא צריכים להיכתב
+    assert.equal(fs.existsSync(path.join(m.tmpRoot, 'userData', 'quit.flag')), false,
+      'quit.flag לא נכתב (אחרת השומר-שער היה סוגר את התוכנה)');
+    assert.equal(fs.existsSync(path.join(m.tmpRoot, 'userData', 'relaunch.flag')), false,
+      'relaunch.flag לא נכתב');
+    // הדגל שדרכו הכל מתחיל — גם הוא נשאר נקי
+    assert.equal(m.state.quitCalled, false);
+    const dest = path.join(m.tmpRoot, 'app', 'BenHazmanim-Setup-9.9.9.exe');
+    assert.equal(fs.existsSync(dest), false, 'המתקין שהורד נמחק בכשל הרמה');
+    m.cleanup();
+  } finally {
+    fetchMock = null;
+  }
+});
 
 test('update:download reports clear error when no update is available', async () => {
   fetchMock = async (url) => {
@@ -2154,7 +2282,7 @@ test('uninstall: wrong password while ACTIVE BLOCK does not spawn uninstaller', 
       const res = await m.ipcHandlers.get('app:uninstall')({}, 'nope-' + i);
       assert.equal(res.ok, false);
     }
-    const uninstSpawns = m.state.spawnCalls.filter((s) => s.cmd === uninstallerPath);
+    const uninstSpawns = m.state.spawnCalls.filter((s) => s.cmd === uninstallerPath || (s.args || []).includes(uninstallerPath));
     assert.equal(uninstSpawns.length, 0, 'סיסמה שגויה לעולם אינה מפעילה את ההסרה');
     assert.equal(m.state.quitCalled, false, 'התוכנה לא נסגרה');
     m.cleanup();

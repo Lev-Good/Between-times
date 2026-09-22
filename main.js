@@ -3239,6 +3239,68 @@ function verifyAuthenticode(file) {
 
 // הורדה + התקנה שקטה של העדכון. נקרא מהממשק (update:download) — עם
 // דיווח התקדמות לכל החלונות, וסגירה נקייה של התוכנה בסוף.
+/* ================= הפעלת מתקין/מסיר בהרשאות מנהל =================
+   המתקין שנבנה ע"י electron-builder במצב perMachine נושא מניפסט
+   `requireAdministrator`. CreateProcess **אינו** מרים הרשאות: הפעלה של קובץ
+   כזה מתהליך שאינו מוגבר נכשלת מיד עם ERROR_ELEVATION_REQUIRED (740) —
+   בלי חלון UAC ובלי חלון שגיאה — ולכן `spawn` רגיל נראה כאילו הצליח.
+   זו בדיוק התקלה שתוקנה כאן (גרסה 1.7.1): התוכנה דיווחה "מתקין", נסגרה,
+   והמתקין מעולם לא רץ — והעדכון לא הותקן, בשקט.
+   לכן:
+   • בתהליך שכבר מוגבר — spawn רגיל; ההרשאה עוברת בירושה ואין UAC.
+   • בתהליך רגיל — elevate.exe (הכלי הרשמי שנארז לצד האפליקציה, בשימוש גם
+     לחומת האש) שמרים דרך ShellExecuteEx runas; רק מסלול זה מציג את חלון
+     ה-UAC. אין נפילה ל-spawn ללא הרמה — עדיף כשל ברור על פני הצלחה מדומה.
+   בשני המסלולים **מאמתים שהתהליך באמת עלה** (tasklist) לפני שממשיכים:
+   בלי האימות הזה אי אפשר להבדיל בין "הותקן" ל"המשתמש ביטל את ה-UAC".
+   חשוב: אין לכתוב quit.flag לפני שהמתקין אומת — superviseWatchdog סוגר את
+   התוכנה ברגע שהדגל נראה, ואם ה-UAC היה מבוטל היינו נשארים סגורים בלי
+   התקנה (בדיוק המצב שהיה לפני התיקון). */
+// חלון סביר לאישור UAC (כולל הקלדת סיסמה). בבדיקות מקצרים כדי שלא תימשך חצי דקה.
+const ELEVATE_CONFIRM_MS = isTestMode ? 1500 : 25000;
+const ELEVATE_POLL_MS = 500;
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// האם תהליך בשם הזה רץ כרגע? (tasklist ניתן להרצה גם מתהליך שאינו מוגבר)
+function processRunningByName(name) {
+  return new Promise((resolve) => {
+    if (!isWin) return resolve(false);
+    execFile('tasklist', ['/FI', 'IMAGENAME eq ' + name, '/NH'], { windowsHide: true, timeout: 10000 }, (err, stdout) => {
+      if (err) return resolve(false);
+      resolve(String(stdout || '').toLowerCase().includes(String(name).toLowerCase()));
+    });
+  });
+}
+
+// המרה ובאימות: מחזיר { ok: true, elevated } רק אם התהליך נראה חי.
+async function launchElevated(file, args) {
+  const name = path.basename(file);
+  const alreadyElevated = isElevated();
+  let cmd = file;
+  let argv = args;
+  if (!alreadyElevated) {
+    const elevate = elevateExe();
+    if (!elevate) return { ok: false, reason: 'no-elevate-tool' };
+    // Usage: Elevate [-?|-wait|-k] prog [args] — כל מה שאחרי prog מועבר הלאה.
+    cmd = elevate;
+    argv = [file, ...args];
+  }
+  try {
+    const child = spawn(cmd, argv, { detached: true, stdio: 'ignore', windowsHide: true });
+    child.on('error', () => { /* מדווח דרך אימות התהליך שלמטה */ });
+    child.unref();
+  } catch { /* מדווח דרך אימות התהליך שלמטה */ }
+  const deadline = Date.now() + ELEVATE_CONFIRM_MS;
+  while (Date.now() < deadline) {
+    if (await processRunningByName(name)) return { ok: true, elevated: !alreadyElevated };
+    await delay(ELEVATE_POLL_MS);
+  }
+  return { ok: false, reason: 'not-started' };
+}
+
 async function downloadAndInstallUpdate() {
   const chk = await checkForUpdate();
   if ((!chk.ok || !chk.update) && !updateNote) {
@@ -3292,15 +3354,28 @@ async function downloadAndInstallUpdate() {
       }
     } catch { /* מתקין ללא חתימה מסחרית מאושר וממשיך להתקנה */ }
     progress('install', 100);
+    // המתקין דורש הרשאות מנהל (perMachine) — מרימים אותו ומאמתים שהוא באמת
+    // רץ **לפני** שסוגרים את התוכנה. ראו launchElevated.
+    const launched = await launchElevated(dest, ['/S']);
+    if (!launched.ok) {
+      // לא משאירים מתקין של ~90MB ב-Temp על כל נסיון הרמה שנכשל (כמו בכל
+      // שאר מסלולי הכשל — הקובץ נמחק).
+      try { fs.unlinkSync(dest); } catch { /* ignore */ }
+      logEvent('update-launch-failed', { version, reason: launched.reason });
+      return {
+        ok: false,
+        error: 'לא ניתן היה להפעיל את המתקין. אשרו את בקשת ההרשאות של Windows (UAC) ונסו שוב — או הורידו את הגרסה החדשה ידנית מעמוד ההורדות.'
+      };
+    }
+    logEvent('update-launch', { version, elevated: launched.elevated });
     // דגל עצירה בכל הנתיבים — השומר-שער לא יקפיץ את התוכנה בזמן ההתקנה.
-    // המתקין החדש (1.2.4+) גם הוא כותב את הדגל ב-preInit וממתין לסגירתנו.
+    // המתקין עצמו גם כותב את הדגל ב-preInit וממתין לסגירתנו.
+    // (נכתב רק אחרי שהמתקין אומת רץ: superviseWatchdog סוגר את התוכנה ברגע
+    // שהוא רואה את הדגל, ואם ה-UAC היה מבוטל היינו נסגרים בלי התקנה.)
     writeQuitFlag();
     // דגל "הפעל מחדש": ההתקנה השקטה (/S) לא מריצה את התוכנה מעצמה —
     // המתקין יבדוק את הדגל הזה בסוף ההתקנה ויפתח את הגרסה החדשה.
     writeRelaunchFlag();
-    const child = spawn(dest, ['/S'], { detached: true, stdio: 'ignore', windowsHide: true });
-    child.on('error', () => { /* ignore */ });
-    child.unref();
     // סגירה נקייה — המתקין משלים את ההתקנה לבד ופותח את הגרסה החדשה
     gracefulQuit();
     return { ok: true, installing: true };
@@ -4331,11 +4406,16 @@ function registerIpc() {
     // 2) הפעלת ה-Uninstaller בשקט (מסיר קבצים, קיצורים ונתונים) —
     //    בתהליך נפרד (detached) כך שהוא ממשיך גם אחרי שהתוכנה נסגרת.
     //    האסימון מועבר בשורת הפקודה — ה-Uninstaller משווה אותו לקובץ.
-    try {
-      const child = spawn(uninstaller, ['/S', '/TOKEN=' + uninstallToken], { detached: true, stdio: 'ignore', windowsHide: true });
-      child.on('error', () => { /* ignore */ });
-      child.unref();
-    } catch { /* ignore */ }
+    // גם מסיר ההתקנה של NSIS דורש הרשאות מנהל — בלעדיה ההפעלה נכשלת בשקט
+    // והתוכנה הייתה נסגרת בלי שהוסרה. ראו launchElevated.
+    const unlaunched = await launchElevated(uninstaller, ['/S', '/TOKEN=' + uninstallToken]);
+    if (!unlaunched.ok) {
+      logEvent('uninstall-launch-failed', { reason: unlaunched.reason });
+      return {
+        ok: false,
+        error: 'לא ניתן היה להפעיל את מסיר ההתקנה. אשרו את בקשת ההרשאות של Windows (UAC) ונסו שוב.'
+      };
+    }
     // 3) סגירה נקייה: gracefulQuit כותב את דגל העצירה (כך שהשומר-שער לא
     //    יקפיץ את התוכנה בחזרה בזמן שה-Uninstaller מסיר את הקבצים) והורג
     //    את השומר — ולאחר מכן התוכנה נסגרת וה-Uninstaller ממשיך לבד.

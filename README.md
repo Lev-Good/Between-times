@@ -129,6 +129,7 @@ Get-AuthenticodeSignature '.\dist\Setup.1.6.0.exe' | Format-List Status,SignerCe
 | מסמך | מה יש בו |
 |---|---|
 | [`docs/CHANGELOG.md`](docs/CHANGELOG.md) | רשימת השינויים לכל גרסה (מה המשתמשים מקבלים) |
+| [`docs/MIGRATION-1.7.1.md`](docs/MIGRATION-1.7.1.md) | מיגרציה 1.7.0→1.7.1 (פאץ' — אין מיגרציית נתונים) והתקנה ידנית חד-פעמית |
 | [`docs/MIGRATION-1.7.0.md`](docs/MIGRATION-1.7.0.md) | מיגרציה 1.6.5→1.7.0, שינויי התנהגות, ומטריצת בדיקות ידניות ב-VM |
 | [`docs/MIGRATION-1.6.0.md`](docs/MIGRATION-1.6.0.md) | מיגרציית הסכימה ל-v2 והמטריצה הכללית |
 | [`docs/UPDATES-AND-SECURITY.md`](docs/UPDATES-AND-SECURITY.md) | מנגנון העדכונים ונוהל השחרור המלא (7 שלבים) |
