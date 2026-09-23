@@ -113,11 +113,14 @@ npm install --save-dev electron-builder
 npm run dist
 ```
 
-הקובץ ייווצר בתיקיית `dist/` (מתקין NSIS). מעבר לבנייה, `npm run dist` מריץ גם
-את `scripts/patch-installer-manifest.js`, שמעביר את מניפסט ההרשאה של המתקין ל-
-`asInvoker` (המתקין מרים את עצמו ב-`preInit`) — וזו הסיבה שהפעלה שלו מכל גרסת
-תוכנה מותקנת מצליחה ומציגה חלון UAC במקום להיכשל בשקט. **אין לבנות עם
-`electron-builder` ישירות** — בנייה כזו מנפיקה מתקין שלא ניתן להפעיל בלי הרשאות.
+הקובץ ייווצר בתיקיית `dist/` (מתקין NSIS). מעבר לבנייה, `npm run dist` מחיל
+את מניפסט ההרשאה של המתקין (`asInvoker`) **בזמן הקומפילציה**
+(`scripts/patch-nsis-template.js`, שרץ גם ב-`postinstall`), ומאמת לפני ואחרי
+את המתקין שנבנה (`scripts/verify-installer-manifest.js`). המתקין מרים את עצמו
+ב-`preInit` — וזו הסיבה שהפעלה שלו מכל גרסת תוכנה מותקנת מצליחה ומציגה חלון
+UAC במקום להיכשל בשקט. **אין לגעת בקובץ ההתקנה אחרי הבנייה** (זה מה שהפיל את
+מתקין 1.7.2 — NSIS בודק את שלמות המתקין שלו בזמן ההרצה), ואין לבנות עם
+`electron-builder` ישירות בלי ההחלה. פירוט מלא: `docs/MIGRATION-1.7.3.md`.
 
 הפצה מחייבת חתימת Authenticode. `forceCodeSigning: true` גורם ל־electron-builder לעצור את הבנייה אם לא הוגדרה תעודה; אין fallback למתקין unsigned.
 

@@ -1,7 +1,7 @@
 {
   "name": "ben-hazmanim",
   "productName": "בין הזמנים - ניהול זמן מחשב",
-  "version": "1.7.2",
+  "version": "1.7.3",
   "description": "ניהול שעות גישה למחשב - הגדרת שעות וימים מותרים/חסומים מראש",
   "main": "main.js",
   "author": "לב טוב דיגיטל <mytovmail@gmail.com> (https://digital.levtov.uk/)",
@@ -13,7 +13,8 @@
     "test:e2e": "node --test test/block-screen.e2e.test.js",
     "test:update-live": "node --test --test-name-pattern=\"update:LIVE\" test/main-flow.test.js",
     "preview": "node scripts/build-preview.js",
-    "dist": "electron-builder --win && node scripts/patch-installer-manifest.js"
+    "postinstall": "node scripts/patch-nsis-template.js",
+    "dist": "node scripts/patch-nsis-template.js && node scripts/verify-installer-manifest.js --pre && electron-builder --win && node scripts/verify-installer-manifest.js"
   },
   "devDependencies": {
     "electron": "^37.2.0",

@@ -1,12 +1,20 @@
 // בדיקות לחיזוק נתיב ההתקנה/העדכון:
-//   1) לוגיקת תיקון מניפסט ההרשאה של קובץ ההתקנה (requireAdministrator → asInvoker)
-//   2) הרמה עצמית של המתקין ב-preInit, בסדר הנכון (לפני דגלי העצירה)
-//   3) שהבנייה (npm run dist) אכן מריצה את התיקון — כדי שלא ישוחרר מתקין
-//      "שדורש הרשאות" שוב, ושעדכון מתוך התוכנה לא ייכשל שוב בשקט.
+//   1) אימות מניפסט ההרשאה של קובץ ההתקנה — **ללא נגיעה בקובץ**
+//   2) שהמניפסט נקבע בזמן הקומפילציה (החלה של קובץ המקור של תבנית
+//      electron-builder), ולא בתיקון בדיעבד של ה-EXE — ושה"תיקון" הזה מזוהה
+//      ונחסם
+//   3) ההרמה העצמית של המתקין ב-preInit, בסדר הנכון (לפני דגלי העצירה)
+//   4) שהבנייה (npm run dist) אכן מריצה את האימות — לפני ואחרי — כדי שלא
+//      ישוחרר מתקין פגום בשקט.
 //
-// הסיבה לקיומה: התקלה המקורית (עדכון שהצהיר "מתקין", סגר את התוכנה ולא התקין
-// כלום) לא הפילה שום בדיקה — היא פשוט לא עבדה, בשקט. הבדיקות כאן נופלות מיד
-// אם ההגנות האלה מוסרות או מפסיקות להתאים למציאות.
+// הסיבה לקיומה: שלושה כשלים שקטים כבר קרו כאן בפועל ולא הפילו שום בדיקה —
+//   (א) עדכון שהצהיר "מתקין", סגר את התוכנה ולא התקין כלום (עד 1.7.1);
+//   (ב) מתקין 1.7.2 שתוקן **אחרי** הבנייה, ועקב כך יצא מיד עם קוד 2 לפני
+//       שרץ ולו שורת סקריפט אחת — בלי חלון UAC, בלי שגיאה ובלי התקנה,
+//       בכל מחשב וגם בהתקנה ידנית;
+//   (ג) ניסיון לתקן את המניפסט בעותק של תבנית electron-builder (nsis.script),
+//       שמבטל את בניית המסיר והפיל את הבנייה עצמה.
+// הבדיקות כאן נופלות מיד אם ההגנות האלה מוסרות או מפסיקות להתאים למציאות.
 'use strict';
 
 const test = require('node:test');
@@ -15,12 +23,21 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { patchBuffer, patchFile, removeStaleMetadata, MANIFEST_FROM } = require('../scripts/patch-installer-manifest.js');
+const {
+  verifyBuffer, verifyFile, removeUnusedMetadata, isPeFile,
+  sha512Base64, checkInclude, checkBuildConfig, checkTemplate, preflight,
+  MANIFEST_AS_INVOKER, NSIS_INCLUDE, TEMPLATE_DIR
+} = require('../scripts/verify-installer-manifest.js');
+
+const {
+  patchTemplateText, findOtherAdminLevels, PATCH_MARK, PATCHED_RE, PATCHED_LINE,
+  ADMIN_LINE, INSTALLER_TEMPLATE
+} = require('../scripts/patch-nsis-template.js');
 
 const ROOT = path.join(__dirname, '..');
 const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
 
-/* ==================== 1) לוגיקת התיקון ==================== */
+/* ==================== 1) לוגיקת האימות ==================== */
 
 // קובץ PE מדומה עם מניפסט בדיוק כמו זה ש-NSIS מנפיק
 function fakeInstaller(level) {
@@ -30,80 +47,148 @@ function fakeInstaller(level) {
     '<trustInfo xmlns="urn:schemas-microsoft-com:asm.v3"><security><requestedPrivileges>' +
     '<requestedExecutionLevel level="' + level + '" uiAccess="false"/>' +
     '</requestedPrivileges></security></trustInfo></assembly>';
-  const buf = Buffer.alloc(0x100 + Buffer.byteLength(manifest, 'utf8') + 64, 0);
+  const buf = Buffer.alloc(0x100 + Buffer.byteLength(manifest, 'latin1') + 64, 0);
   buf.write('MZ', 0, 'ascii');
   buf.writeUInt32LE(0x80, 0x3c); // e_lfanew
   buf.writeUInt32LE(0x00004550, 0x80); // "PE\0\0"
-  buf.write(manifest, 0x100, 'utf8');
+  buf.write(manifest, 0x100, 'latin1');
   return buf;
 }
-const contains = (buf, str) => buf.indexOf(str, 0, 'utf8') !== -1;
 
-test('installer-manifest: requireAdministrator מוחלף ל-asInvoker בלי לשנות את גודל הקובץ', () => {
-  const original = fakeInstaller('requireAdministrator');
-  const patched = patchBuffer(original);
-  assert.equal(patched.length, original.length, 'גודל הקובץ חייב להישאר זהה (מבנה PE ו-resource)');
-  assert.ok(!contains(patched, 'requireAdministrator'), 'requireAdministrator לא אמור להישאר');
-  // הריפוד חייב לנחות *בין* תכונות התג — אחרת הערך היה "asInvoker   " ולא תקין
-  assert.match(
-    patched.toString('utf8'),
-    /level="asInvoker"\s+uiAccess="false"/,
-    'הערך asInvoker חייב להיות נקי, והריפוד בין התכונות'
-  );
-  // הקלט לא משתנה
-  assert.ok(contains(original, 'requireAdministrator'), 'הקלט המקורי לא אמור להשתנות');
+function withTempDir(prefix, fn) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  try {
+    return fn(dir);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test('installer-manifest: מתקין עם asInvoker עובר אימות', () => {
+  const res = verifyBuffer(fakeInstaller('asInvoker'));
+  assert.ok(res.size > 0, 'האימות צריך להחזיר את גודל הקובץ');
 });
 
-test('installer-manifest: נכשל בקול כשהמניפסט לא נמצא — שינוי upstream לא יעבור בשקט', () => {
-  const already = fakeInstaller('asInvoker');
-  assert.throws(() => patchBuffer(already), new RegExp(MANIFEST_FROM.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+test('installer-manifest: מתקין עם requireAdministrator נדחה בקול', () => {
+  assert.throws(() => verifyBuffer(fakeInstaller('requireAdministrator')), /requireAdministrator/);
 });
 
-test('installer-manifest: נכשל כשהמניפסט מופיע יותר מפעם אחת', () => {
-  const twice = Buffer.concat([fakeInstaller('requireAdministrator'), fakeInstaller('requireAdministrator')]);
-  assert.throws(() => patchBuffer(twice), /יותר מפעם אחת/);
+test('installer-manifest: קובץ שאינו PE נדחה', () => {
+  assert.throws(() => verifyBuffer(Buffer.from('not-an-exe-at-all', 'utf8')), /PE/);
+  assert.equal(isPeFile(Buffer.from('nope', 'utf8')), false);
 });
 
-test('installer-manifest: נכשל בקובץ שאינו PE', () => {
-  assert.throws(() => patchBuffer(Buffer.from('not-an-exe-at-all', 'utf8')), /PE/);
+test('installer-manifest: האימות אינו כותב לקובץ (בתים ו-mtime ללא שינוי)', () => {
+  withTempDir('bh-verify-', (dir) => {
+    const file = path.join(dir, 'Setup.test.exe');
+    const original = fakeInstaller('asInvoker');
+    fs.writeFileSync(file, original);
+    const before = fs.statSync(file);
+
+    const res = verifyFile(file);
+
+    const after = fs.readFileSync(file);
+    const statAfter = fs.statSync(file);
+    assert.ok(after.equals(original), 'תוכן הקובץ חייב להישאר זהה לחלוטין');
+    assert.equal(statAfter.mtimeMs, before.mtimeMs, 'זמן השינוי לא אמור להשתנות');
+    assert.equal(res.size, original.length);
+    assert.equal(res.integrity, 'not-checked', 'בלי latest.yml אין מה להשוות');
+  });
 });
 
-test('installer-manifest: המתקין שנבנה ב-dist אכן מופץ עם asInvoker', () => {
-  const pkg = JSON.parse(read('package.json'));
-  const file = path.join(ROOT, 'dist', 'Setup.' + pkg.version + '.exe');
-  if (!fs.existsSync(file)) return; // אין בנייה מקומית — אין מה לבדוק
-  const buf = fs.readFileSync(file);
-  assert.ok(!contains(buf, 'requireAdministrator'),
-    'המתקין שנבנה עדיין דורש הרשאות מנהל — כנראה נבנה בלי npm run dist (התיקון לא רץ)');
-  assert.ok(contains(buf, 'level="asInvoker"'), 'המתקין צריך להיות מופץ עם מניפסט asInvoker');
+test('installer-manifest: קובץ שנערך אחרי הבנייה מזוהה לפי latest.yml', () => {
+  withTempDir('bh-verify-int-', (dir) => {
+    const file = path.join(dir, 'Setup.test.exe');
+    const original = fakeInstaller('asInvoker');
+    fs.writeFileSync(file, original);
+    fs.writeFileSync(path.join(dir, 'latest.yml'),
+      'version: 1.2.3\nfiles:\n  - url: Setup.test.exe\n    sha512: ' + sha512Base64(original) +
+      '\n    size: ' + original.length + '\n');
+
+    const res = verifyFile(file);
+    assert.equal(res.integrity, 'ok', 'קובץ שהוא בדיוק פלט הבנייה מאושר');
+
+    // עכשיו "נתקן" את הקובץ בדיעבד — כמו התקלה של 1.7.2
+    const tampered = Buffer.from(original);
+    const at = tampered.indexOf(Buffer.from('level="asInvoker"', 'utf8'));
+    tampered.write('level="asInvoker"  ', at, 'utf8');
+    fs.writeFileSync(file, tampered);
+    assert.throws(() => verifyFile(file), /שונה אחרי הבנייה/);
+  });
 });
 
-test('installer-manifest: patchFile מתקן קובץ בדיסק ומחזיר דוח', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bh-manifest-'));
-  const file = path.join(dir, 'Setup.test.exe');
-  fs.writeFileSync(file, fakeInstaller('requireAdministrator'));
-  const res = patchFile(file);
-  assert.equal(res.size, fs.statSync(file).size, 'הגודל בדיסק זהה');
-  assert.ok(!contains(fs.readFileSync(file), 'requireAdministrator'));
-  fs.rmSync(dir, { recursive: true, force: true });
+test('installer-manifest: מסיר מטא-דאטה שאינו נפרס (blockmap ו-latest.yml)', () => {
+  withTempDir('bh-meta-', (dir) => {
+    const file = path.join(dir, 'Setup.test.exe');
+    fs.writeFileSync(file, fakeInstaller('asInvoker'));
+    fs.writeFileSync(file + '.blockmap', 'unused');
+    fs.writeFileSync(path.join(dir, 'latest.yml'), 'unused');
+    const removed = removeUnusedMetadata(file);
+    assert.deepEqual(removed.sort(), ['Setup.test.exe.blockmap', 'latest.yml']);
+    assert.ok(!fs.existsSync(file + '.blockmap'));
+    assert.ok(!fs.existsSync(path.join(dir, 'latest.yml')));
+    assert.ok(fs.existsSync(file), 'קובץ ההתקנה עצמו לא נגע');
+  });
 });
 
-test('installer-manifest: מסיר מטא-דאטה שהתיישן בתיקון (blockmap ו-latest.yml)', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bh-meta-'));
-  const file = path.join(dir, 'Setup.test.exe');
-  fs.writeFileSync(file, fakeInstaller('requireAdministrator'));
-  fs.writeFileSync(file + '.blockmap', 'stale');
-  fs.writeFileSync(path.join(dir, 'latest.yml'), 'stale');
-  const removed = removeStaleMetadata(file);
-  assert.deepEqual(removed.sort(), ['Setup.test.exe.blockmap', 'latest.yml']);
-  assert.ok(!fs.existsSync(file + '.blockmap'), 'blockmap שאינו מעודכן חייב להיות מוסר');
-  assert.ok(!fs.existsSync(path.join(dir, 'latest.yml')), 'latest.yml שאינו מעודכן חייב להיות מוסר');
-  fs.rmSync(dir, { recursive: true, force: true });
-});
-
-/* ==================== 2) ההרמה העצמית במתקין ==================== */
+/* ==================== 2) המניפסט נקבע בזמן הקומפילציה ==================== */
 
 const installerNsh = read('build/installer.nsh');
+const TEMPLATE_HEADER = [
+  '!ifdef INSTALL_MODE_PER_ALL_USERS',
+  '  !ifdef BUILD_UNINSTALLER',
+  '    RequestExecutionLevel user',
+  '  !else',
+  '    RequestExecutionLevel admin',
+  '  !endif',
+  '!else',
+  '  RequestExecutionLevel user',
+  '!endif',
+  ''
+].join('\n');
+
+test('installer-nsh: ההחלה הופכת admin ל-user (asInvoker) ומסמנת את השורה', () => {
+  const { text, state } = patchTemplateText(TEMPLATE_HEADER);
+  assert.equal(state, 'patched-now');
+  assert.ok(text.includes('RequestExecutionLevel user ; ' + PATCH_MARK),
+    'השורה שהופכת את המניפסט ל-asInvoker חייבת להיות מסומנת');
+  assert.equal(/RequestExecutionLevel[ \t]+admin/m.test(text), false,
+    'לא נשאר אף RequestExecutionLevel admin בתבנית');
+  // שאר התבנית לא זזה
+  assert.equal(text.replace(/^[ \t]*RequestExecutionLevel.*$/gm, ''),
+    TEMPLATE_HEADER.replace(/^[ \t]*RequestExecutionLevel.*$/gm, ''));
+});
+
+test('installer-nsh: ההחלה אידמפוטנטית — הרצה חוזרת לא מזיקה ולא מוסיפה שורות', () => {
+  const once = patchTemplateText(TEMPLATE_HEADER).text;
+  // זיהוי ההחלה חייב לעבוד: אחרת הרצה חוזרת הייתה נכשלת (או מכפילה את השורה)
+  assert.ok(PATCHED_RE.test(once), 'סימן ההחלה חייב להיות מזוהה');
+  const twice = patchTemplateText(once);
+  assert.equal(twice.state, 'patched');
+  assert.equal(twice.text, once, 'ההחלה החוזרת מחזירה את אותו קובץ בדיוק');
+});
+
+test('installer-nsh: השורה המוחלפת והסימן תואמים זה לזה', () => {
+  // בדיקת "הלוך-חזור": השורה שההחלה כותבת חייבת להיות מזוהה ע"י הביטוי
+  // שמזהה החלה — אחרת ההחלה אינה אידמפוטנטית והיא נכשלת בהרצה שנייה
+  const line = PATCHED_LINE.replace('$1', '    ');
+  assert.ok(PATCHED_RE.test(line), 'הסימן ' + PATCH_MARK + ' חייב להיות מזוהה בשורה שהוכתבה');
+  assert.equal(ADMIN_LINE.test(line), false, 'השורה המוחלפת אינה מכילה יותר admin');
+});
+
+test('installer-nsh: ההחלה נכשלת בקול אם השורה אינה בתבנית', () => {
+  assert.throws(() => patchTemplateText('Name "x"\nRequestExecutionLevel user\n'), /RequestExecutionLevel admin/);
+});
+
+test('installer-nsh: קובץ ההרחבה אינו מנסה לקבוע מניפסט בעצמו', () => {
+  assert.doesNotThrow(() => checkInclude(installerNsh));
+  assert.throws(() => checkInclude('RequestExecutionLevel user\n'), /RequestExecutionLevel/);
+  // !define admin — נבדק ולא עובד (המעבד המקדים של NSIS מחליף סמל רק בראש שורה)
+  assert.throws(() => checkInclude('!define admin user\n'), /!define admin/);
+  assert.ok(read('package.json').includes('"perMachine": true'), 'ההתקנה נשארת perMachine');
+  assert.equal(read('package.json').includes('"script"'), false,
+    'אסור nsis.script: נתיב זה מבטל את בניית המסיר של electron-builder וההתקנה נכשלת');
+});
 
 test('installer-nsh: המתקין מרים את עצמו כשהתהליך אינו מוגבר', () => {
   assert.ok(installerNsh.includes('${UAC_IsAdmin}'), 'חייבת להיות בדיקת הרשאות');
@@ -132,12 +217,58 @@ test('installer-nsh: ההרמה נמצאת בתוך preInit ומוגנת ב-BUIL
     'ההרמה חייבת להיות מוגנת ב-!ifndef BUILD_UNINSTALLER (בניית המסיר רצה בלי הרשאות)');
 });
 
-/* ==================== 3) הבנייה מריצה את התיקון ==================== */
+test('installer-nsh: התבנית שבחבילה מוחלת (ושום מקום אחר לא דורש הרשאות)', () => {
+  const template = checkTemplate();
+  if (!template.checked) return; // node_modules חסר (למשל CI בלי התקנה)
+  assert.equal(template.checked, true);
+  assert.equal(template.file.replace(/\\/g, '/'), 'node_modules/app-builder-lib/templates/nsis/installer.nsi');
+  assert.deepEqual(findOtherAdminLevels(TEMPLATE_DIR, INSTALLER_TEMPLATE), [],
+    'אסור שיהיה RequestExecutionLevel admin במקום נוסף בתבניות');
+});
 
-test('installer-build: npm run dist מריץ את תיקון המניפסט (ולא בונה מתקין בלי התיקון)', () => {
+test('installer-nsh: אימות הבנייה נופל אם חוזר nsis.script', () => {
+  const cfg = JSON.parse(read('package.json'));
+  assert.doesNotThrow(() => checkBuildConfig());
+  assert.equal(!!cfg.build.nsis.script, false);
+  assert.equal(cfg.build.nsis.include, 'build/installer.nsh');
+  assert.ok(String(cfg.scripts.postinstall).includes('patch-nsis-template.js'),
+    'postinstall חייב להחיל את התבנית — אחרת npm ci מחזיר מניפסט requireAdministrator');
+});
+
+test('installer-nsh: בדיקת הקדם (preflight) עוברת במצב הנוכחי של הפרויקט', () => {
+  const res = preflight();
+  assert.equal(res.include, NSIS_INCLUDE);
+  if (fs.existsSync(TEMPLATE_DIR)) assert.equal(res.template.checked, true);
+});
+
+/* ==================== 3) הבנייה מאמתת את המתקין ==================== */
+
+test('installer-build: npm run dist מחיל, מאמת לפני ואחרי, ואין תיקון בדיעבד של ה-EXE', () => {
   const pkg = JSON.parse(read('package.json'));
   const dist = (pkg.scripts && pkg.scripts.dist) || '';
+  const parts = dist.split('&&').map((s) => s.trim());
   assert.ok(dist.includes('electron-builder'), 'dist חייב לבנות עם electron-builder');
-  assert.ok(dist.includes('patch-installer-manifest.js'),
-    'dist חייב להריץ את scripts/patch-installer-manifest.js — אחרת המתקין ייצא עם requireAdministrator');
+  assert.ok(dist.indexOf('patch-nsis-template.js') < dist.indexOf('electron-builder'),
+    'ההחלה חייבת לרוץ לפני הבנייה (וגם ב-postinstall, למקרה שמבנים ידנית)');
+  const buildAt = parts.findIndex((s) => s.includes('electron-builder'));
+  const verifyAt = parts.map((s, i) => (s.includes('verify-installer-manifest.js') ? i : -1)).filter((i) => i >= 0);
+  assert.ok(buildAt > 0 && verifyAt.includes(buildAt + 1),
+    'dist חייב להריץ את scripts/verify-installer-manifest.js גם לפני הבנייה וגם אחריה — ' +
+    'אחרת מתקין פגום עלול להישתחרר בשקט');
+  assert.ok(verifyAt.some((i) => i < buildAt), 'אימות ההקדם (--pre) חייב לרוץ לפני הבנייה');
+  assert.ok(dist.includes('--pre'), 'אימות ההקדם מסומן ב---pre');
+  assert.equal(fs.existsSync(path.join(ROOT, 'scripts', 'patch-installer-manifest.js')), false,
+    'אסור שיהיה סקריפט שמתקן את ה-EXE אחרי הבנייה: כל שינוי בתים במתקין מפיל אותו ' +
+    '(NSIS בודק את שלמות המתקין, והמתקין יוצא בקוד 2 לפני שרץ — זו התקלה של 1.7.2)');
+});
+
+test('installer-build: המתקין שנבנה ב-dist מופץ עם asInvoker (בלי requireAdministrator)', () => {
+  const pkg = JSON.parse(read('package.json'));
+  const file = path.join(ROOT, 'dist', 'Setup.' + pkg.version + '.exe');
+  if (!fs.existsSync(file)) return; // אין בנייה מקומית — אין מה לבדוק
+  const buf = fs.readFileSync(file);
+  const text = buf.toString('latin1');
+  assert.ok(!text.includes('requireAdministrator'),
+    'המתקין שנבנה עדיין דורש הרשאות מנהל — כנראה נבנה בלי npm run dist');
+  assert.ok(text.includes(MANIFEST_AS_INVOKER), 'המתקין צריך להיות מופץ עם מניפסט asInvoker');
 });
