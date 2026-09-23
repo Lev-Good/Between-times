@@ -2650,7 +2650,74 @@ async function hardenProtectedCopy() {
   await excludeFileFromDeny(protectedSettingsFile());
 }
 
-// יצירה/רענון של העותק המוגן — רק בהרצה מוגבהת ורק כשהגרסה השתנתה.
+// האם העותק המוגן זהה **לתיקיית ההתקנה** — ולא לגרסה שאנחנו רצים בה.
+// ההשוואה לגרסה שלנו היא באג אמיתי שהיה כאן: כשהתוכנה רצה מהעותק המוגן
+// (המצב הרגיל בכניסה, כי המשימה מצביעה עליו), ההשוואה תמיד "הצליחה" — ולכן
+// העותק המוגן לא התרענן לעולם אחרי עדכון של תיקיית ההתקנה, ומשימת הכניסה
+// ושומר-השער המשיכו להריץ קוד ישן בשקט.
+function protectedCopyMatchesInstallDir() {
+  if (!isWin) return false;
+  if (!fs.existsSync(sourceExecutable(protectedAppDir()))) return false;
+  const iv = installDirVersion();
+  const pv = protectedVersion();
+  if (!iv || !pv || iv !== pv) return false;
+  return protectedCopyIntegrity();
+}
+
+// כל התהליכים שרצים מתוך תיקייה מסוימת (לפי הנתיב שלהם).
+// `Get-Process` — ולא `tasklist`/WMI, שנכשלים בשקט במחשב עם WBEM פגום.
+function processesFromDir(dir) {
+  return new Promise((resolve) => {
+    if (!isWin) return resolve([]);
+    const ps = 'Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -like ' +
+      psSingleQuote(dir + '\\*') + ' } | ForEach-Object { $_.Id }';
+    execFile('powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', ps],
+      { windowsHide: true, timeout: 20000 }, (err, stdout) => {
+        if (err) return resolve([]);
+        resolve(String(stdout || '').split(/\s+/).filter((s) => /^\d+$/.test(s)).map(Number));
+      });
+  });
+}
+
+// מחיקת עץ תיקייה עם נסיונות חוזרים. `fs.rmSync` נכשל בקלות על Windows — קובץ
+// נעול לרגע (סורק/אנטי-וירוס/תהליך שיצא זה עתה) או איסור מחיקה שלא הוסר על
+// קובץ בודד מפילים אותו כולו — ואז כל הרענון נכשל. כאן מנסים שוב, מנקים
+// מאפיין קריאה-בלבד, ומרימים את איסור המחיקה מחדש בין הנסיונות.
+async function removeTreeRetry(dir) {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ננסה שוב מטה */ }
+    if (!fs.existsSync(dir)) return true;
+    try {
+      for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, ent.name);
+        if (ent.isDirectory()) { await removeTreeRetry(full); continue; }
+        try { fs.chmodSync(full, 0o666); } catch { /* ignore */ }
+        try { fs.unlinkSync(full); } catch { /* ignore */ }
+      }
+      try { fs.rmdirSync(dir); } catch { /* ignore */ }
+    } catch { /* ignore */ }
+    if (!fs.existsSync(dir)) return true;
+    await liftDirProtection(dir);
+    await new Promise((r) => setTimeout(r, 1500));
+  }
+  return !fs.existsSync(dir);
+}
+
+// השומר המערכתי רץ כ-SYSTEM מתוך העותק המוגן — קובץ ההרצה וה-asar שלו טעונים,
+// ואסור שיחזיק אותם בזמן ההחלפה. עוצרים אותו לפני ההחלפה (כמו שהמתקין עושה)
+// ומחזירים אותו מיד אחריה (syncStartup מפעיל מחדש את משימת השומר).
+async function stopSystemGuardForRefresh() {
+  if (!isWin || !isElevated()) return;
+  await stopGuardTask();
+  for (let i = 0; i < 20; i++) {
+    const running = await processesFromDir(protectedAppDir());
+    if (!running.length) return;
+    await new Promise((r) => setTimeout(r, 500));
+  }
+}
+
+// יצירה/רענון של העותק המוגן — רק בהרצה מוגבהת ורק כשהגרסה או התוכן השתנו.
 async function ensureProtectedCopy() {
   if (!isWin || !isElevated()) return false;
   const dst = protectedAppDir();
@@ -2659,12 +2726,15 @@ async function ensureProtectedCopy() {
     // כשהמשימה כבר מריצה את העותק המוגן — אסור להעתיק אותו לעצמו או
     // לדרוס את install.json עם הנתיב המוגן במקום הנתיב המקורי. בכל מקרה
     // מקפידים שתיקיית ההתקנה הגלויה תישאר מוקשחת (איסור מחיקה).
+    // תהליך שרץ מהעותק המוגן אינו יכול להחליף את קובץ ההרצה שלו עצמו —
+    // הרענון נעשה מההתקנה, ומשם גם מועלית ההגדרה המוגבת (ראו
+    // maybeEscalatePrivilegedSetup).
     if (isProtectedRuntime()) {
       await hardenInstallDir();
       return fs.existsSync(sourceExecutable(dst));
     }
     if (!fs.existsSync(sourceExecutable(src))) return false;
-    if (fs.existsSync(sourceExecutable(dst)) && appVersion() && appVersion() === protectedVersion() && protectedCopyIntegrity()) {
+    if (protectedCopyMatchesInstallDir()) {
       await hardenMachineDir();
       await hardenInstallDir();
       await hardenProtectedCopy();
@@ -2672,13 +2742,14 @@ async function ensureProtectedCopy() {
       saveInstallInfo();
       return true; // העותק עדכני — אין צורך להעתיק שוב
     }
-    // רענון העותק המוגן — להרים זמנית את איסור המחיקה לפני החלפת הקבצים
-    // (ההקשחה שלהלן מחזירה אותו מיד אחרי ההעתקה).
+    // רענון העותק המוגן — לעבור את השומר, להרים זמנית את איסור המחיקה לפני
+    // החלפת הקבצים (ההקשחה שלהלן מחזירה אותו מיד אחרי ההעתקה).
+    await stopSystemGuardForRefresh();
     await liftDirProtection(dst);
-    fs.rmSync(dst, { recursive: true, force: true });
-    fs.mkdirSync(dst, { recursive: true });
+    const removed = await removeTreeRetry(dst);
+    if (removed) fs.mkdirSync(dst, { recursive: true });
     // מעתיקים את כל שורש ההתקנה, כולל exe + resources\\app.asar.
-    fs.cpSync(src, dst, { recursive: true });
+    fs.cpSync(src, dst, { recursive: true, force: true });
     if (!fs.existsSync(sourceExecutable(dst))) throw new Error('קובץ ההרצה לא הועתק');
     writeProtectedManifest();
     await hardenMachineDir();
@@ -2686,9 +2757,20 @@ async function ensureProtectedCopy() {
     await hardenProtectedCopy();
     writeProtectedSettingsBackup();
     saveInstallInfo();
+    // אימות אחרי ההעתקה: גרסה זהה להתקנה ושלמות. בלי הבדיקה הזו "הצלחה"
+    // חלקית הייתה עוברת בשקט — בדיוק כמו קודם.
+    if (!protectedCopyMatchesInstallDir()) throw new Error('העותק המוגן אינו תואם את ההתקנה אחרי ההעתקה');
+    logEvent('protected-copy-refreshed', { version: protectedVersion(), from: src });
     return true;
   } catch (err) {
-    console.error('יצירת העותק המוגן נכשלה', err);
+    // בעבר הכשל הזה נבלע (console.error בלבד) ולכן העותק המוגן לא התעדכן
+    // בשקט, בלי שום עקבה. מעכשיו הוא נרשם ליומן הפעילות.
+    logEvent('protected-copy-failed', {
+      error: String((err && err.message) || err),
+      src,
+      installed: installDirVersion(),
+      protected: protectedVersion()
+    });
     return false;
   }
 }
@@ -2791,6 +2873,95 @@ async function syncStartup() {
   }
   startupFault = warnings.length ? warnings.join(' | ') : null;
   return { ok: true, warning: startupFault };
+}
+
+/* ================= ההגדרה המוגבת (עותק מוגן, משימות, רישום לכל המשתמשים) =================
+   כל מה שמחזיק את התוכנה קיים — העותק המוגן ב-%ProgramData%, המשימה שמצביעה
+   עליו ברמת HIGHEST, הרישום לכל המשתמשים ומשימת שומר-השער — דורש הרשאות מנהל.
+   ההגדרה הזו רצה מתוך syncStartup() **רק כשהתוכנה כבר מוגבת**, ומעגל הקסמים נסגר
+   כך: הרצה מוגבת ראשונה קיימת רק אחרי התקנה (המתקין מוגבה) — ואם היא נכשלת מכל
+   סיבה, אין שום מנגנון שמתקן את המצב לתמיד. זו בדיוק הסיבה שהעותק המוגן נשאר
+   על 1.6.2 שבועות, בעוד תיקיית ההתקנה כבר התעדכנה: משימת הכניסה ושומר-השער
+   המשיכו להריץ קוד ישן.
+
+   כאן המעגל נסגר: אם ההגדרה המוגבת חסרה או מיושנת, התוכנה מרימה פעם אחת
+   תהליך של עצמה בהרשאות מנהל (‏elevate.exe) שמבצע אותה ויוצא. */
+
+const privilegedSetupFile = () => path.join(machineDir(), 'privileged-setup.json');
+// מצערת: ניסיון הרמה אחד לשש שעות, כדי לא להקפיץ חלון הרשאות שוב ושוב.
+const PRIVILEGED_SETUP_THROTTLE_MS = 6 * 60 * 60 * 1000;
+
+// גרסת תיקיית ההתקנה (העותק הגלוי) — לא זו שאנחנו רצים בה.
+function installDirVersion() {
+  const info = installInfo();
+  const dir = (info && info.dir) || installSourceDir();
+  try { return JSON.parse(fs.readFileSync(packageJsonPath(dir), 'utf8')).version || ''; } catch { return ''; }
+}
+
+function taskIsHighest() {
+  return new Promise((resolve) => {
+    if (!isWin) return resolve(false);
+    execFile('schtasks', ['/Query', '/TN', TASK_NAME, '/XML'], { windowsHide: true }, (err, stdout) => {
+      if (err || !stdout) return resolve(false);
+      const m = String(stdout).match(/<RunLevel>\s*([^<\s]+)\s*<\/RunLevel>/i);
+      resolve(!!m && /highest/i.test(m[1]));
+    });
+  });
+}
+
+function machineRunRegistered() {
+  return new Promise((resolve) => {
+    if (!isWin) return resolve(false);
+    execFile('reg', ['query', RUN_KEY_MACHINE, '/v', RUN_NAME], { windowsHide: true },
+      (err) => resolve(!err));
+  });
+}
+
+// האם ההגדרה המוגבת חסרה או מיושנת? (נקראת בהרצה שאינה מוגבת)
+async function privilegedSetupNeeded() {
+  if (!isWin) return false;
+  if (!fs.existsSync(sourceExecutable(protectedAppDir()))) return true;
+  const pv = protectedVersion();
+  if (!pv || pv !== installDirVersion()) return true;
+  if (!(await taskIsHighest())) return true;
+  if (!(await machineRunRegistered())) return true;
+  return false;
+}
+
+// מרימים פעם אחת תהליך מוגבה שמבצע את ההגדרה המוגבת ויוצא. התהליך המורם הוא
+// **קובץ ההרצה של ההתקנה** ולא זה של העותק המוגן: רק הרצה שאינה מהעותק המוגן
+// יכולה להחליף אותו (תהליך רץ אינו יכול להחליף את קובץ ההרצה של עצמו).
+function maybeEscalatePrivilegedSetup() {
+  if (!isWin || isElevated() || isTestMode) return;
+  privilegedSetupNeeded().then((needed) => {
+    if (!needed) return;
+    try {
+      const st = JSON.parse(fs.readFileSync(privilegedSetupFile(), 'utf8'));
+      if (st && Date.now() - Number(st.ts || 0) < PRIVILEGED_SETUP_THROTTLE_MS) return;
+    } catch { /* אין ניסיון קודם */ }
+    if (updateInProgress()) return; // לא מפריעים באמצע התקנה
+    const elevate = elevateExe();
+    const info = installInfo();
+    const exe = (info && info.exe && fs.existsSync(info.exe))
+      ? info.exe
+      : sourceExecutable(installSourceDir());
+    try {
+      fs.mkdirSync(machineDir(), { recursive: true });
+      fs.writeFileSync(privilegedSetupFile(),
+        JSON.stringify({ ts: Date.now(), from: appVersion() }), 'utf8');
+    } catch { /* ignore */ }
+    if (!elevate) {
+      logEvent('privileged-setup-no-tool', { exe });
+      return;
+    }
+    logEvent('privileged-setup-launch', { from: appVersion(), installed: installDirVersion(), protected: protectedVersion() });
+    try {
+      const child = spawn(elevate, [exe, '--setup-privileged'],
+        { detached: true, stdio: 'ignore', windowsHide: true });
+      child.on('error', () => { /* מדווח דרך היומן של התהליך המורם */ });
+      child.unref();
+    } catch { /* ignore */ }
+  }).catch(() => { /* ignore */ });
 }
 
 // חסימת יצירת חשבונות חדשים במחשב: מסתירה את דף "חשבונות" בהגדרות Windows,
@@ -4584,6 +4755,9 @@ function registerIpc() {
 
 const isWatchdog = process.argv.includes('--watchdog');
 const isSystemWatchdog = process.argv.includes('--watchdog-system');
+// הרצה חד-פעמית של ההגדרה המוגבת (עותק מוגן, משימות, רישום לכל המשתמשים).
+// מועלית ע"י maybeEscalatePrivilegedSetup, מבצעת ויוצאת — בלי חלון ובלי מגש.
+const isPrivilegedSetup = process.argv.includes('--setup-privileged');
 const stateDir = () => app.getPath('userData');
 const mainHbFile = () => path.join(stateDir(), 'main.heartbeat');
 const watchHbFile = () => path.join(stateDir(), 'watchdog.heartbeat');
@@ -5129,10 +5303,37 @@ async function gracefulQuit() {
   app.quit();
 }
 
-/* ================= אתחול ================= */
-
-if (isSystemWatchdog) {
-
+/* ================= אתחול ================= */if (isPrivilegedSetup) {
+  // הרצה חד-פעמית של ההגדרה המוגבת. תנאי סף: הרשאות מנהל ו**לא** מהעותק
+  // המוגן — תהליך שרץ מהעותק המוגן אינו יכול להחליף את עצמו, והרענון חייב
+  // לבוא מתיקיית ההתקנה. בסיום יוצאים מיד; אין חלון, מגש או נעילה.
+  app.whenReady().then(async () => {
+    const elevated = isElevated();
+    const fromProtected = isProtectedRuntime();
+    logEvent('privileged-setup-start', { elevated, fromProtected });
+    if (!elevated) {
+      logEvent('privileged-setup-no-admin');
+    } else if (fromProtected) {
+      logEvent('privileged-setup-wrong-source');
+    } else {
+      let warning = null;
+      try {
+        const res = await syncStartup();
+        warning = (res && res.warning) || null;
+      } catch (e) {
+        warning = String((e && e.message) || e);
+      }
+      logEvent('privileged-setup-done', {
+        warning,
+        installed: installDirVersion(),
+        protected: protectedVersion(),
+        taskHighest: await taskIsHighest()
+      });
+    }
+    app.exit(0);
+  });
+  app.on('window-all-closed', () => { /* נשאר פעיל עד היציאה המפורשת */ });
+} else if (isSystemWatchdog) {
   // מצב שומר-שער מערכתי (SYSTEM) — אינו נועל את ה-instance ואינו יוצר
   // חלונות: רק משחזר את קבצי התוכנה והמשימות המתוזמנות שנמחקו.
   app.whenReady().then(() => runSystemWatchdog());
@@ -5296,6 +5497,12 @@ if (isSystemWatchdog) {
       } else if (startupResult && startupResult.warning) {
         logEvent('startup-warning', { error: startupResult.warning });
       }
+
+      // ההגדרה המוגבת (עותק מוגן, משימת HIGHEST, רישום לכל המשתמשים) דורשת
+      // הרשאות מנהל. אם היא חסרה או מיושנת — מרימים אותה פעם אחת. בלעדיה
+      // משימת הכניסה ושומר-השער ממשיכים להריץ קוד ישן בעצבות. ראו
+      // maybeEscalatePrivilegedSetup.
+      setTimeout(maybeEscalatePrivilegedSetup, 4000);
 
       // בדיקת עדכונים ברקע (אינה חוסמת, אופליין = שקט) — רק אם המפתח הגדיר מקור
       if (UPDATE_URL) setTimeout(() => checkForUpdate(), 8000);

@@ -359,6 +359,111 @@ test('main: עדכון שלא רץ בכלל מדווח למשתמש (סימן "�
   assert.ok(main.includes("logEvent('update-installed'"), 'עדכון שהצליח נרשם ביומן');
 });
 
+/* ========== 2ג) רענון העותק המוגן וההגדרה המוגבת (23/9/2026, סבב שני) ==========
+   הסימפטום שהתגלה: העותק המוגן ב-%ProgramData%\BenHazmanim\app נשאר על גרסה
+   עתיקה (1.6.2) בעוד תיקיית ההתקנה כבר התעדכנה — ומכיוון שמשימת הכניסה (HIGHEST)
+   ושומר-השער (SYSTEM) רצים **מהעותק המוגן**, נמשך ריצה של קוד ישן בעצבות.
+   שני כשלים בשורש:
+   (א) ההשוואה "האם העותק עדכני" נעשתה מול **הגרסה של התהליך שרץ** במקום מול
+       תיקיית ההתקנה — וכשהתוכנה רצה מהעותק המוגן (המצב הרגיל בכניסה) ההשוואה
+       תמיד "הצליחה" ולכן העותק לא התרענן לעולם;
+   (ב) כשל בהעתקה נבלע ב-console.error בלבד — בלי עקבה ביומן, בלי דיווח. */
+
+const ensureFn = (() => {
+  const at = read('main.js').indexOf('async function ensureProtectedCopy');
+  assert.ok(at !== -1, 'ensureProtectedCopy חייבת להתקיים');
+  const end = read('main.js').indexOf('\n}', at);
+  return read('main.js').slice(at, end);
+})();
+
+test('main: רענון העותק המוגן מושווה להתקנה — לא לגרסה של התהליך שרץ', () => {
+  const main = read('main.js');
+  assert.ok(main.includes('function protectedCopyMatchesInstallDir'),
+    'חייבת להיות השוואה מפורשת מול תיקיית ההתקנה');
+  const cmp = main.slice(main.indexOf('function protectedCopyMatchesInstallDir'));
+  const cmpBody = cmp.slice(0, 400);
+  assert.ok(cmpBody.includes('installDirVersion()') && cmpBody.includes('protectedVersion()'),
+    'ההשוואה חייבת להיות בין גרסת ההתקנה לגרסת העותק המוגן');
+  assert.equal(cmpBody.includes('appVersion()'), false,
+    'אסור להשוות לגרסה שאנחנו רצים בה: מהעותק המוגן ההשוואה תמיד מצליחה, וזו בדיוק התקלה');
+  assert.ok(ensureFn.includes('protectedCopyMatchesInstallDir()'),
+    'ensureProtectedCopy חייבת להשתמש בהשוואה הנכונה');
+  assert.equal(ensureFn.includes('appVersion() === protectedVersion()'), false,
+    'ההשוואה הישנה (מול עצמנו) הוסרה');
+});
+
+test('main: כשל ברענון העותק המוגן נרשם ביומן — לא נבלע', () => {
+  assert.ok(ensureFn.includes("logEvent('protected-copy-failed'"),
+    'כשל בהעתקה חייב להיות גלוי (בעבר הוא נבלע ב-console.error בלבד)');
+  assert.ok(ensureFn.includes('console.error') === false || ensureFn.includes('logEvent'),
+    'הכשל אינו מסתפק ב-console.error');
+  assert.ok(ensureFn.includes("logEvent('protected-copy-refreshed'"), 'רענון מוצלח נרשם אף הוא');
+  assert.ok(ensureFn.includes('protectedCopyMatchesInstallDir()'),
+    'וגם אחרי ההעתקה מאמתים שהעותק אכן תואם את ההתקנה');
+});
+
+test('main: לפני החלפת העותק המוגן עוצרים את השומר ומרימים איסור מחיקה', () => {
+  assert.ok(ensureFn.includes('stopSystemGuardForRefresh'),
+    'השומר המערכתי רץ מתוך העותק המוגן ומחזיק את הקבצים — חייבים לעצור אותו');
+  const order = ['stopSystemGuardForRefresh', 'liftDirProtection', 'removeTreeRetry', 'cpSync'];
+  let last = -1;
+  for (const step of order) {
+    const at = ensureFn.indexOf(step);
+    assert.ok(at > last, 'הסדר חייב להיות: ' + order.join(' → '));
+    last = at;
+  }
+  const main = read('main.js');
+  assert.ok(main.includes('async function removeTreeRetry'),
+    'מחיקה עם נסיונות חוזרים — fs.rmSync נכשל בקלות על קובץ נעול לרגע');
+  assert.ok(main.includes('function processesFromDir'),
+    'לעצירת השומר משתמשים ב-Get-Process לפי נתיב (לא ב-tasklist/WMI)');
+});
+
+test('main: ההגדרה המוגבת מועלית פעם אחת כשהיא חסרה או מיושנת', () => {
+  const main = read('main.js');
+  assert.ok(main.includes("'--setup-privileged'"), 'חייב מצב הרצה להגדרה המוגבת');
+  assert.ok(main.includes('function maybeEscalatePrivilegedSetup'), 'וחייבת להיות ההפעלה שלו');
+  assert.ok(main.includes('function privilegedSetupNeeded'), 'והבדיקה אם הוא נדרש');
+  const need = main.slice(main.indexOf('async function privilegedSetupNeeded'));
+  const needBody = need.slice(0, 600);
+  assert.ok(needBody.includes('protectedVersion()') && needBody.includes('installDirVersion()'),
+    'העותק המוגן חייב להיבדק מול ההתקנה');
+  assert.ok(needBody.includes('taskIsHighest()'), 'והמשימה חייבת להיות ברמת HIGHEST');
+  assert.ok(needBody.includes('machineRunRegistered()'), 'והרישום לכל המשתמשים קיים');
+  // מצערת: בלי זה חלון הרשאות היה קופץ בכל הפעלה
+  assert.ok(main.includes('PRIVILEGED_SETUP_THROTTLE_MS'), 'חייבת מצערת על ניסיונות ההרמה');
+  assert.ok(main.includes('privileged-setup.json'), 'המצערת נשמרת בקובץ');
+  // ההרמה חייבת להשתמש בקובץ ההרצה של ההתקנה (ולא זה של העותק המוגן)
+  const esc = main.slice(main.indexOf('function maybeEscalatePrivilegedSetup'));
+  const escBody = esc.slice(0, 1800);
+  assert.ok(escBody.includes('elevateExe()'), 'ההרמה עוברת ב-elevate.exe');
+  assert.ok(escBody.includes('info.exe'), 'ומרימה את קובץ ההרצה של תיקיית ההתקנה');
+});
+
+test('main: מצב ההגדרה המוגבת דורש הרשאות, לא עולה מהעותק המוגן, ויוצא', () => {
+  const main = read('main.js');
+  const at = main.indexOf('if (isPrivilegedSetup)');
+  assert.ok(at !== -1, 'מצב ההגדרה המוגבת חייב להיות ענף נפרד');
+  assert.ok(main.indexOf('if (isPrivilegedSetup)') < main.indexOf('if (isSystemWatchdog)'),
+    'הענף חייב להיות לפני מצבי השומר — אחרת הוא לא ייכנס אליו');
+  const branch = main.slice(at, main.indexOf('} else if (isSystemWatchdog)', at));
+  assert.ok(branch.includes('if (!elevated)'), 'בלי הרשאות מנהל אין מה לעשות — מדווחים ויוצאים');
+  assert.ok(branch.includes('fromProtected'),
+    'עותק מוגן לא יכול להחליף את עצמו — חייבים לוותר ולצאת');
+  assert.ok(branch.includes('syncStartup()'), 'העבודה עצמה היא syncStartup');
+  assert.ok(branch.includes('app.exit(0)'), 'התהליך יוצא בסיום — בלי חלון ובלי מגש');
+  assert.ok(main.includes('setTimeout(maybeEscalatePrivilegedSetup, 4000)'),
+    'ההפעלה עצמה נקראת מאתחול התוכנה הראשית');
+});
+
+test('installer-nsh: אחרי ההתקנה מפעילים את קובץ ההרצה ישירות (לא קיצור דרך)', () => {
+  const install = macroBody('customInstall');
+  assert.ok(install.includes('ExecShell "" "$INSTDIR\\${APP_EXECUTABLE_FILENAME}"'),
+    'ההרצה שאחרי ההתקנה חייבת להיות ישירה — היא ההרצה המוגבת היחידה שמרעננת את העותק המוגן');
+  assert.equal(/ExecShell "" "\$launchLink"/.test(install), false,
+    'הפעלה דרך קיצור דרך עוברת ב-shell ויכולה לאבד הרשאות — ומשאירה את העותק המוגן מאחור');
+});
+
 /* ==================== 3) הבנייה מאמתת את המתקין ==================== */
 
 test('installer-build: npm run dist מחיל, מאמת לפני ואחרי, ואין תיקון בדיעבד של ה-EXE', () => {

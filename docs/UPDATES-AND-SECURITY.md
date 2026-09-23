@@ -72,7 +72,7 @@ flowchart TD
 ```powershell
 npm test
 ```
-וודאו ש-**0 כשלים** (Pass). נכון ל-1.7.4: **350 בדיקות** — 348 עוברות ו-2
+וודאו ש-**0 כשלים** (Pass). נכון ל-1.7.5: **356 בדיקות** — 354 עוברות ו-2
 מדולגות (בדיקות האימות החי מול GitHub, ראו שלב 8). שימו לב שפלט הבדיקות
 מפוצל לכמה קבוצות הרצה (בדיקות ה-E2E מרימות Electron אמיתי) — לסכום יש לקבץ
 את כל שורות `ℹ tests`, ולא להסתפק בשורה האחרונה.
@@ -105,8 +105,8 @@ electron-builder), מאמתת לפני הבנייה שהמנגנון בתוקף,
 
 בסיום ייווצר הקובץ ומיד אחריו יודפס אישור האימות:
 ```
-dist\Setup.1.7.4.exe
-verify-installer-manifest: …\dist\Setup.1.7.4.exe
+dist\Setup.1.7.5.exe
+verify-installer-manifest: …\dist\Setup.1.7.5.exe
   מניפסט: asInvoker (נקבע בזמן הקומפילציה) — ללא requireAdministrator
   שלמות מול מטא-דאטה של הבנייה: ok
 ```
@@ -119,7 +119,7 @@ verify-installer-manifest: …\dist\Setup.1.7.4.exe
 
 אימות מניפסט (רשות — שנייה אחת, ומחזיר תשובה חד-משמעית):
 ```powershell
-$b=[IO.File]::ReadAllBytes("dist\Setup.1.7.4.exe"); $s=[Text.Encoding]::UTF8.GetString($b)
+$b=[IO.File]::ReadAllBytes("dist\Setup.1.7.5.exe"); $s=[Text.Encoding]::UTF8.GetString($b)
 if ($s -match 'requireAdministrator') { "לא מתוקן — אסור לפרסם" } else { "asInvoker — תקין" }
 ```
 
@@ -154,7 +154,7 @@ Get-Content "$env:ProgramData\BenHazmanim\update-result.json" -ErrorAction Silen
 ### שלב 4: חישוב טביעת ה-SHA-256 של המתקין
 הריצו פקודה זו ב-PowerShell (החליפו למספר הגרסה שלכם):
 ```powershell
-(Get-FileHash .\dist\Setup.1.7.4.exe -Algorithm SHA256).Hash.ToLower()
+(Get-FileHash .\dist\Setup.1.7.5.exe -Algorithm SHA256).Hash.ToLower()
 ```
 העתיקו את המחרוזת בת 64 התווים שמתקבלת.
 

@@ -1,5 +1,65 @@
 # יומן עבודה — בין הזמנים
 
+## 2026-09-23 (4) — העותק המוגן לא התרענן ומשימת הכניסה לא נוצרה (1.7.5)
+
+### מטרה
+1. לתקן את כשל הרענון של העותק המוגן — יצירת המשימה המתוזמנת הרומת נכשלת
+   ב-`Access is denied`, ולכן שומר-השער ומשימת הכניסה ממשיכים להריץ קוד ישן.
+2. להשיב על השאלה: האם מי שיש לו 1.6.5 יצליח לעדכן **מתוך התוכנה** לגרסאות הבאות.
+
+### מה נבדק (מצב בפועל, לפני התיקון)
+- `%APPDATA%\בין הזמנים - ניהול זמן מחשב\activity.log` הכיל סדרה חוזרת של
+  `startup-warning` עם `schtasks /Create /TN BenHazmanim … /SC ONLOGON /RL HIGHEST /F`
+  → `ERROR: Access is denied.` — כלומר היצירה נכשלה בהרצות שאינן מוגבהות, וההגדרה
+  המוגבת לא תוקנה מעולם (ההגדרה רצה רק בהרצה מוגבת, וההרצה המוגבת היחידה הייתה
+  זו שאחרי התקנה).
+- העותק המוגן (`%ProgramData%\BenHazmanim\app`) היה 1.7.3 בעוד תיקיית ההתקנה 1.7.4
+  (נמדד לפי ‏`LastWrite` של `app.asar`) — בלי שום רשומת כשל ביומן.
+- בקוד: `ensureProtectedCopy()` השוותה את גרסת העותק המוגן ל-`appVersion()` — הגרסה
+  של **התהליך שרץ** — במקום לגרסת תיקיית ההתקנה, וכשל בהעתקה נבלע ב-`console.error`
+  בלבד.
+- ההפעלה של התוכנה בסוף ההתקנה נעשתה דרך קיצור דרך (‏.lnk) — נתיב שעובר ב-shell
+  ועלול לאבד הרשאות, ואז ההרצה היחידה שיכולה לרענן את העותק המוגן אינה מוגבת.
+
+### מה בוצע
+- `main.js`: `installDirVersion()`, `protectedCopyMatchesInstallDir()`,
+  `processesFromDir()` (‏`Get-Process`, בלי WMI), `removeTreeRetry()`,
+  `stopSystemGuardForRefresh()`, אימות בסוף ההעתקה ורישום
+  `protected-copy-refreshed` / `protected-copy-failed`.
+- `main.js`: מצב `--setup-privileged` ו-`maybeEscalatePrivilegedSetup()` — אם ההגדרה
+  המוגבת חסרה או מיושנת, התוכנה מרימה פעם אחת תהליך מוגבה שמבצע אותה ויוצא
+  (מצערת: ניסיון אחד לשש שעות).
+- `build/installer.nsh`: ההפעלה בסוף ההתקנה עברה מקיצור דרך לקובץ ההרצה הישיר.
+- `test/installer-manifest.test.js`: שש בדיקות חדשות (32 בבדיקות המתקין).
+
+### בדיקות
+- `node --test test/installer-manifest.test.js` → 32/32.
+- `npm test` → **356 בדיקות, 0 כשלים, 2 מדולגות** (האימות החי מול GitHub).
+- **הרצת ההגדרה המוגבת כמו שהתוכנה מרימה אותה**
+  (`elevate.exe <exe> --setup-privileged`) →
+  `privileged-setup-done {installed:1.7.5, protected:1.7.5, taskHighest:true, warning:null}`.
+- **ההתקנה (09:03)**: נרשם `protected-copy-refreshed {version:1.7.5, from:"C:\\Program Files\\ben-hazmanim"}`;
+  העותק המוגן והתיקייה זהים ביט-בביט (`app.asar` = `db7b62af…`, 904,945 בתים בשניהם);
+  משימת הכניסה `HighestAvailable` עם ‏`StartBoundary` 09:08 ומצביעה על העותק המוגן;
+  משימת השומר `BenHazmanimGuard` קיימת (‏`schtasks /Query` מחזיר `Access is denied`
+  בהרצה לא-מורמת, מול `The system cannot find the file specified` לשם שאינו קיים).
+- **ניסוי "בדיוק כמו 1.6.5"**: `spawn(Setup.1.7.5.exe, ['/S'], {detached, stdio:'ignore'})`
+  מתהליך **לא-מורם**, בלי `elevate.exe` → התהליך הלא-מורם יצא בקוד 2 אחרי
+  `preinit-elevate-dispatched`, התהליך המורם (pid 17700) המשיך, ההתקנה הושלמה
+  (`install-section` → `verify-atomic-ok`), השני עותקים נשארו 1.7.5 והתוכנה עלתה מחדש.
+
+### בעיות
+- היצירה של המשימה הרומת נכשלת בהרצה לא-מוגבת (`Access is denied`) — לא בגלל
+  באג במשימה עצמה, אלא מפני שאין הרשאה. הבעיה האמיתית הייתה שאין מסלול תיקון
+  למצב הזה; הוא נסגר בהחלטה 3 לעיל.
+- כלי האבחון שלי (‏Git Bash) מעבירים `TEMP=/tmp` לתהליכי הבן — הרצות אבחון נדרשו
+  סביבה מתוקנת. אינה בעיה של התוכנה.
+
+### סטטוס
+הקוד, הבנייה (‏`Setup.1.7.5.exe`, 92,114,984 בתים, `asInvoker`, טביעה
+`a8e7e455…`) והתיעוד מוכנים; **טרם פורסם** (נדרשים תג ומהדורה כדי שכל מי
+שמותקן אצלו יקבל את התיקון).
+
 ## 2026-09-23 (3) — "מוריד וסוגר את התוכנה אבל לא מתקין": אבחון מלא ותיקון (1.7.4)
 
 ### מטרה

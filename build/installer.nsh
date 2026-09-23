@@ -579,13 +579,17 @@ FunctionEnd
   Delete "$APPDATA\בין הזמנים - ניהול זמן מחשב\relaunch.flag"
   Delete "$APPDATA\${PRODUCT_NAME}\relaunch.flag"
   Delete "$R1\BenHazmanim\relaunch.flag"
-  ; launch the freshly installed app (fallback: the exe directly if the
-  ; Start-menu shortcut is missing for any reason)
-  ${If} ${FileExists} "$launchLink"
-    ExecShell "" "$launchLink"
-  ${Else}
-    ExecShell "" "$INSTDIR\${APP_EXECUTABLE_FILENAME}"
-  ${EndIf}
+  ; מפעילים את **קובץ ההרצה ישירות** — ולא דרך קיצור הדרך.
+  ;
+  ; למה זה קריטי: ההרצה הזו היא הרצה המוגבת היחידה שיש אחרי התקנה/עדכון,
+  ; והיא זו שמרעננת את העותק המוגן ב-%ProgramData% (ומשם גם יוצרת את משימת
+  ; הכניסה ברמת HIGHEST ואת משימת שומר-השער). הפעלה של קיצור דרך (‏.lnk)
+  ; יוצאת דרך ה-shell דרך COM, ושם התהליך יכול לאבד את ההרשאות — ואז ההרצה
+  ; שאחרי ההתקנה אינה מוגבת, ההגדרה המוגבת לא מתבצעת, ומשימת הכניסה ושומר-השער
+  ; ממשיכים להריץ את הגרסה הישנה (שזו הסיבה שהעותק המוגן נשאר על גרסה עתיקה
+  ; בעוד ההתקנה כבר התעדכנה). הפעלה ישירה של ה-EXE מהמתקין המוגבה יוצרת תהליך
+  ; מוגבה בכל מחשב.
+  ExecShell "" "$INSTDIR\${APP_EXECUTABLE_FILENAME}"
 !macroend
 ; ---------------------------------------------------------------------------
 ; Custom License Code Verification Page (Forum Registration & Profile Code)

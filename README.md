@@ -131,8 +131,8 @@ PowerShell לדוגמה לפני `npm run dist`:
 $env:CSC_LINK = 'C:\secure\lev-tov-code-signing.pfx'
 $env:CSC_KEY_PASSWORD = '<password-from-secret-store>'
 npm run dist
-Get-AuthenticodeSignature '.\dist\Setup.1.7.4.exe' | Format-List Status,SignerCertificate
-(Get-FileHash '.\dist\Setup.1.7.4.exe' -Algorithm SHA256).Hash.ToLower()
+Get-AuthenticodeSignature '.\dist\Setup.1.7.5.exe' | Format-List Status,SignerCertificate
+(Get-FileHash '.\dist\Setup.1.7.5.exe' -Algorithm SHA256).Hash.ToLower()
 ```
 
 מנגנון העדכונים של התוכנה מבוסס על מקור ה-GitHub הרשמי, תקשורת מוצפנת, ואימות טביעת אצבע דיגיטלית (SHA-256) מדויקת ללא עלויות רישוי מסחריות. פירוט מלא ונוהל שחרור גרסאות עתידיות נמצאים ב־[`docs/UPDATES-AND-SECURITY.md`](docs/UPDATES-AND-SECURITY.md).
