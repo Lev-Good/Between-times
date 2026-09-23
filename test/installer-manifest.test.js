@@ -241,6 +241,124 @@ test('installer-nsh: בדיקת הקדם (preflight) עוברת במצב הנו�
   if (fs.existsSync(TEMPLATE_DIR)) assert.equal(res.template.checked, true);
 });
 
+/* ========== 2ב) עצירת התוכנה, אימות ההתקנה ותיקון (התקלה של 23/9/2026) ==========
+   השתלשלות הכשל שדווח: "מוריד את הגרסה וסוגר את התוכנה אבל לא מתקין".
+   1) במחשב שבו מאגר WBEM פגום נכשלים `tasklist` ו-`Get-CimInstance` ("Invalid
+      class") בשקט — ואז המתקין *לא רואה* את התוכנה שרצה;
+   2) התוכנה (או השומר שלה, או המשתמש שלחץ על הסמל) עולה מחדש בזמן ההעתקה;
+   3) קובץ הרצה פתוח ו-asar ממופה אינם ניתנים להחלפה, ולכן electron-builder
+      עובר למסלול שמתעלם משגיאות — התקנה חלקית שקטה, קוד 0, המצהירה הצלחה.
+   ההגנות שנבדקות כאן הן מה שמונע כל אחד מהשלבים האלה. */
+
+const macroBody = (name) => {
+  const at = installerNsh.indexOf('!macro ' + name);
+  assert.ok(at !== -1, 'המאקרו ' + name + ' חייב להתקיים');
+  return installerNsh.slice(at, installerNsh.indexOf('!macroend', at));
+};
+
+const functionBody = (name) => {
+  const at = installerNsh.indexOf('Function ' + name);
+  assert.ok(at !== -1, 'הפונקציה ' + name + ' חייבת להתקיים');
+  return installerNsh.slice(at, installerNsh.indexOf('FunctionEnd', at));
+};
+
+test('installer-nsh: עצירת התוכנה אינה תלויה ב-WMI/tasklist', () => {
+  // העצירה היא Function (נקראת משני מקומות במקטע ההתקנה)
+  assert.ok(macroBody('BENHAZ_STOP_APP').includes('Call BENHAZ_StopApp'),
+    'המאקרו חייב לקרוא לפונקציית העצירה');
+  // העצירה עצמה יושבת במאקרו BENHAZ_STOPAPP_BODY, שמוטמע בשני עותקים —
+  // installer (BENHAZ_StopApp) ו-un (un.BENHAZ_StopApp); רק אחד נבנה בכל מעבר.
+  const installerCopy = functionBody('BENHAZ_StopApp');
+  assert.ok(installerCopy.includes('BENHAZ_STOPAPP_BODY'), 'הפונקציה חייבת להטמיע את מאקרו העצירה');
+  const unCopy = installerNsh.slice(installerNsh.indexOf('Function un.BENHAZ_StopApp'));
+  assert.ok(unCopy.slice(0, 200).includes('BENHAZ_STOPAPP_BODY'),
+    'גם המסיר צריך עותק (מאקרו עם תויות היה מתנגש בשתי ההזמנות)');
+  const stop = macroBody('BENHAZ_STOPAPP_BODY');
+  assert.ok(stop.includes('Get-Process'), 'העצירה חייבת להשתמש ב-Get-Process (אינו תלוי WMI)');
+  assert.equal(/tasklist|Get-CimInstance/.test(stop), false, 'אסור להסתמך על tasklist/CIM — הם נכשלים בשקט');
+  assert.ok(stop.includes('$INSTDIR\\*'), 'חייבים לחסל תהליכים מתיקיית ההתקנה');
+  assert.ok(stop.includes('BenHazmanim\\app\\*'), 'וגם את העותק המוגן (השומר המערכתי)');
+  assert.ok(stop.includes('BenhazStopLoop') && stop.includes('Stop-Process -Force'),
+    'חייבת לולאת חיסול: שומר-השער מקפיץ את התוכנה חזרה תוך שניות');
+});
+
+test('installer-nsh: בדיקת "התוכנה רצה" של electron-builder מוחלפת', () => {
+  const body = macroBody('customCheckAppRunning');
+  assert.ok(body.includes('BENHAZ_QUIT_FLAGS'), 'העקיפה חייבת קודם כל לכתוב את דגלי העצירה (התוכנה יוצאת לבד)');
+  assert.ok(body.includes('BENHAZ_STOP_APP'), 'ואחר כך לחסל את מי שלא יצא');
+});
+
+test('installer-nsh: ההתקנה נאמתת ומתוקנת — ואסור "להצליח" עם קבצים נעולים', () => {
+  const install = macroBody('customInstall');
+  assert.ok(install.includes('BENHAZ_VERIFY_INSTALL'), 'customInstall חייב לאמת את ההתקנה לפני ההפעלה מחדש');
+  const verify = macroBody('BENHAZ_VERIFY_INSTALL');
+  assert.ok(verify.includes('$PLUGINSDIR\\7z-out'),
+    'זיהוי העתקה חלקית: electron-builder מוחק את 7z-out רק במסלול שמתעלם משגיאות');
+  assert.ok(verify.includes('app-*.7z'), 'התיקון מחלץ מחדש את החבילה שנארזה במתקין עצמו');
+  assert.ok(verify.includes('FileSeek'), 'אימות לפי גודל app.asar שהותקן מול זה שבחבילה');
+  assert.ok(verify.includes('BENHAZ_WRITE_RESULT'), 'נכתב דוח תוצאה שהתוכנה מדווחת ממנו');
+  assert.ok(macroBody('BENHAZ_WRITE_RESULT').includes('update-result.json'), 'הדוח נכתב לנתיב שהתוכנה קוראת');
+  assert.ok(verify.includes('BENHAZ_WRITE_RESULT false'), 'כשל מדווח כדוח כשל (ok:false)');
+  assert.ok(verify.includes('MessageBox'), 'כשל חייב להיות גלוי למשתמש');
+  const msgLine = verify.split(/\r?\n/).find((l) => l.trim().startsWith('MessageBox'));
+  assert.ok(msgLine && !msgLine.includes('/SD'),
+    'אסור /SD על הודעת הכשל: הוא משתיק אותה בהתקנה שקטה — וזה בדיוק הכשל השקט שאסור לחזור עליו');
+});
+
+test('installer-nsh: "התקנה בעיצומה" נכתב לפני ההעתקה ונמחק בסיומה', () => {
+  const preInit = installerNsh.indexOf('!macro preInit');
+  const mark = installerNsh.indexOf('BENHAZ_WRITE_PROGRESS', preInit);
+  const wait = installerNsh.indexOf('Sleep 4000', preInit);
+  assert.ok(mark !== -1 && wait !== -1 && mark < wait,
+    'הסימון נכתב לפני ההמתנה לסגירת התוכנה — אחרת חלון ההתקנה נשאר פתוח לעלייה מחדש');
+  assert.ok(installerNsh.includes('Delete "$R2\\BenHazmanim\\update-in-progress.json"'),
+    'הסימון מוסר בסוף ההתקנה, אחרת התוכנה לא תעלה מחדש');
+});
+
+test('main: התוכנה לא עולה בזמן התקנה, ומדווחת אם ההתקנה נכשלה', () => {
+  const main = read('main.js');
+  assert.ok(main.includes('const updateProgressFile'), 'חייב קובץ תיאום "התקנה בעיצומה"');
+  const guard = main.indexOf('if (updateInProgress()) {');
+  assert.ok(guard !== -1, 'באתחול חייבת להיות בדיקת "התקנה בעיצומה"');
+  assert.ok(main.slice(guard, guard + 260).includes('app.exit(0)'),
+    'התוכנה יוצאת מיד בזמן התקנה — אחרת היא נועלת את הקבצים שהמתקין מחליף');
+  assert.ok(main.includes("logEvent('update-failed'"), 'כשל התקנה נרשם ביומן הפעילות');
+  assert.ok(main.includes('reportUpdateResult'), 'והמשתמש מקבל הודעה — ולא נשאר על גרסה ישנה בשקט');
+});
+
+test('installer-nsh: כל שלב נרשם ליומן, וה-pid נכתב לרגיסטר הנכון', () => {
+  const log = macroBody('BENHAZ_LOG');
+  assert.ok(log.includes('BenHazmanim-Update.log'),
+    'כל שלב נרשם לקובץ שהמשתמש יכול לשלוח — כשל שקט חייב להשאיר עקבה');
+  for (const stage of ['preinit-start', 'preinit-elevate-dispatched', 'preinit-inner-no-admin',
+    'preinit-elevate-failed', 'preinit-proceed-elevated', 'app-check-running',
+    'install-section', 'verify-atomic-ok', 'verify-needs-repair', 'verify-repaired-ok', 'verify-FAIL']) {
+    assert.ok(installerNsh.includes('"' + stage + '"'), 'חסר שלב ביומן ההתקנה: ' + stage);
+  }
+  // System::Call: r7 (אות קטנה) = $7, ולא $R7. עם אות קטנה ה-pid נכתב ריק,
+  // update-in-progress.json יצא כ-{"pid":} — JSON פגום שהתוכנה מפרשת כ"אין
+  // התקנה בעיצומה", עולה בזמן ההעתקה ונועלת את הקבצים. זה נמדד בפועל.
+  assert.equal(/\.r\d'/.test(installerNsh), false,
+    'System::Call עם אות קטנה כותב ל-$7 ולא ל-$R7 — ה-pid/המונה יוצאים ריקים');
+  assert.ok(/GetCurrentProcessId\(\) i \.R7'/.test(installerNsh), 'ה-pid של המתקין חייב להיות נרשם');
+  assert.ok(installerNsh.includes('{"pid":$R7,"version":"${VERSION}"}'),
+    'update-in-progress.json חייב pid אמיתי — אחרת ה-JSON פגום וההגנה מושבתת');
+});
+
+test('main: עדכון שלא רץ בכלל מדווח למשתמש (סימן "עדכון ממתין")', () => {
+  const main = read('main.js');
+  assert.ok(main.includes('update-pending.json'), 'חייב סימן עדכון ממתין שנשאר על הדיסק');
+  const launch = main.indexOf("logEvent('update-launch'");
+  const mark = main.indexOf('markUpdatePending(version)');
+  assert.ok(launch !== -1 && mark > launch,
+    'הסימן נכתב רק אחרי שהמתקין אומת רץ — כישלון הרמה אינו "עדכון שלא הותקן"');
+  const quit = main.indexOf('writeQuitFlag()', mark);
+  assert.ok(quit !== -1 && mark < quit, 'הסימן נכתב לפני סגירת התוכנה — אחרת לא נכתב כלל');
+  assert.ok(main.includes("notifyUpdateFailed(wanted, 'no-install')"),
+    'אם נחזור לאותה גרסה — המשתמש מקבל התראה ולא נשאר בשקט');
+  assert.ok(main.includes("logEvent('update-installed'"), 'עדכון שהצליח נרשם ביומן');
+});
+
 /* ==================== 3) הבנייה מאמתת את המתקין ==================== */
 
 test('installer-build: npm run dist מחיל, מאמת לפני ואחרי, ואין תיקון בדיעבד של ה-EXE', () => {

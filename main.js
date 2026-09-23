@@ -3368,6 +3368,9 @@ async function downloadAndInstallUpdate() {
       };
     }
     logEvent('update-launch', { version, elevated: launched.elevated });
+    // סימן שהעדכון בעיצומו. נשאר על הדיסק עד האתחול הבא: אם נחזור לאותה
+    // גרסה — ההתקנה לא בוצעה, והמשתמש יקבל התראה במקום כלום.
+    markUpdatePending(version);
     // דגל עצירה בכל הנתיבים — השומר-שער לא יקפיץ את התוכנה בזמן ההתקנה.
     // המתקין עצמו גם כותב את הדגל ב-preInit וממתין לסגירתנו.
     // (נכתב רק אחרי שהמתקין אומת רץ: superviseWatchdog סוגר את התוכנה ברגע
@@ -4585,6 +4588,89 @@ const stateDir = () => app.getPath('userData');
 const mainHbFile = () => path.join(stateDir(), 'main.heartbeat');
 const watchHbFile = () => path.join(stateDir(), 'watchdog.heartbeat');
 
+// ================= קבצי התיאום עם המתקין =================
+// בזמן עדכון המתקין מחליף את כל קבצי התוכנה — כולל בין הזמנים.exe ו-
+// resources/app.asar. קובץ הרצה פתוח או asar ממופה **לא ניתן להחלפה**, והמתקין
+// (בהתקנה שקטה) מדלג עליהם בשקט ומדווח הצלחה: זו בדיוק התקלה שבה "העדכון מוריד
+// וסוגר את התוכנה אבל לא מתקין" (23/9/2026). לכן המתקין כותב שני קבצים:
+//   • update-in-progress.json — עם ה-pid שלו, מתחילת ההתקנה ועד סופה;
+//   • update-result.json — עם גרסת ההתקנה ותוצאתה (ok/stage).
+// התוכנה קוראת אותם באתחול: הראשונה מונעת ממנה לעלות ולנעול את הקבצים,
+// והשנייה מאפשרת לדווח למשתמש בעברית כשההתקנה נכשלה במקום להישאר בשקט.
+const updateProgressFile = () => path.join(machineDir(), 'update-in-progress.json');
+const updateResultFile = () => path.join(machineDir(), 'update-result.json');
+// סימן "עדכון ממתין": נכתב **לפני** סגירת התוכנה, אחרי שהמתקין אומת רץ.
+// באתחול הבא משווים את הגרסה שאנחנו רצים בה לזו שביקשנו לעדכן אליה.
+const updatePendingFile = () => path.join(machineDir(), 'update-pending.json');
+
+function markUpdatePending(version) {
+  try {
+    fs.mkdirSync(machineDir(), { recursive: true });
+    fs.writeFileSync(updatePendingFile(),
+      JSON.stringify({ version: String(version), ts: Date.now() }), 'utf8');
+  } catch { /* ignore */ }
+}
+
+function readJsonFileQuiet(file) {
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
+}
+
+// האם מתקין עדכון פעיל כרגע? pid חי = כן. pid מת או קובץ פגום = ניקוי והמשך,
+// כדי שקובץ יתום (המתקין נסגר בכוח / קרס) לעולם לא יחסום את עליית התוכנה.
+function updateInProgress() {
+  const file = updateProgressFile();
+  if (!fs.existsSync(file)) return false;
+  const info = readJsonFileQuiet(file);
+  const pid = info && Number(info.pid);
+  if (pid && pid !== process.pid && isProcessAlive(pid)) return true;
+  try { fs.unlinkSync(file); } catch { /* ignore */ }
+  return false;
+}
+
+// התראה חד-פעמית למשתמש על עדכון שלא הותקן.
+function notifyUpdateFailed(version, stage) {
+  logEvent('update-failed', { version, stage });
+  const locked = stage === 'locked' || stage === 'verify' || stage === 'no-install';
+  const body = 'העדכון לגרסה ' + version + ' לא הותקן.' + (locked
+    ? ' סגרו את התוכנה לגמרי (יציאה מהמגש) ונסו שוב בהגדרות → עדכון, או התקינו ידנית מעמוד ההורדות.'
+    : ' נסו שוב בהגדרות → עדכון.');
+  try {
+    if (tray && typeof tray.displayBalloon === 'function') {
+      tray.displayBalloon({ title: 'העדכון לא הותקן', content: body });
+      return;
+    }
+  } catch { /* ignore */ }
+  try { dialog.showMessageBox({ type: 'error', title: 'העדכון לא הותקן', message: body }); } catch { /* ignore */ }
+}
+
+// דיווח חד-פעמי למשתמש אם העדכון לא הושלם — בשני מסלולים משלימים:
+//   1. update-result.json — המתקין רץ והסתיים, והוא עצמו סימן כישלון באימות.
+//      אם הגרסה שהמתקין מדווח עליה שונה מזו שאנחנו רצים בה, ההחלפה לא קרתה.
+//   2. update-pending.json — סימן שהתוכנה כתבה לפני שנסגרה. אם הוא נשאר
+//      ואנחנו עוד על הגרסה הישנה, ההתקנה לא רצה כלל (נחסמה / נתקעה). בלי
+//      המסלול הזה עדכון שלא רץ היה שקט לחלוטין — בדיוק התקלה שדווחה.
+function reportUpdateResult() {
+  const file = updateResultFile();
+  if (fs.existsSync(file)) {
+    const res = readJsonFileQuiet(file);
+    try { fs.unlinkSync(file); } catch { /* ignore */ }
+    const version = String((res && res.version) || '');
+    if (res && res.ok === false) {
+      if (version && version !== app.getVersion()) notifyUpdateFailed(version, String(res.stage || ''));
+      else logEvent('update-verify-note', { version, stage: res.stage });
+    }
+  }
+  const pending = updatePendingFile();
+  if (fs.existsSync(pending)) {
+    const p = readJsonFileQuiet(pending);
+    try { fs.unlinkSync(pending); } catch { /* ignore */ }
+    const wanted = String((p && p.version) || '');
+    if (!wanted) return;
+    if (wanted !== app.getVersion()) notifyUpdateFailed(wanted, 'no-install');
+    else logEvent('update-installed', { version: wanted });
+  }
+}
+
 // דגלי העצירה וההפעלה מחדש נכתבים/נבדקים בכמה נתיבים, כדי שהמתקין והאפליקציה
 // ימצאו תמיד זה את זה גם כששם המוצר משתנה בין package.json לבין build config,
 // וגם כשסביבת המשתמש של האפליקציה ושל המתקין שונה (למשל הרצה מוגבהת):
@@ -5082,6 +5168,16 @@ if (isSystemWatchdog) {
     app.whenReady().then(async () => {
       if (isWin) app.setAppUserModelId('com.levtov.benhazmanim');
 
+      // הופעלנו בזמן שהמתקין מחליף את קבצי התוכנה (המשתמש לחץ על הסמל, או
+      // השומר הקיץ אותנו). עלייה כזו נועלת את בין הזמנים.exe ואת app.asar
+      // וגורמת להעתקה חלקית ושקטה — לכן יוצאים מיד, בלי חלון ובלי מגש.
+      // המתקין מפעיל אותנו מחדש בסוף ההתקנה.
+      if (updateInProgress()) {
+        logEvent('update-wait');
+        app.exit(0);
+        return;
+      }
+
       // Wake הוא גבול Session: אין להמתין ל-Timer הישן לאחר Sleep/Hibernate.
       // מבטלים cache ומריצים Reconciliation מיידי.
       if (powerMonitor && typeof powerMonitor.on === 'function') {
@@ -5188,6 +5284,7 @@ if (isSystemWatchdog) {
       setInterval(enforce, 5000); // בדיקה כל 5 שניות
 
       superviseWatchdog(); // הגנה הדדית: הראשי מקפיץ את השומר
+      setTimeout(reportUpdateResult, 2000); // דיווח אם סבב העדכון הקודם לא הושלם
 
       // הפעלה עם Windows — בהתאם להגדרה השמורה ומצב ההרשאות
       const startupResult = await syncStartup();

@@ -1,5 +1,87 @@
 # יומן עבודה — בין הזמנים
 
+## 2026-09-23 (3) — "מוריד וסוגר את התוכנה אבל לא מתקין": אבחון מלא ותיקון (1.7.4)
+
+### מטרה
+המשתמש דיווח שוב: אחרי 1.7.3 העדכון עדיין לא מותקן — הוא מוריד את הגרסה המעודכנת,
+סוגר את התוכנה הנוכחית, ולא מתקין. המשימה: למצוא את ההבדל מול גרסאות שעבדו,
+לפתור, ולהוכיח שהפתרון עובד.
+
+### מה נבדק (ומה היה המצב בפועל)
+1. **מצב המחשב:** `C:\Program Files\ben-hazmanim` ו-`%ProgramData%\BenHazmanim\app`
+   היו כבר ב-1.7.3 (הותקנו במהלך הסבב הקודם), והתוכנה רצה. כלומר הסבב הקודם *כן*
+   התקין — ולכן המתקין של 1.7.3 תקין, והתקלה שדווחה היא מהשרשרת שלפניו או מכשל
+   שקט בהעתקה.
+2. **מה השתנה מול הגרסאות שעבדו:** `git diff --ignore-cr-at-eol v1.6.5 v1.7.0 --
+   build/installer.nsh` — שורה אחת בלבד (grant icacls); `v1.7.0..v1.7.1` — כלום.
+   כלומר הבדל ההתנהגות אינו בקובץ ההרחבה אלא בכך שמתקיני 1.6.5–1.7.1 הופצו עם
+   `RequestExecutionLevel admin` (requireAdministrator), והתוכנה מפעילה אותם
+   ב-`spawn(dest, ['/S'])` — CreateProcess, שאינו מרים הרשאות ומול מניפסט
+   `requireAdministrator` נכשל מיד בשגיאה 740, בלי חלון UAC ובלי שגיאה. התוכנה
+   (1.6.5) בכל מקרה סגרה את עצמה בסוף `downloadAndInstallUpdate` — בדיוק
+   "מוריד, סוגר, לא מתקין". 1.7.3 תיקן את המניפסט ל-`asInvoker` (ראו AGENT_LOG
+   של הסבב הקודם).
+3. **מה עוד יכול לגרום לזה בשקט (ואומת שהוא המסלול האמיתי):** ב-electron-builder
+   (`include/extractAppPackage.nsh`, `extractUsing7za`) ההעתקה מהחבילה היא
+   "אטומית" עם 5 נסיונות של שנייה; אם היא נכשלת (קובץ נעול) הוא **מוחק את
+   `$PLUGINSDIR\7z-out`** ועובר ל-`Nsis7z::Extract` ישירות ל-`$INSTDIR`, שמתעלם
+   משגיאות — התקנה חלקית, קוד יציאה 0, ואפס דיווח. במסלול השקט גם
+   `MessageBox ... /SD IDRETRY` שחוסם התקנה ידנית מושתק. כלומר: כל מי שמחזיק
+   קובץ נעול בזמן ההעתקה מקבל בדיוק את הסימפטום שדווח.
+4. **באג שנמצא בקוד החדש של הסבב הקודם:** `System::Call '...GetCurrentProcessId()
+   i .r7'` — `r7` (אות קטנה) הוא `$7`, לא `$R7`. ה-pid ב-
+   `update-in-progress.json` נכתב ריק, כלומר ה-JSON יצא פגום (`{"pid":,"..."}`)
+   והתוכנה פירשה אותו כ"אין התקנה בעיצומה" — ההגנה שמנעה ממנה לעלות בזמן
+   ההחלפה **לא פעלה בכלל**. אומת בפרוב NSIS נפרד שכל שאר הווריאנטים מחזירים
+   את ה-pid.
+
+### בוצע
+- **יומן המתקין (`BENHAZ_LOG`):** כל שלב נכתב ל-`%TEMP%\BenHazmanim-Update.log`
+  עם pid, tick וגרסה: `preinit-start`, `preinit-elevate-dispatched`,
+  `preinit-inner-no-admin`, `preinit-elevate-failed`, `preinit-proceed-elevated`,
+  `preinit-app-wait-done`, `app-check-running`, `install-section`,
+  `verify-atomic-ok`, `verify-needs-repair`, `verify-repaired-ok`, `verify-FAIL`.
+  (כשל בהתקנה שקטה היה שקט לחלוטין — מעכשיו יש עקבה.)
+- **תיקון ה-pid** ל-`.R7` בשלושת מקומות `System::Call`.
+- **תיקון מחרוזת שבורה** ב-`MessageBox` של מסלול הכשל: המחרוזת נשברה לשורות עם
+  `\r\n` מילולי, ו-makensis נכשל ב-"unterminated string" (`dist174e.log`) —
+  כלומר **הבנייה של 1.7.4 נכשלה והפילה ארטיפקט חלקי של 132KB ל-`dist`**. תוקן
+  ואוחד לשורה אחת.
+- `!include "LogicLib.nsh"` בקובץ ההרחבה (קוד שאינו מאקרו משתמש ב-`${If}`;
+  הקובץ נכלל לפני שהתבנית טוענת את LogicLib).
+- **`main.js` — סימן "עדכון ממתין"** (`update-pending.json`) שנכתב אחרי שהמתקין
+  אומת רץ ולפני סגירת התוכנה, ובאתחול הבא מדווח אם הגרסה לא השתנתה; ושני מסלולי
+  הדיווח (`update-result.json` מהמתקין, והסימן הזה) ב-`reportUpdateResult`.
+- בדיקות: שתי בדיקות חדשות ב-`test/installer-manifest.test.js` (שלבי היומן +
+  רגיסטר ה-pid; סימן העדכון הממתין), ותיקון בדיקה שהתיישנה מול המימוש (העצירה
+  יושבת במאקרו `BENHAZ_STOPAPP_BODY`, והפונקציה רק מטמיעה אותו).
+
+### אימות בפועל (על המחשב הזה)
+- בנייה: `npm run dist` → 0; `dist/Setup.1.7.4.exe` = 92,112,886 בתים,
+  מניפסט `asInvoker`, שלמות מול מטא-דאטה של הבנייה — ok; טביעה
+  `31b56f86…` (תואמת ל-`version.json`).
+- **קצה-לקצה**, בהפעלה זהה לזו של התוכנה (`spawn` detached, `windowsHide`, `/S`):
+  התהליך הלא-מורם יצא בקוד 2 (ההרמה בוצעה), התהליך המורם רץ (pid 6656),
+  `update-in-progress.json` = `{"pid":6656,"version":"1.7.4"}` (JSON תקין),
+  תהליכי התוכנה חוסלו, `app.asar` הוחלף בפועל (891,408 → **893,481** בתים),
+  `update-result.json` = `{"ok":true,"stage":"atomic"}`, והתוכנה עלתה מחדש.
+  היומן המלא נקרא ומצטלם ב-`docs/UPDATES-AND-SECURITY.md`.
+- **מסלול "העדכון לא רץ"**: הונח `update-pending.json` לגרסה 9.9.9, התוכנה
+  הופעלה מחדש — נרשם `{"type":"update-failed","details":{"version":"9.9.9",
+  "stage":"no-install"}}` והסימן נמחק.
+- `npm test` — 350 בדיקות, 0 כשלים, 2 מדולגות.
+
+### קבצים שהושפעו
+- `build/installer.nsh`, `main.js`, `test/installer-manifest.test.js`,
+  `package.json`, `renderer/index.html`, `version.json`,
+  `docs/CHANGELOG.md`, `docs/DECISIONS.md`, `docs/MIGRATION-1.7.4.md`,
+  `docs/UPDATES-AND-SECURITY.md`, `README.md`.
+
+### סטטוס
+הושלם (מאומת בקצה-לקצה). הפרסום: גרסה 1.7.4.
+
+---
+
 ## 2026-09-23 (המשך) — 1.7.2 יצאה עם מתקין פגום; התיקון עבר לזמן הקומפילציה (1.7.3)
 
 ### מטרה

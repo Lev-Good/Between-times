@@ -77,6 +77,284 @@
   FileClose $0
 !macroend
 
+; ============================================================================
+; עצירת התוכנה בזמן התקנה/עדכון — בלי WMI ובלי tasklist
+; ----------------------------------------------------------------------------
+; למה זה כאן ולא רק אצל electron-builder: הבדיקה המובנית שלהם (`FIND_PROCESS`,
+; `KILL_PROCESS`) מבוססת על `tasklist`/`Get-CimInstance` — כלומר על WMI. במחשב
+; שה-WBEM בו פגום (נפוץ אחרי שדרוגי Windows) שתי הפקודות נכשלות בשקט
+; ("Invalid class"), המתקין "לא רואה" את התוכנה, ממשיך להעתיק לתוך קבצים
+; נעולים, ואז — בהתקנה שקטה — עובר למסלול שמתעלם משגיאות. התוצאה: התוכנה
+; נסגרת, המתקין מדווח הצלחה, והגרסה לא מתעדכנת. זו בדיוק התקלה שדווחה
+; (23/9/2026): "מוריד וסוגר את התוכנה אבל לא מתקין".
+; `Get-Process` (להבדיל מ-`Get-CimInstance`) אינו תלוי ב-WMI ולכן עובד גם שם.
+; ============================================================================
+
+; כתיבת דגלי העצירה בכל הנתיבים שהתוכנה והשומר בודקים. התוכנה והשומר יוצאים
+; לבד כשהם רואים את הדגל; זה הנתיב ה"מנומס", ולכן הוא ראשון.
+; ============================================================================
+; יומן אבחון של המתקין — נכתב תמיד, גם בהתקנה שקטה
+; ----------------------------------------------------------------------------
+; למה זה קיים: כשל בהתקנה שקטה הוא שקט מטבעו. המתקין יוצא בלי חלון ובלי שגיאה,
+; ובמחשב של המשתמש אין שום דרך לדעת היכן הוא נעצר (23/9/2026: "מוריד וסוגר אבל
+; לא מתקין"). כל שלב — הרמה, עצירת התוכנה, החלפת קבצים, אימות — נרשם כאן עם
+; pid, כדי שאפשר יהיה לאבחן כשל עתידי מהמחשב של המשתמש עצמו.
+; הקובץ: %TEMP%\BenHazmanim-Update.log (שורה אחת לכל שלב).
+; ============================================================================
+!include "LogicLib.nsh" ; נדרש: קוד שאינו מאקרו בקובץ הזה משתמש ב-${If}
+
+!macro BENHAZ_LOG stage
+  Push $0
+  Push $R5
+  Push $R6
+  Push $R7
+  ClearErrors
+  ReadEnvStr $R6 "TEMP"
+  ${If} $R6 == ""
+    ReadEnvStr $R6 "LOCALAPPDATA"
+  ${EndIf}
+  System::Call 'kernel32::GetCurrentProcessId() i .R7'
+  ClearErrors
+  System::Call 'kernel32::GetTickCount() i .R5'
+  FileOpen $0 "$R6\BenHazmanim-Update.log" a
+  ${IfNot} ${Errors}
+    FileSeek $0 0 END
+    FileWrite $0 "[${stage}] pid=$R7 tick=$R5 v=${VERSION}$\r$\n"
+    FileClose $0
+  ${EndIf}
+  Pop $R7
+  Pop $R6
+  Pop $R5
+  Pop $0
+!macroend
+
+!macro BENHAZ_QUIT_FLAGS
+  Push $0
+  CreateDirectory "$APPDATA\BenHazmanim"
+  FileOpen $0 "$APPDATA\BenHazmanim\quit.flag" w
+  FileWrite $0 "installer"
+  FileClose $0
+  CreateDirectory "$APPDATA\בין הזמנים - ניהול זמן מחשב"
+  FileOpen $0 "$APPDATA\בין הזמנים - ניהול זמן מחשב\quit.flag" w
+  FileWrite $0 "installer"
+  FileClose $0
+  CreateDirectory "$APPDATA\${PRODUCT_NAME}"
+  FileOpen $0 "$APPDATA\${PRODUCT_NAME}\quit.flag" w
+  FileWrite $0 "installer"
+  FileClose $0
+  ReadEnvStr $R6 "PROGRAMDATA"
+  CreateDirectory "$R6\BenHazmanim"
+  FileOpen $0 "$R6\BenHazmanim\quit.flag" w
+  FileWrite $0 "installer"
+  FileClose $0
+  Pop $0
+!macroend
+
+; עצירת התוכנה: מחסל כל תהליך שנתיבו בתיקיית ההתקנה או בעותק המוגן, וממתין
+; עד שכולם נעלמו. הלוגיקה ב-PowerShell בקובץ נפרד ($PLUGINSDIR) כדי להימנע
+; מכל בעיית ציטוט בין NSIS ל-PowerShell, ולהעביר את הנתיבים כפרמטרים.
+; בשקט ובסבלנות (עד 15 שניות): שומר-שער יכול להעלות את התוכנה מחדש, ולכן
+; אנחנו חוזרים ומחסלים עד שהתיקייה נקייה.
+; פונקציה (ולא מאקרו): היא נקראת גם מבדיקת "התוכנה רצה" וגם מתיקון ההתקנה,
+; ומאקרו עם תוויות היה מתנגש בעצמו בשתי ההזמנות. שני עותקים — installer ו-un.
+; (ב-makensis של המסיר נדרש שם שמתחיל ב-un.) רק אחד מהם נבנה בכל מעבר.
+!macro BENHAZ_STOPAPP_BODY
+  InitPluginsDir
+  Push $0
+  Push $R6
+  Push $R7
+  Push $R8
+  Push $R9
+  ; קוד היציאה של ה-PowerShell: 1 = אין יותר תהליכים כאלה.
+  FileOpen $0 "$PLUGINSDIR\bh-stop.ps1" w
+  FileWrite $0 'param([string]$$dir, [string]$$dir2)$\r$\n'
+  FileWrite $0 '$$p = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $$_.Path -like $$dir -or $$_.Path -like $$dir2 })$\r$\n'
+  FileWrite $0 'if ($$p.Count -gt 0) { $$p | Stop-Process -Force -ErrorAction SilentlyContinue; exit 0 }$\r$\n'
+  FileWrite $0 'exit 1$\r$\n'
+  FileClose $0
+  ReadEnvStr $R6 "PROGRAMDATA"
+  StrCpy $R8 0
+  BenhazStopLoop:
+    nsExec::ExecToStack 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\bh-stop.ps1" -dir "$INSTDIR\*" -dir2 "$R6\BenHazmanim\app\*"'
+    Pop $R7 ; קוד יציאה
+    Pop $R9 ; פלט
+    ; פקודות NSIS בסיסיות (ולא LogicLib): הפונקציה הזו נכתבת בקובץ ההרחבה
+    ; לפני שהתבנית של electron-builder טוענת את LogicLib.
+    StrCmp $R7 "1" BenhazStopDone
+    IntOp $R8 $R8 + 1
+    IntCmp $R8 15 BenhazStopDone 0 BenhazStopDone
+    Sleep 1000
+    Goto BenhazStopLoop
+  BenhazStopDone:
+  Pop $R9
+  Pop $R8
+  Pop $R7
+  Pop $R6
+  Pop $0
+!macroend
+
+!ifndef BUILD_UNINSTALLER
+Function BENHAZ_StopApp
+  !insertmacro BENHAZ_STOPAPP_BODY
+FunctionEnd
+!else
+Function un.BENHAZ_StopApp
+  !insertmacro BENHAZ_STOPAPP_BODY
+FunctionEnd
+!endif
+
+!macro BENHAZ_STOP_APP
+  !ifdef BUILD_UNINSTALLER
+    Call un.BENHAZ_StopApp
+  !else
+    Call BENHAZ_StopApp
+  !endif
+!macroend
+
+; קובץ "התקנה בעיצומה": התוכנה קוראת אותו באתחול ויוצאת מיד, כדי שגם אם
+; מישהו מפעיל אותה (או השומר מקפיץ אותה) בזמן ההחלפה — היא לא תנעל את הקבצים
+; ותגרום להעתקה חלקית. pid של המתקין: כשהמתקין מת, הקובץ מתבטל מעצמו.
+!macro BENHAZ_WRITE_PROGRESS
+  Push $0
+  Push $R6
+  Push $R7
+  ReadEnvStr $R6 "PROGRAMDATA"
+  CreateDirectory "$R6\BenHazmanim"
+  System::Call 'kernel32::GetCurrentProcessId() i .R7'
+  FileOpen $0 "$R6\BenHazmanim\update-in-progress.json" w
+  FileWrite $0 '{"pid":$R7,"version":"${VERSION}"}'
+  FileClose $0
+  Pop $R7
+  Pop $R6
+  Pop $0
+!macroend
+
+; דוח התוצאה של ההתקנה — הקובץ שהתוכנה קוראת באתחול הבא ומדווחת ממנו
+; למשתמש (בעברית) אם העדכון לא הושלם. לפני התיקון הזה, כשל חלקי היה שקט
+; לחלוטין: המתקין "הצליח", התוכנה עלתה מחדש, והמשתמש לא ידע דבר.
+!macro BENHAZ_WRITE_RESULT ok stage
+  Push $0
+  Push $R6
+  ReadEnvStr $R6 "PROGRAMDATA"
+  CreateDirectory "$R6\BenHazmanim"
+  FileOpen $0 "$R6\BenHazmanim\update-result.json" w
+  FileWrite $0 '{"version":"${VERSION}","ok":${ok},"stage":"${stage}"}'
+  FileClose $0
+  Pop $R6
+  Pop $0
+!macroend
+
+; ============================================================================
+; אימות ההתקנה ותיקון עצמי — לב התיקון
+; ----------------------------------------------------------------------------
+; electron-builder מחלץ את החבילה ל-$PLUGINSDIR\7z-out ומעתיק משם ל-$INSTDIR
+; בהעתקה "אטומית" עם 5 נסיונות (CopyFiles + IfErrors). אם ההעתקה נכשלת — קובץ
+; נעול — הוא **מוחק את 7z-out** וחולץ ישירות ל-$INSTDIR תוך התעלמות משגיאות.
+; כלומר: אפשר לזהות בוודאות שההעתקה האטומית נכשלה — 7z-out חסר. ואז:
+;   1. לעצור את התוכנה שוב (מי שהפריע להעתקה הראשונה),
+;   2. לחלץ את החבילה מחדש מתוך המתקין עצמו (app-*.7z נשאר ב-$PLUGINSDIR),
+;   3. להעתיק שוב, בנסיונות חוזרים, ולאמת את גודל app.asar בהתקנה מול המקור.
+;   4. אם גם זה נכשל — להיכשל **בקול רם** (הודעה + דוח), ולא להעמיד פנים שהצלחנו.
+; ============================================================================
+!macro BENHAZ_VERIFY_INSTALL
+  Push $0
+  Push $1
+  Push $R2
+  Push $R3
+  Push $R4
+  Push $R6
+  Push $R7
+  ${If} ${FileExists} "$PLUGINSDIR\7z-out\*.*"
+    ; מסלול נקי: ההעתקה האטומית הצליחה — כל הקבצים הוחלפו.
+    !insertmacro BENHAZ_LOG "verify-atomic-ok"
+    !insertmacro BENHAZ_WRITE_RESULT true atomic
+    Goto BenhazVerifyDone
+  ${EndIf}
+  ; ההעתקה נכשלה (התוכנה רצה בזמן ההעתקה) — מתקנים כאן.
+  !insertmacro BENHAZ_LOG "verify-needs-repair"
+  !insertmacro BENHAZ_STOP_APP
+  StrCpy $R6 ""
+  FindFirst $0 $1 "$PLUGINSDIR\app-*.7z"
+  ${If} $1 != ""
+    StrCpy $R6 "$PLUGINSDIR\$1"
+  ${EndIf}
+  FindClose $0
+  ${If} $R6 == ""
+    !insertmacro BENHAZ_WRITE_RESULT false no-payload
+    Goto BenhazVerifyFail
+  ${EndIf}
+  RMDir /r "$PLUGINSDIR\bh-repair"
+  CreateDirectory "$PLUGINSDIR\bh-repair"
+  ClearErrors
+  Push $OUTDIR
+  SetOutPath "$PLUGINSDIR\bh-repair"
+  Nsis7z::Extract "$R6"
+  Pop $R7
+  Pop $OUTDIR
+  SetOutPath $OUTDIR
+  StrCpy $R2 0
+  BenhazRepairLoop:
+    !insertmacro BENHAZ_STOP_APP
+    ClearErrors
+    CopyFiles /SILENT "$PLUGINSDIR\bh-repair\*" "$INSTDIR"
+    IfErrors 0 BenhazRepairCopied
+    IntOp $R2 $R2 + 1
+    ${If} $R2 < 3
+      Sleep 2000
+      Goto BenhazRepairLoop
+    ${EndIf}
+    !insertmacro BENHAZ_WRITE_RESULT false locked
+    Goto BenhazVerifyFail
+  BenhazRepairCopied:
+  ; אימות: גודל app.asar שהותקן זהה לזה שבחבילה שחולצה.
+  StrCpy $R3 ""
+  StrCpy $R4 ""
+  ClearErrors
+  FileOpen $0 "$INSTDIR\resources\app.asar" r
+  ${IfNot} ${Errors}
+    FileSeek $0 0 END $R3
+    FileClose $0
+  ${EndIf}
+  ClearErrors
+  FileOpen $0 "$PLUGINSDIR\bh-repair\resources\app.asar" r
+  ${IfNot} ${Errors}
+    FileSeek $0 0 END $R4
+    FileClose $0
+  ${EndIf}
+  ${If} $R3 == ""
+  ${OrIf} $R4 == ""
+  ${OrIf} $R3 != $R4
+    !insertmacro BENHAZ_WRITE_RESULT false verify
+    Goto BenhazVerifyFail
+  ${EndIf}
+  !insertmacro BENHAZ_LOG "verify-repaired-ok"
+  !insertmacro BENHAZ_WRITE_RESULT true repaired
+  ; הניקוי מתבצע רק בסיום מוצלח — כדי לאפשר נסיון תיקון חוזר.
+  RMDir /r "$PLUGINSDIR\bh-repair"
+  Goto BenhazVerifyDone
+  BenhazVerifyFail:
+    !insertmacro BENHAZ_LOG "verify-FAIL"
+    ; כישלון גלוי. MessageBox בלי /SD מוצג גם בהתקנה שקטה (זו התנהגות NSIS),
+    ; וזה מכוון: עדיף שהמשתמש יראה שהעדכון לא הותקן מאשר שיסתמך על גרסה
+    ; שלא התעדכנה בלי לדעת.
+    MessageBox MB_ICONSTOP|MB_OK "העדכון של 'בין הזמנים' לא הושלם.$\r$\n$\r$\nהתוכנה (או שומר-השער שלה) הייתה פתוחה בזמן החלפת הקבצים, ולכן חלק מקבצי הגרסה החדשה לא הוחלפו.$\r$\n$\r$\nסגרו את התוכנה לגמרי (קליק ימני על סמל המנעול שבמגש המערכת ובחירת יציאה) והריצו שוב את העדכון. הגרסה שהורדה נשמרה במלואה."
+  BenhazVerifyDone:
+  Pop $R7
+  Pop $R6
+  Pop $R4
+  Pop $R3
+  Pop $R2
+  Pop $1
+  Pop $0
+!macroend
+
+; הבדיקה של electron-builder (האם התוכנה רצה) — מוחלפת בגרסה שלא תלויה ב-WMI.
+!macro customCheckAppRunning
+  !insertmacro BENHAZ_LOG "app-check-running"
+  !insertmacro BENHAZ_QUIT_FLAGS
+  !insertmacro BENHAZ_STOP_APP
+!macroend
+
 !macro preInit
   ; ---------------------------------------------------------------------------
   ; הרמה עצמית — הדבר הראשון שרץ, לפני כל השאר.
@@ -95,8 +373,10 @@
   ; התוכנה נשארת פתוחה ורק מוצגת הודעה.
   ; ---------------------------------------------------------------------------
   !ifndef BUILD_UNINSTALLER
+    !insertmacro BENHAZ_LOG "preinit-start"
     ${IfNot} ${UAC_IsAdmin}
       ${If} ${UAC_IsInnerInstance}
+        !insertmacro BENHAZ_LOG "preinit-inner-no-admin"
         ; הופעלנו על ידי תהליך מרים ולא קיבלנו הרשאות (למשל סיסמת מנהל שגויה)
         MessageBox MB_ICONSTOP|MB_OK "כדי להתקין את 'בין הזמנים' נדרש חשבון מנהל. ההתקנה לא בוצעה."
         Quit
@@ -105,28 +385,21 @@
       ${GetParameters} $R9
       ExecShell "runas" "$EXEPATH" "$R9"
       ${IfNot} ${Errors}
+        !insertmacro BENHAZ_LOG "preinit-elevate-dispatched"
         Quit ; התהליך המורם ממשיך את ההתקנה במקומנו
       ${EndIf}
+      !insertmacro BENHAZ_LOG "preinit-elevate-failed"
       MessageBox MB_ICONSTOP|MB_OK "כדי להתקין את 'בין הזמנים' יש לאשר את בקשת ההרשאה של Windows.$\r$\n$\r$\nהאישור לא ניתן, ולכן ההתקנה לא בוצעה. נסו שוב ואשרו את החלון."
       Quit
     ${EndIf}
-  !endif
 
+    !insertmacro BENHAZ_LOG "preinit-proceed-elevated"
   ; write quit.flag into every location the app may check, BEFORE
   ; electron-builder tries to close the running app (preInit runs before
-  ; allowOnlyOneInstallerInstance).
-  CreateDirectory "$APPDATA\BenHazmanim"
-  FileOpen $0 "$APPDATA\BenHazmanim\quit.flag" w
-  FileWrite $0 "installer"
-  FileClose $0
-  CreateDirectory "$APPDATA\בין הזמנים - ניהול זמן מחשב"
-  FileOpen $0 "$APPDATA\בין הזמנים - ניהול זמן מחשב\quit.flag" w
-  FileWrite $0 "installer"
-  FileClose $0
-  CreateDirectory "$APPDATA\${PRODUCT_NAME}"
-  FileOpen $0 "$APPDATA\${PRODUCT_NAME}\quit.flag" w
-  FileWrite $0 "installer"
-  FileClose $0
+  ; allowOnlyOneInstallerInstance). גם מסמן "התקנה בעיצומה" — כדי שהתוכנה
+  ; לא תעלה מחדש (ע"י המשתמש או ע"י השומר) בזמן החלפת הקבצים ותנעל אותם.
+  !insertmacro BENHAZ_QUIT_FLAGS
+  !insertmacro BENHAZ_WRITE_PROGRESS
   ; also stop the SYSTEM watchdog (BenHazmanimGuard, runs from the protected
   ; copy in %ProgramData%\BenHazmanim\app) so it won't restore files/tasks
   ; while the installer is replacing them
@@ -160,6 +433,9 @@
     Sleep 500
     Goto WaitAppExit
   AppExited:
+  !insertmacro BENHAZ_LOG "preinit-app-wait-done"
+  !endif ; !BUILD_UNINSTALLER — בבניית המסיר אין תוכנה שצריך לעצור ואין דגלים
+         ; לכתוב: בנייה במחשב שבו התוכנה מותקנת לא תסגור אותה יותר.
 !macroend
 
 ; On uninstall: clean up everything the app created outside its install dir.
@@ -269,6 +545,17 @@
   nsExec::Exec 'cmd /c icacls "$R1\BenHazmanim" /grant *S-1-5-32-545:(OI)(CI)M /C'
   nsExec::Exec 'cmd /c icacls "$R1\BenHazmanim\settings.json" /grant *S-1-5-32-545:(M)'
 
+  ; ---------------------------------------------------------------------------
+  ; אימות ההתקנה ותיקון קבצים נעולים — לפני שמסירים את דגלי העצירה ומפעילים
+  ; את התוכנה. אם ההעתקה האטומית נכשלה, כאן משלימים אותה (או נכשלים בגלוי).
+  ; ---------------------------------------------------------------------------
+  !insertmacro BENHAZ_LOG "install-section"
+  !insertmacro BENHAZ_VERIFY_INSTALL
+  ; ההתקנה הסתיימה — "התקנה בעיצומה" מוסר כדי שהתוכנה תעלה מחדש.
+  Push $R2
+  ReadEnvStr $R2 "PROGRAMDATA"
+  Delete "$R2\BenHazmanim\update-in-progress.json"
+  Pop $R2
   ; preInit writes quit.flag so the running copy can exit. Remove it before
   ; relaunching; a normal user cannot delete the protected ProgramData copy.
   Delete "$APPDATA\BenHazmanim\quit.flag"

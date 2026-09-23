@@ -120,9 +120,10 @@ npm run dist
 ב-`preInit` — וזו הסיבה שהפעלה שלו מכל גרסת תוכנה מותקנת מצליחה ומציגה חלון
 UAC במקום להיכשל בשקט. **אין לגעת בקובץ ההתקנה אחרי הבנייה** (זה מה שהפיל את
 מתקין 1.7.2 — NSIS בודק את שלמות המתקין שלו בזמן ההרצה), ואין לבנות עם
-`electron-builder` ישירות בלי ההחלה. פירוט מלא: `docs/MIGRATION-1.7.3.md`.
+`electron-builder` ישירות בלי ההחלה. פירוט מלא: `docs/MIGRATION-1.7.3.md`
+        ו-`docs/MIGRATION-1.7.4.md` (הגנות האימות, התיקון העצמי והדיווח).
 
-הפצה מחייבת חתימת Authenticode. `forceCodeSigning: true` גורם ל־electron-builder לעצור את הבנייה אם לא הוגדרה תעודה; אין fallback למתקין unsigned.
+ההפצה היא עצמאית ואינה דורשת חתימת Authenticode: `forceCodeSigning` הוא `false`, והארטיפקטים אינם חתומים. ההגנה על העדכון היא מקור ה-GitHub הרשמי, HTTPS, וטביעת SHA-256 מדויקת מ-`version.json` שנבדקת לפני כל הפעלה (ראו `docs/UPDATES-AND-SECURITY.md`). אם בעתיד תוגדר תעודה — יש להעלות את `forceCodeSigning` ל-`true` כדי שהבנייה תיעצר אם החתימה נכשלת.
 
 PowerShell לדוגמה לפני `npm run dist`:
 
@@ -130,8 +131,8 @@ PowerShell לדוגמה לפני `npm run dist`:
 $env:CSC_LINK = 'C:\secure\lev-tov-code-signing.pfx'
 $env:CSC_KEY_PASSWORD = '<password-from-secret-store>'
 npm run dist
-Get-AuthenticodeSignature '.\dist\Setup.1.7.2.exe' | Format-List Status,SignerCertificate
-(Get-FileHash '.\dist\Setup.1.7.2.exe' -Algorithm SHA256).Hash.ToLower()
+Get-AuthenticodeSignature '.\dist\Setup.1.7.4.exe' | Format-List Status,SignerCertificate
+(Get-FileHash '.\dist\Setup.1.7.4.exe' -Algorithm SHA256).Hash.ToLower()
 ```
 
 מנגנון העדכונים של התוכנה מבוסס על מקור ה-GitHub הרשמי, תקשורת מוצפנת, ואימות טביעת אצבע דיגיטלית (SHA-256) מדויקת ללא עלויות רישוי מסחריות. פירוט מלא ונוהל שחרור גרסאות עתידיות נמצאים ב־[`docs/UPDATES-AND-SECURITY.md`](docs/UPDATES-AND-SECURITY.md).
@@ -141,6 +142,7 @@ Get-AuthenticodeSignature '.\dist\Setup.1.7.2.exe' | Format-List Status,SignerCe
 | מסמך | מה יש בו |
 |---|---|
 | [`docs/CHANGELOG.md`](docs/CHANGELOG.md) | רשימת השינויים לכל גרסה (מה המשתמשים מקבלים) |
+| [`docs/MIGRATION-1.7.4.md`](docs/MIGRATION-1.7.4.md) | מיגרציה 1.7.3→1.7.4 (פאץ' — אין מיגרציית נתונים): אימות ההתקנה, התיקון העצמי, הדיווח למשתמש ויומן האבחון |
 | [`docs/MIGRATION-1.7.2.md`](docs/MIGRATION-1.7.2.md) | מיגרציה 1.7.1→1.7.2 (פאץ' — אין מיגרציית נתונים): המתקין מרים את עצמו, ואין צורך בהתקנה ידנית |
 | [`docs/MIGRATION-1.7.1.md`](docs/MIGRATION-1.7.1.md) | מיגרציה 1.7.0→1.7.1 (פאץ' — אין מיגרציית נתונים) והתקנה ידנית חד-פעמית |
 | [`docs/MIGRATION-1.7.0.md`](docs/MIGRATION-1.7.0.md) | מיגרציה 1.6.5→1.7.0, שינויי התנהגות, ומטריצת בדיקות ידניות ב-VM |

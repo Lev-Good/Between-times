@@ -72,7 +72,7 @@ flowchart TD
 ```powershell
 npm test
 ```
-וודאו ש-**0 כשלים** (Pass). נכון ל-1.7.2: **335 בדיקות** — 333 עוברות ו-2
+וודאו ש-**0 כשלים** (Pass). נכון ל-1.7.4: **350 בדיקות** — 348 עוברות ו-2
 מדולגות (בדיקות האימות החי מול GitHub, ראו שלב 8). שימו לב שפלט הבדיקות
 מפוצל לכמה קבוצות הרצה (בדיקות ה-E2E מרימות Electron אמיתי) — לסכום יש לקבץ
 את כל שורות `ℹ tests`, ולא להסתפק בשורה האחרונה.
@@ -105,8 +105,8 @@ electron-builder), מאמתת לפני הבנייה שהמנגנון בתוקף,
 
 בסיום ייווצר הקובץ ומיד אחריו יודפס אישור האימות:
 ```
-dist\Setup.1.7.3.exe
-verify-installer-manifest: …\dist\Setup.1.7.3.exe
+dist\Setup.1.7.4.exe
+verify-installer-manifest: …\dist\Setup.1.7.4.exe
   מניפסט: asInvoker (נקבע בזמן הקומפילציה) — ללא requireAdministrator
   שלמות מול מטא-דאטה של הבנייה: ok
 ```
@@ -119,14 +119,42 @@ verify-installer-manifest: …\dist\Setup.1.7.3.exe
 
 אימות מניפסט (רשות — שנייה אחת, ומחזיר תשובה חד-משמעית):
 ```powershell
-$b=[IO.File]::ReadAllBytes("dist\Setup.1.7.2.exe"); $s=[Text.Encoding]::UTF8.GetString($b)
+$b=[IO.File]::ReadAllBytes("dist\Setup.1.7.4.exe"); $s=[Text.Encoding]::UTF8.GetString($b)
 if ($s -match 'requireAdministrator') { "לא מתוקן — אסור לפרסם" } else { "asInvoker — תקין" }
 ```
+
+### שלב 3ב: איך מאמתים שהעדכון באמת הותקן (וכשאינו — למה)
+
+מכשירים: המתקין מתעד כל שלב ב-`%TEMP%\BenHazmanim-Update.log`, והתוכנה קוראת
+דוחות מבית `%ProgramData%\BenHazmanim`. המימוש וה"חוזה" בין השניים מתועדים ב-
+[MIGRATION-1.7.4.md](MIGRATION-1.7.4.md) וב-[DECISIONS.md](DECISIONS.md).
+
+אחרי נסיון עדכון, במחשב שבו זה קרה:
+```powershell
+# 1) היומן של המתקין — השלב האחרון בו הוא התשובה
+notepad "$env:TEMP\BenHazmanim-Update.log"
+
+# 2) דוח התוצאה (נכתב בכל התקנה)
+Get-Content "$env:ProgramData\BenHazmanim\update-result.json" -ErrorAction SilentlyContinue
+
+# 3) הגרסה שבאמת מותקנת (מול מה שהתוכנה מציגה)
+(Get-Item 'C:\Program Files\ben-hazmanim\resources\app.asar').LastWriteTime
+```
+
+איך לקרוא את היומן: אם קיימת שורת `[preinit-start]` בלי `[preinit-proceed-elevated]`
+שלה — המתקין לא הורם. אם יש `[preinit-proceed-elevated]` בלי `[install-section]` —
+ההמתנה לסגירת התוכנה לא הסתיימה. אם יש `[install-section]` בלי
+`[verify-atomic-ok]` — נראה `verify-needs-repair` או `verify-FAIL`, ובהתאם
+`update-result.json` יספר מה נכשל (`locked`, `verify`, `no-payload`).
+
+כדי לחזור על אותו כשל בשליטה: עצרו את התוכנה לגמרי (קליק ימני על סמל המנעול
+במגש → יציאה), ואז הריצו את המתקין עם `/S`. אם העדכון *כן* עבד — הגרסה
+תתעדכן, המתקין יפעיל את התוכנה מחדש, והיומן יסתיים ב-`verify-atomic-ok`.
 
 ### שלב 4: חישוב טביעת ה-SHA-256 של המתקין
 הריצו פקודה זו ב-PowerShell (החליפו למספר הגרסה שלכם):
 ```powershell
-(Get-FileHash .\dist\Setup.1.7.2.exe -Algorithm SHA256).Hash.ToLower()
+(Get-FileHash .\dist\Setup.1.7.4.exe -Algorithm SHA256).Hash.ToLower()
 ```
 העתיקו את המחרוזת בת 64 התווים שמתקבלת.
 
