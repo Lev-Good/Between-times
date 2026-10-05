@@ -440,6 +440,19 @@ function hasAnyBlockingPolicy(s) {
   }
   return false;
 }
+
+// האם קיימים פרופילים, אין פרופיל ברירת מחדל, הלוח הבסיסי אינו חוסם, אבל
+// פרופיל אחד לפחות כן חוסם? במצב כזה משתמש Windows שאינו תואם לאף פרופיל
+// (למשל הילד במחשב) נופל על הלוח הבסיסי הפתוח — ולא נחסם. זה בדיוק הדיווח
+// "בהתקנה כמנהל המשתמש השני במחשב לא נחסם".
+function profilesLeaveUsersUnprotected(s) {
+  if (!s || s.enabled === false) return false;
+  const profiles = s.profiles || [];
+  if (!profiles.length) return false;
+  if (s.defaultProfile) return false;
+  if (hasBlockingPolicy({ ...s, profiles: [], defaultProfile: null })) return false;
+  return profiles.some((p) => hasBlockingPolicy(S.effectiveSchedule({ ...s, defaultProfile: p.id }, '')));
+}
 function verifyPinServer(pin) {
   if (!schedule.pinHash) return { ok: true };
   const lock = checkPinLock();
@@ -695,45 +708,107 @@ const usageFile = () => {
     ? path.join(machineDir(), 'usage.json')
     : path.join(app.getPath('userData'), 'usage.json');
 };
-let dailyUsage = { day: '', seconds: 0 };
+// dailyUsage.apps — זמן שימוש יומי (בשניות) לכל תוכנה מותרת בנפרד, לפי מפתח
+// נתיב ההרצה. נצבר רק בזמן שהמחשב חסום והתוכנה המותרת בשימוש (מצב רפוי).
+let dailyUsage = { day: '', seconds: 0, apps: {} };
 let usageLastTick = 0;   // trustedNow של הדגימה האחרונה
-let usagePersisted = 0;  // כמה שניות נשמרו לאחרונה לדיסק
+let usagePersisted = 0;  // סה"כ השניות שנשמרו לאחרונה לדיסק (כללי + תוכנות)
 
 function usageDayKey() { return S.dateKey(trustedDate()); }
+function usageAppsSum() {
+  let sum = 0;
+  const apps = dailyUsage.apps || {};
+  for (const k of Object.keys(apps)) {
+    const v = Number(apps[k]);
+    if (Number.isFinite(v) && v > 0) sum += v;
+  }
+  return sum;
+}
+function usageTotal() { return dailyUsage.seconds + usageAppsSum(); }
 
 function loadUsage() {
-  dailyUsage = { day: usageDayKey(), seconds: 0 };
+  dailyUsage = { day: usageDayKey(), seconds: 0, apps: {} };
   try {
     const data = JSON.parse(fs.readFileSync(usageFile(), 'utf8'));
-    if (data && data.day === dailyUsage.day && Number.isFinite(Number(data.seconds))) {
-      dailyUsage.seconds = Math.max(0, Math.min(86400, Math.round(Number(data.seconds))));
+    if (data && data.day === dailyUsage.day) {
+      if (Number.isFinite(Number(data.seconds))) {
+        dailyUsage.seconds = Math.max(0, Math.min(86400, Math.round(Number(data.seconds))));
+      }
+      const apps = (data.apps && typeof data.apps === 'object') ? data.apps : {};
+      for (const k of Object.keys(apps)) {
+        const v = Number(apps[k]);
+        if (Number.isFinite(v) && v > 0) dailyUsage.apps[String(k).toLowerCase()] = Math.min(86400, Math.round(v));
+      }
     }
   } catch { /* התקנה חדשה או קובץ חסר */ }
-  usagePersisted = dailyUsage.seconds;
+  usagePersisted = usageTotal();
   usageLastTick = trustedNow();
 }
 
 function saveUsage(force) {
-  if (!force && Math.abs(dailyUsage.seconds - usagePersisted) < 20) return;
+  const total = usageTotal();
+  if (!force && Math.abs(total - usagePersisted) < 20) return;
   try {
-    atomicWrite(usageFile(), JSON.stringify({ day: dailyUsage.day, seconds: Math.round(dailyUsage.seconds) }));
-    usagePersisted = dailyUsage.seconds;
+    const apps = {};
+    for (const k of Object.keys(dailyUsage.apps || {})) apps[k] = Math.round(dailyUsage.apps[k]);
+    atomicWrite(usageFile(), JSON.stringify({ day: dailyUsage.day, seconds: Math.round(dailyUsage.seconds), apps }));
+    usagePersisted = total;
   } catch { /* ignore */ }
 }
 
 // צבירת זמן השימוש. מתאפסת בחצות; איננה מושפעת משעון המערכת (trustedNow)
 // ומדלגת על קפיצות זמן גדולות (שינה/הערה) כדי שלא ייספר זמן לא אמיתי.
-function trackDailyUsage(inUse) {
+// appKey (אופציונלי): מפתח התוכנה המותרת שנמצאת כעת בשימוש — לצבירת מכסת התוכנה.
+function trackDailyUsage(inUse, appKey) {
   const now = trustedNow();
   const previous = usageLastTick || now;
   usageLastTick = now;
   const day = usageDayKey();
   if (day !== dailyUsage.day) {
-    dailyUsage = { day, seconds: 0 };
+    dailyUsage = { day, seconds: 0, apps: {} };
     usagePersisted = 0;
   }
-  if (inUse) dailyUsage.seconds += Math.max(0, Math.min((now - previous) / 1000, 15));
+  const delta = Math.max(0, Math.min((now - previous) / 1000, 15));
+  if (inUse) dailyUsage.seconds += delta;
+  if (appKey) dailyUsage.apps[appKey] = (dailyUsage.apps[appKey] || 0) + delta;
   saveUsage(false);
+}
+
+/* ---------- מכסת זמן ואימות שעות לתוכנה מותרת ---------- */
+function appUsageKey(app) {
+  return String((app && app.exe) || '').trim().toLowerCase();
+}
+function appUsageSeconds(app) {
+  const key = appUsageKey(app);
+  return key ? (Number(dailyUsage.apps[key]) || 0) : 0;
+}
+function appDailyLimitReached(app) {
+  return !!(app && app.dailyLimit && S.dailyLimitReached(app.dailyLimit, appUsageSeconds(app)));
+}
+
+// האם מותר להשתמש בתוכנה מותרת עכשיו? שעות מותרות + מכסת זמן יומית.
+// מחזיר { allowed, reason } — reason: 'hours' | 'limit' | null.
+function appAccessNow(app, date) {
+  if (!app) return { allowed: false, reason: 'unknown' };
+  if (!S.appHoursAllow(app.hours, date || trustedDate())) return { allowed: false, reason: 'hours' };
+  if (appDailyLimitReached(app)) return { allowed: false, reason: 'limit' };
+  return { allowed: true, reason: null };
+}
+function appUnavailableLabel(reason) {
+  if (reason === 'hours') return 'מחוץ לשעות שהוגדרו';
+  if (reason === 'limit') return 'מכסת הזמן היומית נוצלה';
+  return 'לא זמין';
+}
+
+// יומן חד-פעמי לניסיון שימוש בתוכנה מותרת מחוץ לשעות/מכסה — כדי שלא יוצף ביומן.
+let lastDeniedAppKey = null;
+function logAllowedAppDenied(app) {
+  const access = appAccessNow(app);
+  if (access.allowed) return;
+  const key = appUsageKey(app) + '|' + access.reason;
+  if (key === lastDeniedAppKey) return;
+  lastDeniedAppKey = key;
+  logEvent('allowed-app-denied', { app: appUsageKey(app), reason: access.reason });
 }
 
 // האם מכסת היום נוצלה? פתיחה מוקדמת בסיסמת ההורה (manualUnlockUntil) מבטלת
@@ -1365,19 +1440,20 @@ async function foregroundMatchesApp(app, fgPath) {
 // האם התוכנה שבחלון הפעיל נמצאת ברשימה המורשית (או ברשימת התוכנות הנלוות
 // שלהן — כמו תוספים לוורד שפועלים כתוכנה נפרדת)? כל תוכנה מאומתת לפי
 // מצב האימות שלה. אם משהו לא תקין — החסימה נשארת פעילה (fail closed).
-async function isAllowedApp(fgPath) {
-  if (!fgPath) return false;
+// מחזיר את אובייקט התוכנה שהתאימה (או null) — כדי שאפשר יהיה לבדוק לא רק
+// חברות ברשימה אלא גם את השעות המותרות ואת מכסת הזמן של אותה תוכנה.
+async function matchedAllowedApp(fgPath) {
+  if (!fgPath) return null;
   const sch = activeSchedule();
-  if (sch.allowedAppsEnabled === false) return false;
+  if (sch.allowedAppsEnabled === false) return null;
   const apps = sch.allowedApps || [];
-  if (!apps.length) return false;
   for (const app of apps) {
-    if (await foregroundMatchesApp(app, fgPath)) return true;
+    if (await foregroundMatchesApp(app, fgPath)) return app;
     for (const c of (app.companions || [])) {
-      if (await foregroundMatchesApp(c, fgPath)) return true;
+      if (await foregroundMatchesApp(c, fgPath)) return c;
     }
   }
-  return false;
+  return null;
 }
 
 // כניסה למצב רפוי: מסתירים את חלונות החסימה, מבטלים קיצורי מקשים ומתחילים
@@ -1406,10 +1482,12 @@ async function maybeStealFocus() {
   const appsOn = sch.allowedAppsEnabled !== false && (sch.allowedApps || []).length > 0;
   if (!appsOn) { focusBlockWindows(); return; }
   const fg = await getForegroundApp();
-  if (await isAllowedApp(fg)) {
+  const matched = await matchedAllowedApp(fg);
+  if (matched && appAccessNow(matched).allowed) {
     enterRelaxed();
     return;
   }
+  if (matched) logAllowedAppDenied(matched);
   focusBlockWindows();
 }
 
@@ -1967,8 +2045,23 @@ function buildStatus() {
           }
         });
       });
-      return list.filter((a) =>
-        /^[a-zA-Z]:[\\/]/.test(String(a.exe || '')) || /^\\\\/.test(String(a.exe || '')));
+      return list
+        .filter((a) => /^[a-zA-Z]:[\\/]/.test(String(a.exe || '')) || /^\\\\/.test(String(a.exe || '')))
+        .map((a) => {
+          const access = appAccessNow(a);
+          const dl = a.dailyLimit || {};
+          return {
+            name: a.name,
+            exe: a.exe,
+            hoursRestricted: S.appHoursConfigured(a.hours),
+            dailyLimitEnabled: !!dl.enabled,
+            dailyLimitMinutes: dl.minutes || 0,
+            usedSeconds: Math.round(appUsageSeconds(a)),
+            available: access.allowed,
+            unavailableReason: access.reason,
+            unavailableLabel: access.allowed ? null : appUnavailableLabel(access.reason)
+          };
+        });
     })(),
     websiteApps: (eff.websiteApps || []).map((a) => ({ name: String(a.name || '') })),
     fileExplorerEnabled: !!(eff.fileExplorer && eff.fileExplorer.enabled)
@@ -2052,8 +2145,20 @@ async function enforceCore() {
   const activeNet = netblocked && pinSet;
   const desired = activeBlock ? 'blocked' : activeNet ? 'netblocked' : 'allowed';
   beginEnforcement(desired);
-  // מכסת זמן שימוש יומית: נספר רק זמן שבו המחשב באמת פתוח לשימוש
-  trackDailyUsage(!blocked && !netblocked);
+  // תוכנה תורנית מותרת שנמצאת בחזית בזמן שהמחשב חסום — קובעת גם את מצב
+  // "רפוי" וגם את צבירת זמן השימוש במכסת התוכנה. בדיקת החלון הפעיל רצה רק
+  // כשהחסימה פעילה בפועל ויש תוכנות מורשות (חוסך PowerShell).
+  const appsConfigured = eff.allowedAppsEnabled !== false && (eff.allowedApps || []).length > 0;
+  let relaxedApp = null;
+  if (activeBlock && appsConfigured) {
+    const fgNow = await getForegroundApp();
+    const matched = await matchedAllowedApp(fgNow);
+    if (matched && appAccessNow(matched).allowed) relaxedApp = matched;
+    else if (matched) logAllowedAppDenied(matched);
+  }
+  // מכסת זמן שימוש יומית: נספר רק זמן שבו המחשב באמת פתוח לשימוש; זמן
+  // השימוש בתוכנה מותרת נצבר בנפרד למכסת התוכנה (גם כשהמחשב חסום).
+  trackDailyUsage(!blocked && !netblocked, relaxedApp ? appUsageKey(relaxedApp) : null);
 
   // אזהרה לפני חסימה — פעם אחת בכניסה לחלון האזהרה, ולא בזמן נעילה ידנית.
   if (status.warning && pinSet && !manualLock && !lastWarningActive) {
@@ -2114,23 +2219,13 @@ async function enforceCore() {
   // תוכנות תורניות מותרות: במצב זה מסך החסימה מוסתר, אך ה-State Machine
   // מדווח relaxed ולא blocked כדי שה-UI וה-Diagnostics ידעו מה קורה בפועל.
   // תוכנות מותרות זמינות הן בחסימה לפי הלוח והן בנעילה ידנית ("נעל עכשיו").
-  const appsConfigured = eff.allowedAppsEnabled !== false && (eff.allowedApps || []).length > 0;
+  // relaxedApp כבר חושב למעלה — והוא מוגבל לשעות ולמכסת הזמן של התוכנה.
   const inGrace = Date.now() < launchGraceUntil;
   // חלון של התוכנה עצמה (אתר נעול / דפדפן מוגבל / סייר קבצים) שנמצא בחזית
   // נחשב כמצב רפוי: האתר נשאר גלוי ושמיש מעל מסך החסימה, והחסימה חוזרת
   // מיד כשהמשתמש עובר לתוכנה אחרת או סוגר את החלון.
   const ownWindowOnTop = ourWindowFocused();
-  let fgAllowed = false;
-  if (appsConfigured) {
-    const fg = await getForegroundApp();
-    if (await isAllowedApp(fg)) {
-      fgAllowed = true;
-      // אין לאפס את launchGraceUntil = 0: תוכנות רבות (כגון Word, אוצריא) מציגות מסך
-      // פתיחה (Splash) שנסגר לשבריר שנייה לפני פתיחת חלון העורך הראשי. איפוס מוקדם של זמן
-      // החסד היה גורם להקפצת מסך החסימה בדיוק בשלב המעבר הזה.
-    }
-  }
-  if (fgAllowed || ownWindowOnTop || (inGrace && relaxed)) {
+  if (relaxedApp || ownWindowOnTop || (inGrace && relaxed)) {
     enterRelaxed();
     finishEnforcement('relaxed');
     publish();
@@ -2917,6 +3012,34 @@ function machineRunRegistered() {
   });
 }
 
+// ה-Run לכל המשתמשים (HKLM) יכול להירשם ולצביע על קובץ הרצה שכבר אינו קיים
+// (למשל נתיב התקנה ישן אחרי מעבר/העתקה). רישום כזה "קיים" אך חסר תועלת:
+// החשבונות שאינם יוצרים את המשימה המתוזמנת (המשתמש השני במחשב) לא יופעלו כלל
+// — ולכן לא ייחסמו. כאן מאמתים שההפניה מצביעה על קובץ הרצה חי.
+function parseRunTargetExe(command) {
+  const cmd = String(command || '').trim();
+  if (!cmd) return '';
+  const quoted = /^"([^"]+)"/.exec(cmd);
+  if (quoted && quoted[1]) return quoted[1];
+  const first = /^(\S+)/.exec(cmd);
+  return first && first[1] ? first[1] : '';
+}
+function machineRunCommand() {
+  return new Promise((resolve) => {
+    if (!isWin) return resolve('');
+    execFile('reg', ['query', RUN_KEY_MACHINE, '/v', RUN_NAME], { windowsHide: true }, (err, stdout) => {
+      if (err || !stdout) return resolve('');
+      const m = String(stdout).match(/REG_SZ\s+(.+)/i);
+      resolve(m && m[1] ? m[1].trim() : '');
+    });
+  });
+}
+async function machineRunPointsToLiveExe() {
+  const exe = parseRunTargetExe(await machineRunCommand());
+  if (!exe) return false;
+  try { return fs.existsSync(exe); } catch { return false; }
+}
+
 // האם ההגדרה המוגבת חסרה או מיושנת? (נקראת בהרצה שאינה מוגבת)
 async function privilegedSetupNeeded() {
   if (!isWin) return false;
@@ -2925,6 +3048,8 @@ async function privilegedSetupNeeded() {
   if (!pv || pv !== installDirVersion()) return true;
   if (!(await taskIsHighest())) return true;
   if (!(await machineRunRegistered())) return true;
+  // רישום קיים אך מצביע על קובץ שאינו קיים = המשתמש השני לא יופעל ולא ייחסם
+  if (!(await machineRunPointsToLiveExe())) return true;
   return false;
 }
 
@@ -4201,6 +4326,10 @@ function registerIpc() {
       }
     }
     if (!allowed) return { ok: false, error: 'התוכנה אינה נמצאת ברשימת ההרשאות' };
+    // גם אם התוכנה ברשימה — אי אפשר לפתוח אותה מחוץ לשעות המותרות או כשמכסת
+    // הזמן היומית שלה נוצלה (אכיפה בתהליך הראשי, לא רק בממשק).
+    const access = appAccessNow(allowed);
+    if (!access.allowed) return { ok: false, error: appUnavailableLabel(access.reason) };
     return launchAllowedApp(allowed);
   });
 
@@ -4661,6 +4790,8 @@ function registerIpc() {
     return {
       pin: !!schedule.pinHash,
       enabled: schedule.enabled !== false,
+      profilesExist: !!(schedule.profiles && schedule.profiles.length),
+      profilesUnprotected: profilesLeaveUsersUnprotected(schedule),
       elevated: isElevated(),
       shared: isWin && fs.existsSync(machineSettingsFile()),
       recovery: !!schedule.recoveryEmail,

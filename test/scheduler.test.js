@@ -629,14 +629,42 @@ test('allowedAppsEnabled survives normalize and can be turned off', () => {
   assert.equal(S.normalizeSchedule({ allowedAppsEnabled: true }).allowedAppsEnabled, true);
 });
 
+const emptyAppHours = () => Array.from({ length: 7 }, (_, d) => ({ day: d, slots: [] }));
+
 test('allowedApps: entries survive a full roundtrip', () => {
   const s = S.defaultSchedule();
   s.allowedApps = [
-    { name: 'אוצר החכמה', exe: 'C:\\Otzar\\OtzarHochma.exe', mode: 'path', publisher: '', product: '', hash: 'c'.repeat(64), companions: [] },
-    { name: 'בר אילן', exe: 'C:\\BarIlan\\BarIlan.exe', mode: 'publisher', publisher: 'X Ltd', product: 'BarIlan', hash: '', companions: [] }
+    { name: 'אוצר החכמה', exe: 'C:\\Otzar\\OtzarHochma.exe', mode: 'path', publisher: '', product: '', hash: 'c'.repeat(64), companions: [], hours: emptyAppHours(), dailyLimit: { enabled: false, minutes: 60 } },
+    { name: 'בר אילן', exe: 'C:\\BarIlan\\BarIlan.exe', mode: 'publisher', publisher: 'X Ltd', product: 'BarIlan', hash: '', companions: [], hours: emptyAppHours(), dailyLimit: { enabled: false, minutes: 60 } }
   ];
   const n = S.normalizeSchedule(JSON.parse(JSON.stringify(s)));
   assert.deepEqual(n.allowedApps, s.allowedApps);
+});
+
+test('allowedApps: hours and dailyLimit default to "no restriction" (backward compatible)', () => {
+  const n = S.normalizeSchedule({ allowedApps: [{ name: 'W', exe: 'C:\\W\\WINWORD.EXE' }] });
+  const app = n.allowedApps[0];
+  assert.equal(S.appHoursConfigured(app.hours), false, 'no hours configured by default');
+  assert.equal(S.appHoursAllow(app.hours, new Date(2026, 0, 4, 3, 0)), true, 'no hours = allowed any time');
+  assert.deepEqual(app.dailyLimit, { enabled: false, minutes: 60 });
+});
+
+test('appHoursAllow: restricts an app to the configured windows only', () => {
+  const hours = new Array(7).fill(null).map(() => ({ slots: [] }));
+  hours[0] = { slots: [{ start: 20 * 60, end: 22 * 60 }] }; // ראשון 20:00–22:00
+  assert.equal(S.appHoursConfigured(hours), true);
+  assert.equal(S.appHoursAllow(hours, new Date(2026, 0, 4, 21, 0)), true, 'inside the window');
+  assert.equal(S.appHoursAllow(hours, new Date(2026, 0, 4, 22, 0)), false, 'end is exclusive');
+  assert.equal(S.appHoursAllow(hours, new Date(2026, 0, 4, 19, 59)), false, 'before the window');
+  assert.equal(S.appHoursAllow(hours, new Date(2026, 0, 5, 21, 0)), false, 'other day without windows');
+});
+
+test('appHoursAllow: a window crossing midnight stays valid after midnight', () => {
+  const hours = new Array(7).fill(null).map(() => ({ slots: [] }));
+  hours[0] = { slots: [{ start: 22 * 60, end: 2 * 60 }] }; // ראשון 22:00 → שני 02:00
+  assert.equal(S.appHoursAllow(hours, new Date(2026, 0, 4, 23, 30)), true);
+  assert.equal(S.appHoursAllow(hours, new Date(2026, 0, 5, 1, 30)), true);
+  assert.equal(S.appHoursAllow(hours, new Date(2026, 0, 5, 3, 0)), false);
 });
 
 test('normalizeSchedule rejects malformed clock values instead of silently wrapping them', () => {

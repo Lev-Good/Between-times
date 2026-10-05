@@ -1307,17 +1307,29 @@
       studyAppsWrap.style.display = apps.length ? '' : 'none';
       if (quickStudyWrap) quickStudyWrap.style.display = apps.length ? '' : 'none';
       if (!apps.length) return;
-      const key = JSON.stringify(apps);
+      // המפתח כולל את זמינות התוכנה (שעות/מכסה) — כדי שהרשימה תיבנה מחדש רק
+      // כשמשהו משמעותי משתנה, ולא בכל עדכון סטטוס (שנייה) בגלל מונה השימוש.
+      const key = apps.map((a) => String(a.exe || '') + '|' + (a.available === false ? '0' : '1')).join('~');
       if (key === lastStudyAppsKey) return;
       lastStudyAppsKey = key;
       studyAppsList.innerHTML = '';
       apps.forEach((app) => {
+        const unavailable = app.available === false;
         const b = document.createElement('button');
         b.type = 'button';
         b.className = 'study-app';
         b.innerHTML = '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg><span></span>';
-        b.querySelector('span').textContent = app.name || app.exe;
+        b.querySelector('span').textContent = (app.name || app.exe) + (unavailable ? ' — ' + (app.unavailableLabel || 'לא זמין כעת') : '');
+        if (unavailable) {
+          b.disabled = true;
+          b.classList.add('disabled');
+          b.title = app.unavailableLabel || 'לא זמין כעת';
+        }
         b.onclick = async () => {
+          if (unavailable) {
+            lockMsg.textContent = app.unavailableLabel || 'לא זמין כעת';
+            return;
+          }
           lockMsg.textContent = 'פותח את ' + (app.name || app.exe) + '…';
           lockMsg.classList.remove('ok');
           if (API && API.launchAllowedApp) {
@@ -1338,8 +1350,18 @@
           qb.type = 'button';
           qb.className = 'quick-app-btn';
           qb.innerHTML = '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg><span></span>';
-          qb.querySelector('span').textContent = app.name || app.exe;
+          qb.querySelector('span').textContent = (app.name || app.exe) + (unavailable ? ' — ' + (app.unavailableLabel || 'לא זמין כעת') : '');
+          if (unavailable) {
+            qb.disabled = true;
+            qb.classList.add('disabled');
+            qb.title = app.unavailableLabel || 'לא זמין כעת';
+          }
           qb.onclick = async () => {
+            if (unavailable) {
+              lockMsg.textContent = app.unavailableLabel || 'לא זמין כעת';
+              setModalOpen(true);
+              return;
+            }
             lockMsg.textContent = 'פותח את ' + (app.name || app.exe) + '…';
             lockMsg.classList.remove('ok');
             if (API && API.launchAllowedApp) {

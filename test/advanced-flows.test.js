@@ -1834,3 +1834,185 @@ test('restricted explorer renderer: strict CSP uses an external script and no in
   assert.ok(!/<script>([\s\S]*?)<\/script>/.test(html), 'inline script would be blocked by the CSP');
   assert.doesNotThrow(() => new Function(fs.readFileSync(path.join(__dirname, '..', 'renderer', 'file-explorer.js'), 'utf8')));
 });
+
+/* ================= התקנה מנוהלת: משתמש Windows אחר =================
+   הבאג המדווח: "בהתקנה כמנהל המשתמש השני במחשב לא נחסם". הבדיקה מריצה את
+   main.js האמיתי של משתמש Windows **שונה** מזה שכתב את ההגדרות המשותפות,
+   ומוודאת שהמדיניות המשותפת (מקור האמת ב-%ProgramData%) נאכפת בלי תלות
+   בסביבה של המשתמש שהגדיר אותה. */
+
+test('managed install: a different Windows user is blocked by the shared machine settings', async () => {
+  const origUser = process.env.USERNAME;
+  process.env.USERNAME = 'SecondWindowsUser';
+  try {
+    const m = loadMain({});
+    const machineDir = path.join(process.env.PROGRAMDATA, 'BenHazmanim');
+    fs.mkdirSync(machineDir, { recursive: true });
+    fs.writeFileSync(path.join(machineDir, 'settings.json'), JSON.stringify(blockNowSchedule()), 'utf8');
+    fs.writeFileSync(path.join(machineDir, 'install.json'), JSON.stringify({ dir: 'C:\test' }), 'utf8');
+    await m.ready();
+
+    const st = await m.ipcHandlers.get('status:get')();
+    assert.equal(st.configError, false, 'the shared settings must load cleanly for the second user');
+    assert.equal(st.state, 'blocked', 'the shared schedule must block the second Windows user');
+    assert.equal(st.enforcement.actual, 'blocked', 'enforcement must actually reach the blocked state');
+    const blockWins = m.state.windows.filter((w) => typeof w.blockDisplayId === 'number' && !w.isDestroyed());
+    assert.ok(blockWins.length >= 1, 'a block window must be created for the second Windows user');
+    m.cleanup();
+  } finally {
+    process.env.USERNAME = origUser;
+  }
+});
+
+/* ================= שעות מותרות ומכסה לתוכנות מותרות =================
+   התכונה: כל תוכנה תורנית יכולה להיות מוגבלת לשעות מסוימות ולמכסת זמן יומית
+   גם בזמן שהמחשב חסום. האכיפה חייבת להיות בתהליך הראשי — לא רק בממשק. */
+
+function seedAppUsage(m, exe, seconds) {
+  const key = String(exe).toLowerCase();
+  const payload = JSON.stringify({ day: S.dateKey(new Date()), seconds: 0, apps: { [key]: seconds } });
+  const paths = [
+    path.join(m.tmpRoot, 'userData', 'usage.json'),
+    path.join(process.env.PROGRAMDATA, 'BenHazmanim', 'usage.json')
+  ];
+  for (const p of paths) {
+    try { fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, payload, 'utf8'); } catch { /* ignore */ }
+  }
+}
+
+function hoursForDay(day) {
+  const out = Array.from({ length: 7 }, (_, d) => ({ day: d, slots: [] }));
+  out[day] = { day, slots: [{ start: 0, end: 1440 }] };
+  return out;
+}
+
+test('allowed-apps:launch refuses an allowed app outside its configured hours', async () => {
+  const fakeExe = path.join(os.tmpdir(), 'bhz_hours_test.exe');
+  fs.writeFileSync(fakeExe, 'fake');
+  try {
+    const settings = S.defaultSchedule();
+    settings.pinHash = S.sha256Hex('1234');
+    const otherDay = (new Date().getDay() + 1) % 7; // שעות רק ביום אחר — לכן חסום כעת
+    settings.allowedApps = [{ name: 'אוצריא', exe: fakeExe, hours: hoursForDay(otherDay) }];
+    const m = loadMain({ settings });
+    await m.ready();
+    await m.ipcHandlers.get('lock:now')();
+
+    const res = await m.ipcHandlers.get('allowed-apps:launch')({}, { exe: fakeExe });
+    assert.equal(res.ok, false, 'אי אפשר לפתוח תוכנה מותרת מחוץ לשעות שהוגדרו');
+    assert.match(String(res.error || ''), /שעות/, 'השגיאה צריכה להסביר שהתוכנה מחוץ לשעות: ' + JSON.stringify(res));
+    m.cleanup();
+  } finally {
+    try { fs.unlinkSync(fakeExe); } catch { /* ignore */ }
+  }
+});
+
+test('allowed-apps:launch allows an allowed app inside its configured hours', async () => {
+  const fakeExe = path.join(os.tmpdir(), 'bhz_hours_ok.exe');
+  fs.writeFileSync(fakeExe, 'fake');
+  try {
+    const settings = S.defaultSchedule();
+    settings.pinHash = S.sha256Hex('1234');
+    settings.allowedApps = [{ name: 'אוצריא', exe: fakeExe, hours: hoursForDay(new Date().getDay()) }];
+    const m = loadMain({ settings });
+    await m.ready();
+    await m.ipcHandlers.get('lock:now')();
+
+    const res = await m.ipcHandlers.get('allowed-apps:launch')({}, { exe: fakeExe });
+    assert.equal(res.ok, true, 'בתוך השעות המותרות הפתיחה מצליחה: ' + JSON.stringify(res));
+    m.cleanup();
+  } finally {
+    try { fs.unlinkSync(fakeExe); } catch { /* ignore */ }
+  }
+});
+
+test('allowed-apps:launch refuses an allowed app whose daily quota is exhausted', async () => {
+  const fakeExe = path.join(os.tmpdir(), 'bhz_quota_test.exe');
+  fs.writeFileSync(fakeExe, 'fake');
+  try {
+    const settings = S.defaultSchedule();
+    settings.pinHash = S.sha256Hex('1234');
+    settings.allowedApps = [{ name: 'אוצריא', exe: fakeExe, dailyLimit: { enabled: true, minutes: 1 } }];
+    const m = loadMain({ settings });
+    seedAppUsage(m, fakeExe, 120); // 2 דקות שהוגדרו בהן מכסה של דקה אחת
+    await m.ready();
+    await m.ipcHandlers.get('lock:now')();
+
+    const res = await m.ipcHandlers.get('allowed-apps:launch')({}, { exe: fakeExe });
+    assert.equal(res.ok, false, 'אי אפשר לפתוח תוכנה שהמכסה היומית שלה נוצלה');
+    assert.match(String(res.error || ''), /מכס/, 'השגיאה צריכה להסביר שהמכסה נוצלה: ' + JSON.stringify(res));
+    m.cleanup();
+  } finally {
+    try { fs.unlinkSync(fakeExe); } catch { /* ignore */ }
+  }
+});
+
+test('status:get exposes per-app availability (hours/quota) to the block screen', async () => {
+  const fakeExe = path.join(os.tmpdir(), 'bhz_status_app.exe');
+  fs.writeFileSync(fakeExe, 'fake');
+  try {
+    const settings = S.defaultSchedule();
+    settings.pinHash = S.sha256Hex('1234');
+    const otherDay = (new Date().getDay() + 1) % 7;
+    settings.allowedApps = [
+      { name: 'חסום כעת', exe: fakeExe, hours: hoursForDay(otherDay) }
+    ];
+    const m = loadMain({ settings });
+    await m.ready();
+    await m.ipcHandlers.get('lock:now')();
+
+    const st = await m.ipcHandlers.get('status:get')();
+    const entry = st.allowedApps.find((a) => a.exe === fakeExe);
+    assert.ok(entry, 'התוכנה צריכה להופיע ברשימת התוכנות למסך החסימה');
+    assert.equal(entry.available, false, 'התוכנה מחוץ לשעות צריכה להיות מסומנת כלא זמינה');
+    assert.equal(entry.hoursRestricted, true);
+    assert.match(String(entry.unavailableLabel || ''), /שעות/);
+    m.cleanup();
+  } finally {
+    try { fs.unlinkSync(fakeExe); } catch { /* ignore */ }
+  }
+});
+
+/* ================= פרופילים שמשאירים משתמשים לא מוגנים =================
+   הדיווח: ההורה הגדיר את החסימה בפרופיל של שם המשתמש שלו, והלוח הבסיסי
+   נשאר פתוח — ולכן המשתמש השני (הילד) לא נחסם. */
+
+function blockingWeek() {
+  return S.defaultSchedule().week.map((d) => ({ day: d.day, slots: [{ start: 0, end: 1440, type: 'blocked' }] }));
+}
+
+test('security:get flags profiles that leave an unprofiled Windows user unprotected', async () => {
+  const settings = S.defaultSchedule();
+  settings.pinHash = S.sha256Hex('1234');
+  settings.profiles = [{ id: 'user:parent', name: 'parent', user: 'parent', overrides: { week: blockingWeek() } }];
+  const m = loadMain({ settings });
+  await m.ready();
+  const sec = await m.ipcHandlers.get('security:get')();
+  assert.equal(sec.profilesExist, true);
+  assert.equal(sec.profilesUnprotected, true, 'פרופיל בלי ברירת מחדל ובסיס פתוח = משתמש אחר לא נחסם');
+  m.cleanup();
+});
+
+test('security:get clears the profiles warning when a default profile exists', async () => {
+  const settings = S.defaultSchedule();
+  settings.pinHash = S.sha256Hex('1234');
+  settings.profiles = [{ id: 'user:parent', name: 'parent', user: 'parent', overrides: { week: blockingWeek() } }];
+  settings.defaultProfile = 'user:parent';
+  const m = loadMain({ settings });
+  await m.ready();
+  const sec = await m.ipcHandlers.get('security:get')();
+  assert.equal(sec.profilesUnprotected, false, 'עם ברירת מחדל כל המשתמשים מכוסים');
+  m.cleanup();
+});
+
+test('security:get does not warn when the base schedule itself blocks', async () => {
+  const settings = S.defaultSchedule();
+  settings.pinHash = S.sha256Hex('1234');
+  settings.week = blockingWeek();
+  settings.profiles = [{ id: 'user:parent', name: 'parent', user: 'parent', overrides: { week: S.defaultSchedule().week } }];
+  const m = loadMain({ settings });
+  await m.ready();
+  const sec = await m.ipcHandlers.get('security:get')();
+  assert.equal(sec.profilesUnprotected, false, 'כשהלוח הבסיסי חוסם, אין אזהרה');
+  m.cleanup();
+});

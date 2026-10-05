@@ -1362,6 +1362,83 @@ button.type-badge:active { transform: scale(0.97); }
   margin-inline-start: 26px;
 }
 .add-companion .icon { width: 14px; height: 14px; }
+
+/* שעות מותרות ומכסת זמן לכל תוכנה מותרת */
+.allowed-app-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.app-access-badge {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid rgba(96, 165, 250, 0.45);
+  background: rgba(96, 165, 250, 0.1);
+  color: #93c5fd;
+  white-space: nowrap;
+}
+.app-access-btn .icon { width: 14px; height: 14px; }
+.app-access-btn.active {
+  border-color: rgba(96, 165, 250, 0.6);
+  color: #93c5fd;
+}
+.app-access-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  margin: -4px 0 4px;
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.02);
+}
+.app-access-panel.companion { margin-inline-start: 26px; }
+.app-access-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.app-access-head strong { font-size: 13.5px; }
+.app-access-head .hint { margin: 0; }
+.app-hours-days {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.app-hour-day {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.app-hour-day-name {
+  min-width: 26px;
+  font-weight: 700;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+.app-hour-slots {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.app-hour-none { color: var(--muted); font-size: 12.5px; }
+.app-hour-slot { display: inline-flex; align-items: center; gap: 4px; }
+.app-hour-slot .time-input { width: 72px; }
+.app-hour-slot .del-btn { opacity: 1; }
+.app-access-limit {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 13.5px;
+}
+.app-access-limit .num-input { width: 76px; }
+.app-access-panel .hint { margin: 0; }
 /* סריקת תוכנות תורניות מותקנות */
 .known-apps {
   display: flex;

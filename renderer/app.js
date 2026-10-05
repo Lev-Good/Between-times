@@ -12,7 +12,8 @@ const ICONS = {
   alert: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/></svg>',
   download: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12l7 7 7-7"/></svg>',
   swap: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 16V4m0 0L3 8m4-4 4 4"/><path d="M17 8v12m0 0 4-4m-4 4-4-4"/></svg>',
-  allDays: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>'
+  allDays: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>',
+  clock: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>'
 };
 
 /* סוגי חלונות בלוח: מותר / חסום (נעילת מחשב מלאה) / אינטרנט (חסימת רשת בלבד) */
@@ -1106,7 +1107,179 @@ function appBadge(app) {
   return { cls: 'danger', text: 'חסר נתיב מלא — בחרו מחדש' };
 }
 
-function appRow(app, onDelete) {
+/* ---------- שעות מותרות ומכסת זמן יומית לכל תוכנה מותרת ----------
+   ברירת מחדל: אין שעות (התוכנה מותרת בכל חלון חסימה — כמו לפני התכונה)
+   ואין מכסה. השניים נאכפים בתהליך הראשי (אכיפה אמיתית, לא רק תצוגה). */
+const expandedAppKeys = new Set();
+
+function ensureAppAccess(app) {
+  if (!app) return;
+  if (!Array.isArray(app.hours) || app.hours.length !== 7) {
+    app.hours = Array.from({ length: 7 }, (_, d) => ({ day: d, slots: [] }));
+  }
+  app.hours = app.hours.map((d, i) => ({
+    day: i,
+    slots: (d && Array.isArray(d.slots) ? d.slots : [])
+      .filter((s) => s && typeof s === 'object')
+      .map((s) => ({ start: Number(s.start) || 0, end: Number(s.end) || 0 }))
+  }));
+  if (!app.dailyLimit || typeof app.dailyLimit !== 'object') app.dailyLimit = { enabled: false, minutes: 60 };
+  const m = Number(app.dailyLimit.minutes);
+  app.dailyLimit.minutes = (Number.isFinite(m) && m > 0) ? Math.round(m) : 60;
+}
+
+function appAccessSummary(app) {
+  ensureAppAccess(app);
+  const parts = [];
+  if (T.appHoursConfigured(app.hours)) parts.push('שעות מוגדרות');
+  if (app.dailyLimit.enabled && app.dailyLimit.minutes > 0) parts.push('מכסה ' + app.dailyLimit.minutes + ' דק׳');
+  return parts.join(' • ');
+}
+
+function appAccessToggle(app, key) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'btn btn-ghost btn-sm app-access-btn' + (expandedAppKeys.has(key) ? ' active' : '');
+  btn.innerHTML = ICONS.clock + '<span>זמנים ומכסה</span>';
+  btn.title = 'שעות מותרות ומכסת זמן יומית לתוכנה הזו בזמן שהמחשב חסום';
+  btn.onclick = async () => {
+    if (!(await verifyPinSession())) return;
+    if (expandedAppKeys.has(key)) expandedAppKeys.delete(key);
+    else expandedAppKeys.add(key);
+    renderAllowedApps();
+  };
+  return btn;
+}
+
+function appHourSlotRow(app, di, si, slot) {
+  const wrap = document.createElement('span');
+  wrap.className = 'app-hour-slot';
+  const start = document.createElement('input');
+  start.type = 'time';
+  start.className = 'time-input';
+  start.value = T.fmtHM(slot.start);
+  start.onchange = async () => {
+    if (!(await verifyPinSession())) { renderAllowedApps(); return; }
+    const v = T.parseHM(start.value);
+    if (v == null) { renderAllowedApps(); return; }
+    slot.start = v;
+    await persist(); renderAllowedApps(); refreshStatus();
+  };
+  const dash = document.createElement('span');
+  dash.textContent = '–';
+  dash.style.color = 'var(--muted)';
+  const end = document.createElement('input');
+  end.type = 'time';
+  end.className = 'time-input';
+  end.value = slot.end >= 1440 ? '23:59' : T.fmtHM(slot.end);
+  end.onchange = async () => {
+    if (!(await verifyPinSession())) { renderAllowedApps(); return; }
+    const v = T.parseHM(end.value);
+    if (v == null) { renderAllowedApps(); return; }
+    slot.end = v;
+    await persist(); renderAllowedApps(); refreshStatus();
+  };
+  const del = document.createElement('button');
+  del.type = 'button';
+  del.className = 'del-btn';
+  del.innerHTML = ICONS.close;
+  del.title = 'מחק חלון';
+  del.onclick = async () => {
+    if (!(await verifyPinSession())) return;
+    app.hours[di].slots.splice(si, 1);
+    await persist(); renderAllowedApps(); refreshStatus();
+  };
+  wrap.append(start, dash, end, del);
+  return wrap;
+}
+
+function appAccessEditor(app, key) {
+  ensureAppAccess(app);
+  const box = document.createElement('div');
+  box.className = 'app-access-panel';
+
+  const head = document.createElement('div');
+  head.className = 'app-access-head';
+  head.innerHTML = '<strong>שעות מותרות בזמן חסימה</strong>' +
+    '<span class="hint">ריק = מותר תמיד. הוסיפו חלון כדי להתיר את התוכנה רק בשעות מסוימות.</span>';
+  box.appendChild(head);
+
+  const days = document.createElement('div');
+  days.className = 'app-hours-days';
+  app.hours.forEach((day, di) => {
+    const row = document.createElement('div');
+    row.className = 'app-hour-day';
+    const label = document.createElement('span');
+    label.className = 'app-hour-day-name';
+    label.textContent = T.DAY_SHORT_HE[di];
+    row.appendChild(label);
+
+    const slotsWrap = document.createElement('div');
+    slotsWrap.className = 'app-hour-slots';
+    if (day.slots.length) {
+      day.slots.forEach((slot, si) => slotsWrap.appendChild(appHourSlotRow(app, di, si, slot)));
+    } else {
+      const none = document.createElement('span');
+      none.className = 'app-hour-none';
+      none.textContent = 'מותר תמיד';
+      slotsWrap.appendChild(none);
+    }
+    row.appendChild(slotsWrap);
+
+    const add = document.createElement('button');
+    add.type = 'button';
+    add.className = 'btn btn-ghost btn-sm';
+    add.innerHTML = ICONS.plus + '<span>חלון</span>';
+    add.title = 'הוספת חלון זמן שבו התוכנה מותרת';
+    add.onclick = async () => {
+      if (!(await verifyPinSession())) return;
+      app.hours[di].slots.push({ start: T.parseHM('20:00'), end: T.parseHM('22:00') });
+      await persist(); renderAllowedApps(); refreshStatus();
+    };
+    row.appendChild(add);
+    days.appendChild(row);
+  });
+  box.appendChild(days);
+
+  const limit = document.createElement('div');
+  limit.className = 'app-access-limit';
+  const cb = document.createElement('input');
+  cb.type = 'checkbox';
+  cb.checked = !!app.dailyLimit.enabled;
+  cb.onchange = async () => {
+    if (!(await verifyPinSession())) { renderAllowedApps(); return; }
+    app.dailyLimit.enabled = cb.checked;
+    await persist(); renderAllowedApps(); refreshStatus();
+  };
+  const cbLabel = document.createElement('span');
+  cbLabel.textContent = 'הגבלת זמן שימוש יומית בתוכנה';
+  const min = document.createElement('input');
+  min.type = 'number';
+  min.min = '1';
+  min.max = '1440';
+  min.className = 'text-input num-input';
+  min.value = String(app.dailyLimit.minutes || 60);
+  min.disabled = !app.dailyLimit.enabled;
+  min.onchange = async () => {
+    if (!(await verifyPinSession())) { renderAllowedApps(); return; }
+    const v = Math.max(1, Math.min(1440, Math.round(Number(min.value) || 60)));
+    app.dailyLimit.minutes = v;
+    await persist(); renderAllowedApps(); refreshStatus();
+  };
+  const minLabel = document.createElement('span');
+  minLabel.textContent = 'דקות ביום';
+  limit.append(cb, cbLabel, min, minLabel);
+  box.appendChild(limit);
+
+  const note = document.createElement('p');
+  note.className = 'hint';
+  note.textContent = 'הזמן נספר רק בזמן שהמחשב חסום והתוכנה בשימוש, נשמר גם אחרי אתחול ומתאפס בחצות.';
+  box.appendChild(note);
+
+  return box;
+}
+
+function appRow(app, onDelete, editable) {
   const row = document.createElement('div');
   row.className = 'override-row allowed-app-row';
   const info = document.createElement('div');
@@ -1121,12 +1294,27 @@ function appRow(app, onDelete) {
   b.className = 'app-badge ' + badge.cls;
   b.textContent = badge.text;
   info.append(name, exe, b);
+
+  const actions = document.createElement('div');
+  actions.className = 'allowed-app-actions';
+  if (editable) {
+    const key = String(app.exe || '').toLowerCase();
+    const summary = appAccessSummary(app);
+    if (summary) {
+      const s = document.createElement('span');
+      s.className = 'app-access-badge';
+      s.textContent = summary;
+      info.append(s);
+    }
+    actions.appendChild(appAccessToggle(app, key));
+  }
   const del = document.createElement('button');
   del.className = 'del-btn';
   del.innerHTML = ICONS.close;
   del.title = 'הסר תוכנה מהרשימה';
   del.onclick = onDelete;
-  row.append(info, del);
+  actions.appendChild(del);
+  row.append(info, actions);
   return row;
 }
 
@@ -1143,26 +1331,38 @@ function renderAllowedApps() {
     return;
   }
   apps.forEach((app, i) => {
+    ensureAppAccess(app);
+    const key = String(app.exe || '').toLowerCase();
     list.appendChild(appRow(app, async () => {
       if (!(await verifyPinSession())) { renderAllowedApps(); return; }
       schedule.allowedApps.splice(i, 1);
+      expandedAppKeys.delete(key);
       renderAllowedApps();
       persist();
       refreshStatus();
-    }));
+    }, true));
+    if (expandedAppKeys.has(key)) list.appendChild(appAccessEditor(app, key));
 
     // תוכנות נלוות (למשל תוספים שפועלים כתוכנה נפרדת)
     const comps = app.companions || [];
     comps.forEach((c, ci) => {
+      ensureAppAccess(c);
+      const ckey = String(c.exe || '').toLowerCase();
       const crow = appRow(c, async () => {
         if (!(await verifyPinSession())) { renderAllowedApps(); return; }
         app.companions.splice(ci, 1);
+        expandedAppKeys.delete(ckey);
         renderAllowedApps();
         persist();
         refreshStatus();
-      });
+      }, true);
       crow.classList.add('companion');
       list.appendChild(crow);
+      if (expandedAppKeys.has(ckey)) {
+        const ed = appAccessEditor(c, ckey);
+        ed.classList.add('companion');
+        list.appendChild(ed);
+      }
     });
 
     const addComp = document.createElement('button');
@@ -1180,7 +1380,9 @@ function renderAllowedApps() {
       if (dup) { toast('התוכנה כבר נמצאת כנלווית'); return; }
       app.companions.push({
         name: res.name, exe: res.path, mode: res.mode,
-        publisher: res.publisher || '', product: res.product || '', hash: res.hash || ''
+        publisher: res.publisher || '', product: res.product || '', hash: res.hash || '',
+        companions: [], hours: Array.from({ length: 7 }, (_, d) => ({ day: d, slots: [] })),
+        dailyLimit: { enabled: false, minutes: 60 }
       });
       renderAllowedApps();
       persist();
@@ -1200,7 +1402,8 @@ function addAllowedApp(res) {
   schedule.allowedApps.push({
     name: res.name, exe: res.path, mode: res.mode,
     publisher: res.publisher || '', product: res.product || '', hash: res.hash || '',
-    companions: []
+    companions: [], hours: Array.from({ length: 7 }, (_, d) => ({ day: d, slots: [] })),
+    dailyLimit: { enabled: false, minutes: 60 }
   });
   renderAllowedApps();
   persist();
@@ -1454,6 +1657,16 @@ function renderFeRoots() {
 }
 
 /* ---------- מצב ההגנה ---------- */
+// האם הלוח הבסיסי (ללא פרופילים) חוסם בפועל? משמש להחלטה אם להציע פרופיל
+// חדש כברירת מחדל — כדי שמשתמש ללא פרופיל תואם לא יישאר פתוח.
+function baseHasBlockingPolicy() {
+  if (schedule.enabled === false) return false;
+  if (schedule.dailyLimit && schedule.dailyLimit.enabled) return true;
+  if (schedule.mode === 'allowlist') return true;
+  return (schedule.week || []).some((d) => (d.slots || []).some((x) => x.type === 'blocked' || x.type === 'netblock')) ||
+    (schedule.overrides || []).some((x) => x.type === 'block' || x.type === 'netblock');
+}
+
 async function renderSecurity() {
   const list = $('securityList');
   if (!list) return;  if (!API) {
@@ -1470,6 +1683,13 @@ async function renderSecurity() {
     { ok: sec.elevated, label: 'הרצה עם הרשאות מנהל', hint: 'מאפשרת חסימת כל המשתמשים' },
     { ok: sec.netElevated || sec.netUac, label: 'חסימת אינטרנט בלבד זמינה', hint: sec.netElevated ? 'חוק חומת אש ייעודי — הרשאת מנהל פעילה' : 'בעת ההפעלה תופיע בקשת אישור מנהל (UAC)' },
     { ok: sec.shared, label: 'הגדרות משותפות לכל המשתמשים', hint: 'כל חשבון במחשב נחסם לפי אותו לוח' },
+    { ok: !sec.profilesUnprotected,
+      label: 'כל המשתמשים מכוסים',
+      hint: sec.profilesUnprotected
+        ? '⚠ מוגדרים פרופילים אך אין פרופיל ברירת מחדל — משתמש Windows שאינו תואם לאף פרופיל לא ייחסם לפי הפרופיל. קבעו פרופיל כברירת מחדל (לשונית פרופילים)'
+        : (sec.profilesExist
+          ? 'משתמש ללא פרופיל נופל על הלוח הבסיסי'
+          : 'אין פרופילים — הלוח הבסיסי חל על כל המשתמשים') },
     { ok: sec.protectedCopy, label: 'הגנה על קבצי התוכנה', hint: tamperHint },
     { ok: !sec.startupError, label: 'הפעלה עם Windows אומתה', hint: sec.startupError || 'Startup נבדק בפועל' },
     { ok: sec.recovery, label: 'מייל לשחזור סיסמה', hint: 'קוד חד-פעמי בלבד — הסיסמה אינה נשלחת' }
@@ -2014,11 +2234,21 @@ function init() {
       };
       if (!schedule.profiles) schedule.profiles = [];
       schedule.profiles.push({ id, name: name || user, user, overrides });
+      // רשת ביטחון: אם זה הפרופיל הראשון והלוח הבסיסי אינו חוסם — מגדירים אותו
+      // אוטומטית כברירת מחדל, כדי שמשתמש Windows שאינו תואם לאף פרופיל (למשל
+      // הילד) לא יישאר פתוח לגמרי בלי כוונה.
+      let autoDefault = false;
+      if (!schedule.defaultProfile && !baseHasBlockingPolicy()) {
+        schedule.defaultProfile = id;
+        autoDefault = true;
+      }
       $('profileName').value = '';
       $('profileUser').value = '';
       renderProfiles();
       await persist();
-      toast('הפרופיל נשמר — הלוח הנוכחי יחול על המשתמש שהוגדר', 'success');
+      toast(autoDefault
+        ? 'הפרופיל נשמר והוגדר כברירת מחדל לכל שאר המשתמשים במחשב'
+        : 'הפרופיל נשמר — הלוח הנוכחי יחול על המשתמש שהוגדר', 'success');
     };
   }
 

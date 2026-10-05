@@ -108,6 +108,45 @@
   //   תוכנה אחרת (גם תוכנת מיקרוסופט אחרת — כי שם המוצר שונה).
   // - תוכנה לא חתומה: mode 'path' — אימות לפי נתיב מלא מדויק + טביעת SHA-256
   //   של הקובץ (אם נשמרה). רשומות כפולות, ריקות או לא תקינות נמחקות.
+  // שעות מותרות לתוכנה מותרת: מערך של 7 ימים, כל יום עם חלונות {start,end}
+  // (בדקות מחצות) שבהם מותר להשתמש בתוכנה בזמן שהמחשב חסום. יום בלי חלונות =
+  // אין התרה באותו יום. מערך ריק לגמרי = אין הגבלת שעות (מותר תמיד) — תאימות
+  // לאחור לתוכנות שהוגדרו לפני שהתכונה נוספה.
+  function normalizeAppHours(hours) {
+    const out = [];
+    for (let d = 0; d < 7; d++) {
+      const src = (hours || [])[d] || { slots: [] };
+      const slots = (Array.isArray(src.slots) ? src.slots : [])
+        .filter((x) => x && typeof x === 'object')
+        .map((x) => ({ start: parseScheduleHM(x.start, false), end: parseScheduleHM(x.end, true) }))
+        .filter((x) => x.start !== null && x.end !== null && x.start !== x.end);
+      out.push({ day: d, slots });
+    }
+    return out;
+  }
+
+  // האם הוגדרה לתוכנה הגבלת שעות כלשהי? (אם לא — היא מותרת בכל שעה)
+  function appHoursConfigured(hours) {
+    const h = normalizeAppHours(hours);
+    return h.some((d) => d.slots.length > 0);
+  }
+
+  // האם התוכנה מותרת עכשיו לפי השעות שלה? אין שעות מוגדרות = מותר תמיד.
+  function appHoursAllow(hours, date) {
+    if (!appHoursConfigured(hours)) return true;
+    const h = normalizeAppHours(hours);
+    const d = date || new Date();
+    const minutes = d.getHours() * 60 + d.getMinutes();
+    const today = (h[d.getDay()] || { slots: [] }).slots;
+    for (const s of today) if (slotCovers(s, minutes)) return true;
+    // חלון שחוצה חצות שהתחיל אתמול ותקף גם עכשיו (למשל 22:00–02:00)
+    const prev = new Date(d);
+    prev.setDate(prev.getDate() - 1);
+    const prevSlots = (h[prev.getDay()] || { slots: [] }).slots;
+    for (const s of prevSlots) if (s.start >= s.end && minutes < s.end) return true;
+    return false;
+  }
+
   function normalizeAllowedApps(list) {
     const out = [];
     const seen = new Set();
@@ -131,7 +170,11 @@
         publisher: mode === 'publisher' ? publisher : '',
         product: mode === 'publisher' ? product : '',
         hash: validHash,
-        companions: normalizeAllowedApps(a.companions)
+        companions: normalizeAllowedApps(a.companions),
+        // שעות מותרות ומכסת זמן יומית לתוכנה (בזמן שהמחשב חסום). ברירת מחדל:
+        // בלי שעות (מותר תמיד) ובלי מכסה — בדיוק ההתנהגות שלפני התכונה.
+        hours: normalizeAppHours(a.hours),
+        dailyLimit: normalizeDailyLimit(a.dailyLimit)
       });
     });
     return out;
@@ -779,6 +822,9 @@
     dailyLimitReached,
     dailyLimitResetAt,
     normalizeExtension,
+    normalizeAppHours,
+    appHoursConfigured,
+    appHoursAllow,
     resolveProfile,
     effectiveSchedule,
     isHiddenType
