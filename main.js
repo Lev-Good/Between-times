@@ -3413,9 +3413,18 @@ function isNewerVersion(remote, current) {
   return false;
 }
 
+// התראת מערכת מוצגת **פעם אחת לגרסה בכל הרצה** של התוכנה.
+let lastNotifiedVersion = null;
+
 function notifyUpdate(note) {
   if (win && !win.isDestroyed()) win.webContents.send('update', note);
   blockWins.forEach((bw) => { if (bw && !bw.isDestroyed()) bw.webContents.send('update', note); });
+  // בלי המגן הזה כל בדיקת רקע — וגם כל ניסיון הורדה, שקורא לבדיקת העדכון —
+  // הציגו התראה נוספת לאותה גרסה: זו ההצפה שהמשתמשים דיווחו עליה
+  // ("ההודעה לא מפסיקה לקפוץ"). הבאנר בחלון ממשיך להתעדכן בכל בדיקה.
+  const notified = String(note.version || '');
+  if (notified && notified === lastNotifiedVersion) return;
+  lastNotifiedVersion = notified;
   try {
     updateNotification = new Notification({
       title: 'עדכון זמין — בין הזמנים',
@@ -3427,14 +3436,18 @@ function notifyUpdate(note) {
   } catch { /* ignore */ }
 }
 
-async function checkForUpdate() {
+// opts.silent — בדיקה שקטה: מעדכנת את הבאנר אבל **בלי התראת מערכת**. כך
+// נתיב ההורדה (שבו המשתמש כבר לחץ "הורד והתקן עכשיו") לא מייצר התראה נוספת.
+async function checkForUpdate(opts) {
+  const silent = !!(opts && opts.silent);
   // מקור העדכונים מוגדר על ידי המפתח בלבד — דרך הקבוע UPDATE_URL בקוד
   // (למשתמשים רגילים אין שדה להגדרה בממשק, כדי למנוע שגיאות ובלבול).
   const url = UPDATE_URL;
   if (!url) return { ok: false, error: 'לא הוגדר מקור עדכונים', update: null };
   try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
-    const data = await res.json().catch(() => ({}));
+    const meta = await fetchJsonAnyStack(url, 10000);
+    if (!meta.ok) return { ok: false, error: 'לא ניתן לבדוק עדכונים (אופליין?)', update: null };
+    const data = meta.data;
     const remote = String(data.version || '').trim();
     if (!isValidUpdateVersion(remote) || !isNewerVersion(remote, app.getVersion())) {
       return { ok: true, update: null };
@@ -3443,7 +3456,7 @@ async function checkForUpdate() {
     // שחסר לו hash מלא, גם אם הכתובת נמצאת ב-GitHub הרשמי.
     const note = { version: remote, url: data.url || '', notes: data.notes || '', sha256: String(data.sha256 || '').trim().toLowerCase() };
     updateNote = note;
-    notifyUpdate(note);
+    if (!silent) notifyUpdate(note);
     return { ok: true, update: note };
   } catch {
     return { ok: false, error: 'לא ניתן לבדוק עדכונים (אופליין?)', update: null };
@@ -3461,54 +3474,129 @@ const GITHUB_REPO = 'Lev-Good/Between-times';
 const GITHUB_REPO_URL = 'https://github.com/' + GITHUB_REPO;
 const MAX_UPDATE_BYTES = 250 * 1024 * 1024;
 
+// תקרת זמן להורדה שלמה. במחשב מאחורי סינון/אנטי-וירוס או בקו איטי 92MB
+// יכולים לקחת יותר מעשר דקות — וקטיעה באמצע היא כשל עדכון שאין למשתמש דרך
+// לתקן. ראו docs/MIGRATION-1.8.1.md.
+const UPDATE_DOWNLOAD_TIMEOUT_MS = 30 * 60 * 1000;
+// המתנה בין סבבי הניסיון (מקוצר בבדיקות כדי שלא יארך סתם).
+const UPDATE_RETRY_DELAY_MS = isTestMode ? 5 : 750;
+
+// מחסנית הרשת של Chromium (net.fetch): משתמשת במאגר התעודות של Windows ובהגדרות
+// ה-proxy של המערכת, ולכן עוברת במקומות שה-fetch של Node (OpenSSL/mitm) נכשל
+// בהם. נגישה בעצלתיים כדי שגם מחסנית בדיקות בלי net תעבוד (מחזיר דחייה).
+function chromiumNetFetch(url, opts) {
+  let n = null;
+  try { n = require('electron').net; } catch { /* ignore */ }
+  if (n && typeof n.fetch === 'function') return n.fetch(url, opts);
+  return Promise.reject(new Error('net.fetch אינו זמין'));
+}
+
+// שתי מחסניות רשת בלתי תלויות. כל אחת שמצליחה מספיקה — הרצון הוא שעדכון
+// לא ייפול בגלל בעיה של מחסנית אחת במחשב מסוים.
+const UPDATE_FETCH_STRATEGIES = [
+  { name: 'node-fetch', fetch: (url, opts) => fetch(url, opts) },
+  { name: 'chromium-net', fetch: (url, opts) => chromiumNetFetch(url, opts) }
+];
+
+// קריאת JSON עם נסיגה בין המחסניות (בדיקת העדכון וה-GitHub API).
+async function fetchJsonAnyStack(url, timeoutMs) {
+  for (const strategy of UPDATE_FETCH_STRATEGIES) {
+    try {
+      const res = await strategy.fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+      const data = await res.json().catch(() => ({}));
+      return { ok: true, data };
+    } catch { /* ננסה את המחסנית הבאה */ }
+  }
+  return { ok: false, data: {} };
+}
+
 // איתור כתובת ההורדה הישירה של קובץ ההתקנה לגרסה נתונה.
 // קודם דרך GitHub API (השם המדויק של הקובץ), ואם זה נכשל — נופלים
 // לכתובת הקונבנציונלית "/releases/latest/download/Setup.<version>.exe".
 async function resolveInstallerUrl(version) {
   try {
-    const res = await fetch('https://api.github.com/repos/' + GITHUB_REPO + '/releases/tags/v' + version, {
-      signal: AbortSignal.timeout(10000)
-    });
-    if (res.ok) {
-      const data = await res.json();
-      const expectedName = 'Setup.' + version + '.exe';
-      const asset = (data.assets || []).find((a) => String(a.name || '') === expectedName);
-      if (asset && asset.browser_download_url) return asset.browser_download_url;
-    }
+    const meta = await fetchJsonAnyStack('https://api.github.com/repos/' + GITHUB_REPO + '/releases/tags/v' + version, 10000);
+    const data = meta.data || {};
+    const expectedName = 'Setup.' + version + '.exe';
+    const asset = (data.assets || []).find((a) => String(a.name || '') === expectedName);
+    if (asset && asset.browser_download_url) return asset.browser_download_url;
   } catch { /* נופלים לכתובת הקונבנציונלית */ }
   return GITHUB_REPO_URL + '/releases/download/v' + version + '/Setup.' + version + '.exe';
 }
 
-// הורדת קובץ לנתיב מקומי עם דיווח התקדמות (אחוזים) — סטרימינג מ-fetch.
-// הכתיבה לדיסק היא סינכרונית (fd) כדי שהיא תהיה דטרמיניסטית: בכשלון
-// באמצע ההורדה הקובץ החלקי נמחק מיד ואין דליפת handle או אירועי שגיאה
-// א-סינכרוניים (שגיאות write א-סינכרוניות קשות לעקוב אחריהן ב-Windows).
-async function downloadInstaller(url, dest, onProgress) {
-  const res = await fetch(url, { signal: AbortSignal.timeout(10 * 60 * 1000) });
-  if (!res.ok) throw new Error('ההורדה נכשלה (HTTP ' + res.status + ')');
-  if (!res.body) throw new Error('ההורדה נכשלה (אין תוכן)');
-  const total = Number(res.headers.get('content-length')) || 0;
-  if (total > MAX_UPDATE_BYTES) throw new Error('העדכון גדול מדי');
-  const reader = res.body.getReader();
-  fs.mkdirSync(path.dirname(dest), { recursive: true });
-  const fd = fs.openSync(dest, 'w');
-  let received = 0;
+// ניסיון הורדה אחד עם מחסנית רשת נתונה. מחזיר { ok, size } או { ok:false, error }
+// במקום לזרוק — כדי שהקורא יוכל לעבור למחסנית הבאה בלי לשבור את הזרימה.
+// הכתיבה לדיסק סינכרונית בכוונה: כשלון באמצע מוחק את הקובץ החלקי מיד ואין
+// handle דלוף ולא אירועי write א-סינכרוניים שקשה לעקוב אחריהם ב-Windows.
+async function downloadAttempt(strategy, url, dest, onProgress) {
+  let fd = null;
   try {
+    const res = await strategy.fetch(url, { signal: AbortSignal.timeout(UPDATE_DOWNLOAD_TIMEOUT_MS) });
+    if (!res || !res.ok) throw new Error('ההורדה נכשלה (HTTP ' + ((res && res.status) || '?') + ')');
+    if (!res.body) throw new Error('ההורדה נכשלה (אין תוכן)');
+    const total = Number(res.headers.get('content-length')) || 0;
+    if (total > MAX_UPDATE_BYTES) throw new Error('העדכון גדול מדי');
+    const contentType = String(res.headers.get('content-type') || '').toLowerCase();
+    const reader = res.body.getReader();
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fd = fs.openSync(dest, 'w');
+    let received = 0;
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
-      received += value.length;
+      const chunk = Buffer.from(value);
+      // סינון/פרוקסי שמחזירים דף חסימה נראים כמו הורדה שהצליחה — מזהים מיד
+      // (HTML במקום קובץ הרצה) ומפנים את המקום למחסנית הבאה.
+      if (received === 0 && (contentType.includes('text/html') || chunk.subarray(0, 1).toString('ascii') === '<')) {
+        throw new Error('התקבלה תגובת HTML במקום קובץ ההתקנה (סינון או פרוקסי?)');
+      }
+      received += chunk.length;
       if (received > MAX_UPDATE_BYTES) throw new Error('העדכון גדול מדי');
-      fs.writeSync(fd, Buffer.from(value));
-      if (onProgress && total) onProgress(Math.round((received / total) * 100));
+      fs.writeSync(fd, chunk);
+      if (onProgress) onProgress(received, total);
     }
     fs.closeSync(fd);
+    fd = null;
+    if (received < 1024 * 1024) throw new Error('הקובץ שהורד קטן מדי (' + received + ' בתים)');
+    return { ok: true, size: received };
   } catch (err) {
-    try { fs.closeSync(fd); } catch { /* ignore */ }
+    try { if (fd !== null) fs.closeSync(fd); } catch { /* ignore */ }
     try { fs.unlinkSync(dest); } catch { /* ignore */ } // ניקוי הקובץ החלקי
-    throw err;
+    return { ok: false, error: (err && err.message) || 'כשל הורדה' };
   }
-  return received;
+}
+
+// הורדה עם נסיגה ומסלולים חלופיים: כל מחסנית רשת מנוסה פעם אחת, ואם כולן
+// נכשלו — סבב נוסף אחד אחרי השהיה קצרה (כשל רשת חולף). כל כשל נרשם ביומן
+// הפעילות עם שם המחסנית והשגיאה — ובלי הרישום הזה כשל הורדה נבלע בלי שום
+// עקבה, וזו בדיוק הבעיה שהתגלתה כשלקוח לא הצליח להתעדכן (1.8.0).
+async function downloadInstallerResilient(url, dest, onProgress, version) {
+  const failures = [];
+  for (let round = 1; round <= 2; round++) {
+    for (const strategy of UPDATE_FETCH_STRATEGIES) {
+      const attempt = await downloadAttempt(strategy, url, dest, onProgress);
+      if (attempt.ok) {
+        if (failures.length) {
+          logEvent('update-download-fallback', {
+            version,
+            strategy: strategy.name,
+            failed: failures.map((f) => f.strategy + ': ' + f.error).slice(0, 4)
+          });
+        }
+        return attempt;
+      }
+      failures.push({ strategy: strategy.name, error: attempt.error });
+      logEvent('update-download-attempt-failed', { version, strategy: strategy.name, error: attempt.error });
+    }
+    if (round === 1) await delay(UPDATE_RETRY_DELAY_MS);
+  }
+  const last = failures[failures.length - 1];
+  logEvent('update-download-failed', {
+    version,
+    attempts: failures.length,
+    last: last ? last.strategy + ': ' + last.error : null
+  });
+  return { ok: false, error: last ? last.error : 'ההורדה נכשלה' };
 }
 
 // Authenticode הוא שער נוסף מעל SHA-256: טביעת העדכון עדיין נבדקת תמיד,
@@ -3598,14 +3686,16 @@ async function launchElevated(file, args) {
 }
 
 async function downloadAndInstallUpdate() {
-  const chk = await checkForUpdate();
+  // בדיקה שקטה (בלי התראת מערכת): המשתמש כבר לחץ "הורד והתקן עכשיו",
+  // והתראה נוספת בכל ניסיון היא בדיוק מה שהציף את המשתמשים.
+  const chk = await checkForUpdate({ silent: true });
   if ((!chk.ok || !chk.update) && !updateNote) {
     return { ok: false, error: (chk && chk.error) || 'אין עדכון זמין' };
   }
   const version = updateNote.version;
   const dest = path.join(app.getPath('temp'), 'BenHazmanim-Setup-' + version + '.exe');
-  const progress = (phase, percent) => {
-    const payload = { phase, version, percent };
+  const progress = (phase, percent, bytes) => {
+    const payload = { phase, version, percent, bytes: bytes || 0 };
     [win, ...blockWins].forEach((w) => {
       if (w && !w.isDestroyed()) w.webContents.send('update-progress', payload);
     });
@@ -3622,7 +3712,13 @@ async function downloadAndInstallUpdate() {
     } catch { /* כתובת לא תקינה */ }
     if (!officialUrl) return { ok: false, error: 'מקור ההורדה אינו תקין' };
     progress('download', 0);
-    const size = await downloadInstaller(url, dest, (p) => progress('download', p));
+    const download = await downloadInstallerResilient(url, dest, (bytes, total) => {
+      progress('download', total ? Math.round((bytes / total) * 100) : null, bytes);
+    }, version);
+    if (!download.ok) {
+      return { ok: false, error: 'ההורדה נכשלה — בדקו את החיבור לאינטרנט ונסו שוב, או הורידו ידנית מעמוד ההורדות (' + download.error + ')' };
+    }
+    const size = download.size;
     // בדיקות תקינות: גודל סביר (המתקין בפועל ~90MB) + חותמת PE (MZ) —
     // כך לא מריצים קובץ שגוי (דף 404, הורדה קטועה או קובץ שאינו EXE)
     const mz = fs.readFileSync(dest).subarray(0, 2).toString('ascii');

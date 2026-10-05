@@ -903,7 +903,11 @@ function onUpdateProgress(p) {
   const btn = $('updateLink');
   if (!btn || !btn.classList.contains('downloading')) return;
   if (p.phase === 'download') {
-    btn.innerHTML = ICONS.download + '<span>מוריד… ' + (p.percent != null ? p.percent + '%' : '') + '</span>';
+    // אם אין content-length (למשל דרך פרוקסי) אין אחוזים — מציגים נפח שהורד.
+    const label = p.percent != null
+      ? p.percent + '%'
+      : (p.bytes ? (p.bytes / 1048576).toFixed(1) + 'MB' : '');
+    btn.innerHTML = ICONS.download + '<span>מוריד… ' + label + '</span>';
   } else if (p.phase === 'install') {
     btn.innerHTML = ICONS.download + '<span>מתקין…</span>';
   }

@@ -1958,6 +1958,142 @@ test('update:download reports clear error when no update is available', async ()
   }
 });
 
+/* ================= עמידות נתיב ההורדה (1.8.1) =================
+   הרגרסיה שהתגלתה אצל משתמש: בדיקת העדכון עבדה (באנר והתראה), אבל ההורדה
+   עצמה נכשלה כעבור ~2 שניות בלי שום רישום — ולכן אי אפשר היה לאבחן. כאן
+   ננעלות: הנסיגה למחסנית Chromium, זיהוי דף חסימה, ורישום כל כשל. */
+
+test('update:download falls back to the Chromium network stack when the Node download fails', async () => {
+  const installer = fakeInstallerBytes();
+  const installerHash = fakeInstallerHash(installer);
+  fetchMock = async (url) => {
+    const api = githubApiRelease(url);
+    if (api) return api;
+    if (url.includes('raw.githubusercontent.com')) {
+      return { ok: true, json: async () => ({ version: '9.9.9', sha256: installerHash }) };
+    }
+    // כשל ההורדה שדווח: ה-fetch של Node נכשל (למשל אימות תעודה מול סינון/אנטי-וירוס)
+    throw new Error('fetch failed');
+  };
+  try {
+    const m = loadMain({});
+    await m.ready();
+    // מחסנית הרשת של Chromium מדומה — מחזירה את הקובץ האמיתי
+    m.electron.net = { fetch: (url) => updateFetchMock(installer, installerHash)(url) };
+    const res = await m.ipcHandlers.get('update:download')();
+    assert.equal(res.ok, true, 'ההורדה חייבת להצליח דרך המחסנית החלופית: ' + JSON.stringify(res));
+    const dest = path.join(m.tmpRoot, 'app', 'BenHazmanim-Setup-9.9.9.exe');
+    assert.ok(fs.existsSync(dest), 'המתקין נשמר על הדיסק לפני ההפעלה');
+    assert.ok(launchedVia(m, dest), 'המתקין שהורד הוא זה שהופעל');
+    const log = fs.readFileSync(path.join(m.tmpRoot, 'userData', 'activity.log'), 'utf8');
+    assert.ok(/update-download-attempt-failed/.test(log), 'כשל מחסנית נרשם ביומן: ' + log);
+    assert.ok(/update-download-fallback/.test(log), 'המעבר למחסנית החלופית נרשם: ' + log);
+    m.cleanup();
+  } finally {
+    fetchMock = null;
+  }
+});
+
+test('update:download recovers when a filter or proxy returns an HTML page instead of the installer', async () => {
+  const installer = fakeInstallerBytes();
+  const installerHash = fakeInstallerHash(installer);
+  fetchMock = async (url) => {
+    const api = githubApiRelease(url);
+    if (api) return api;
+    if (url.includes('raw.githubusercontent.com')) {
+      return { ok: true, json: async () => ({ version: '9.9.9', sha256: installerHash }) };
+    }
+    // דף חסימה של סינון: תשובת 200 עם HTML במקום EXE
+    const html = Buffer.from('<html><body>blocked by the filter</body></html>');
+    return {
+      ok: true,
+      headers: {
+        get: (h) => (h === 'content-length' ? String(html.length)
+          : h === 'content-type' ? 'text/html; charset=utf-8' : null)
+      },
+      body: fakeStream([html])
+    };
+  };
+  try {
+    const m = loadMain({});
+    await m.ready();
+    m.electron.net = { fetch: (url) => updateFetchMock(installer, installerHash)(url) };
+    const res = await m.ipcHandlers.get('update:download')();
+    assert.equal(res.ok, true, 'למרות דף החסימה העדכון חייב להצליח במחסנית החלופית: ' + JSON.stringify(res));
+    const log = fs.readFileSync(path.join(m.tmpRoot, 'userData', 'activity.log'), 'utf8');
+    assert.ok(/HTML/.test(log), 'זיהוי תגובת HTML נרשם ביומן: ' + log);
+    m.cleanup();
+  } finally {
+    fetchMock = null;
+  }
+});
+
+test('update:download logs every failed stack when no strategy can complete', async () => {
+  const installerHash = fakeInstallerHash(fakeInstallerBytes());
+  fetchMock = async (url) => {
+    const api = githubApiRelease(url);
+    if (api) return api;
+    if (url.includes('raw.githubusercontent.com')) {
+      return { ok: true, json: async () => ({ version: '9.9.9', sha256: installerHash }) };
+    }
+    throw new Error('socket hang up');
+  };
+  try {
+    const m = loadMain({}); // בלי net — גם המחסנית החלופית נכשלת
+    await m.ready();
+    const res = await m.ipcHandlers.get('update:download')();
+    assert.equal(res.ok, false);
+    assert.match(res.error || '', /ההורדה נכשלה/, 'הודעה ברורה למשתמש: ' + res.error);
+    assert.equal(m.state.quitCalled, false, 'התוכנה לא נסגרת כשההורדה נכשלה');
+    const log = fs.readFileSync(path.join(m.tmpRoot, 'userData', 'activity.log'), 'utf8');
+    assert.ok(/update-download-failed/.test(log), 'כשל ההורדה נרשם ביומן: ' + log);
+    assert.ok(/socket hang up/.test(log), 'השגיאה עצמה נרשמת — בלעדיה אין מה לאבחן: ' + log);
+    const dest = path.join(m.tmpRoot, 'app', 'BenHazmanim-Setup-9.9.9.exe');
+    assert.equal(fs.existsSync(dest), false, 'קובץ חלקי לא נשאר על הדיסק');
+    m.cleanup();
+  } finally {
+    fetchMock = null;
+  }
+});
+
+test('update: the system notification appears once per version, not on every check', async () => {
+  fetchMock = async (url) => {
+    if (url.includes('raw.githubusercontent.com')) {
+      return { ok: true, json: async () => ({ version: '9.9.9', sha256: 'a'.repeat(64) }) };
+    }
+    throw new Error('unexpected fetch: ' + url);
+  };
+  try {
+    const m = loadMain({});
+    await m.ready();
+    const first = await m.ipcHandlers.get('update:check')();
+    assert.equal(first.ok, true);
+    assert.equal(m.state.notifications.length, 1, 'התראה אחת על עדכון זמין');
+    await m.ipcHandlers.get('update:check')();
+    await m.ipcHandlers.get('update:check')();
+    assert.equal(m.state.notifications.length, 1,
+      'בדיקות חוזרות לאותה גרסה לא מייצרות התראות נוספות (הצפת ההודעות שדווחה)');
+    m.cleanup();
+  } finally {
+    fetchMock = null;
+  }
+});
+
+test('update:download does not fire a system notification — the user already initiated it', async () => {
+  const installer = fakeInstallerBytes();
+  fetchMock = updateFetchMock(installer, fakeInstallerHash(installer));
+  try {
+    const m = loadMain({});
+    await m.ready();
+    const res = await m.ipcHandlers.get('update:download')();
+    assert.equal(res.ok, true, 'ההורדה הצליחה: ' + JSON.stringify(res));
+    assert.equal(m.state.notifications.length, 0, 'ניסיון הורדה לא מייצר התראת מערכת נוספת');
+    m.cleanup();
+  } finally {
+    fetchMock = null;
+  }
+});
+
 /* ================= מצב וסטטיסטיקות ================= */
 
 test('status:get reflects enabled=false as allowed', async () => {
