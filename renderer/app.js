@@ -2472,22 +2472,6 @@ function init() {
       $('version').textContent = v;
       $('version2').textContent = v;
     });
-    if (API.getLicense) {
-      API.getLicense().then((lic) => {
-        const userText = $('licenseUserText');
-        const badge = $('licenseBadge');
-        if (!userText || !badge) return;
-        if (lic && lic.isLicensed) {
-          userText.textContent = `רשום על שם: ${lic.userName}`;
-          badge.textContent = 'פעיל ומאומת';
-          badge.style.background = '#16a34a';
-        } else {
-          userText.textContent = 'רישיון לא זוהה במחשב זה';
-          badge.textContent = 'לא מאומת';
-          badge.style.background = '#eab308';
-        }
-      }).catch(() => {});
-    }
   }
 }
 

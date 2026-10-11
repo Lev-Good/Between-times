@@ -37,13 +37,6 @@ window.BenHazmanimGuide = (function () {
           התוכנה מתוכננת עם <strong>הגנה עצמית מחמירה</strong>: אי אפשר לסגור אותה ממנהל המשימות, אי אפשר למחוק את קבציה, ואי אפשר להסיר אותה ללא הקלדת סיסמת ההורה שקבעתם מראש.
         </p>
 
-        <div class="guide-box note" style="margin-top: 14px;">
-          <div class="guide-box-title">רישוי התוכנה לחברי הפורום:</div>
-          <p>
-            התוכנה מוענקת כהטבה לחברי <strong>פורום העורכים התורניים</strong> (<a href="https://editorforum.levtov.uk" target="_blank">editorforum.levtov.uk</a>).
-            קוד הרישיון האישי שלכם מופיע בדף הפרופיל שלכם בפורום תחת לשונית <em>"רישיונות תוכנה"</em>, ומשמש להפעלת ההתקנה במחשב.
-          </p>
-        </div>
       `
     },
     {

@@ -48,7 +48,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   fitQuitWindow: (w, h) => ipcRenderer.invoke('quit:fit', w, h),
   hideWindow: () => ipcRenderer.invoke('app:hide'),
   getVersion: () => ipcRenderer.invoke('app:version'),
-  getLicense: () => ipcRenderer.invoke('license:get'),
   applyTheme: (resolved) => ipcRenderer.invoke('theme:apply', resolved),
 
   onStatus: (cb) => {

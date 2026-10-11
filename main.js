@@ -150,30 +150,7 @@ function recordClockSample() {
 // במחשב נחסם לפי אותו לוח זמנים. אחרת — בתיקיית הנתונים של המשתמש הנוכחי.
 const machineDir = () => path.join(process.env.PROGRAMDATA || 'C:\\ProgramData', 'BenHazmanim');
 const machineSettingsFile = () => path.join(machineDir(), 'settings.json');
-const machineLicenseFile = () => path.join(machineDir(), 'license.json');
 
-function getLicenseInfo() {
-  try {
-    const licPath = machineLicenseFile();
-    if (fs.existsSync(licPath)) {
-      const data = JSON.parse(fs.readFileSync(licPath, 'utf8'));
-      if (data && (data.ok || data.code)) {
-        return {
-          isLicensed: true,
-          userName: (data.user && data.user.name) || 'חבר פורום העורכים התורניים',
-          code: data.code || ''
-        };
-      }
-    }
-  } catch (e) {
-    console.error('Error reading license info:', e);
-  }
-  return {
-    isLicensed: false,
-    userName: null,
-    code: null
-  };
-}
 // עותק מוגן של קבצי התוכנה — נשמר אצל "כל המשתמשים" כדי שמחיקת תיקיית
 // ההתקנה המקורית (שנמצאת בפרופיל המשתמש וניתנת למחיקה) לא תשבית את האכיפה.
 const protectedAppDir = () => path.join(machineDir(), 'app');
@@ -4843,10 +4820,7 @@ function registerIpc() {
     if (!uiSender(event)) return senderError();
     return app.getVersion();
   });
-  ipcMain.handle('license:get', (event) => {
-    if (!uiSender(event)) return senderError();
-    return getLicenseInfo();
-  });
+
   ipcMain.handle('app:hide', (event) => {
     if (!mainSender(event)) return senderError();
     if (win && !win.isDestroyed()) win.hide(); // ה-hide נועל את הסשן
