@@ -26,6 +26,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   downloadUpdate: () => ipcRenderer.invoke('update:download'),
   openExternal: (url) => ipcRenderer.invoke('shell:open', url),
 
+  remoteSetup: (code, relayUrl) => ipcRenderer.invoke('remote:setup', code, relayUrl),
+  remoteDisable: () => ipcRenderer.invoke('remote:disable'),
+
   getActivity: (limit) => ipcRenderer.invoke('activity:get', limit),
   getSecurity: () => ipcRenderer.invoke('security:get'),
   exportBackup: () => ipcRenderer.invoke('backup:export'),

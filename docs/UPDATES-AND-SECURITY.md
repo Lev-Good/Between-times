@@ -14,7 +14,7 @@
 ### שכבות האבטחה של התוכנה:
 1. **ערוץ תקשורת מוצפן (HTTPS):** התוכנה פונה אך ורק ב-HTTPS מאובטח מול שרתי GitHub הרשמיים.
 2. **אימות מקור רשמי:** התוכנה מוודאת שכתובת ההורדה שייכת באופן בלעדי למאגר הרשמי:
-   `https://github.com/Lev-Good/Between-times/releases/...`
+   `https://github.com/shmuel-sinay/Between-times/releases/...`
    כל ניסיון להפנות לכתובת חיצונית נדחה מיד בקוד.
 3. **בדיקת תקינות קובץ ההרצה (PE MZ Header):** הקובץ שהורד נבדק לוודא שהוא קובץ הפעלה תקין של Windows (פתיח `MZ`), בגודל הגיוני (מעל 1MB ומתחת ל-250MB), כדי למנוע הרצה של קבצים פגומים, הורדות קטועות או דפי שגיאה.
 4. **אימות טביעת אצבע דיגיטלית (SHA-256 Hash):**
@@ -163,7 +163,7 @@ Get-Content "$env:ProgramData\BenHazmanim\update-result.json" -ErrorAction Silen
 ```json
 {
   "version": "1.7.0",
-  "url": "https://github.com/Lev-Good/Between-times/releases/latest",
+  "url": "https://github.com/shmuel-sinay/Between-times/releases/latest",
   "sha256": "הדביקו_כאן_את_המחרוזת_משלב_4",
   "notes": "גרסה 1.7.0 — פירוט קצר וברור בעברית של מה שהתחדש או תוקן בגרסה זו."
 }
@@ -205,12 +205,12 @@ gh release create v1.7.0 "dist\Setup.1.7.0.exe" `
   --title "גרסה 1.7.0 — תקציר השינוי" `
   --notes-file "dist\release-notes.md" --latest
    ```
-   (או דרך הדפדפן: `https://github.com/Lev-Good/Between-times/releases/new`,
+   (או דרך הדפדפן: `https://github.com/shmuel-sinay/Between-times/releases/new`,
    Tag name `v1.7.0`, גרירת ה-EXE ל-Attach binaries, **Publish release**.)
 3. **ודאו שהנכס הועלה שלם** — גודל הנכס ב-Release חייב להיות זהה לגודל הקובץ
    המקומי, וטביעת ה-`digest` שגיטהאב מחשבת חייבת להיות זהה לזו שב-`version.json`:
    ```powershell
-gh api repos/Lev-Good/Between-times/releases/tags/v1.7.0 `
+gh api repos/shmuel-sinay/Between-times/releases/tags/v1.7.0 `
   -q '.assets[] | .name + " " + (.size|tostring) + " " + (.digest // "")'
    ```
 4. **רק עכשיו** דחפו את הענף — זה הרגע שבו העדכון נפתח למשתמשים:

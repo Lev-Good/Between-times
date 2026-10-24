@@ -10,6 +10,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const { spawn, execFile, execFileSync } = require('child_process');
 const S = require('./scheduler.js');
+const RU = require('./remote-unlock.js');
 const { applyLockedNavigationGuards, hardenLockedSession } = require('./locked-browser.js');
 
 const isWin = process.platform === 'win32';
@@ -794,6 +795,7 @@ function dailyLimitExhausted(s) {
   const eff = s || activeSchedule();
   if (!eff || eff.enabled === false || !eff.pinHash) return false;
   if (eff.manualUnlockUntil && trustedNow() < Number(eff.manualUnlockUntil)) return false;
+  if (S.remoteOpenActive(eff, trustedDate())) return false; // פתיחה מהטלפון מבטלת גם את המכסה
   return S.dailyLimitReached(eff.dailyLimit, dailyUsage.seconds);
 }
 
@@ -3274,7 +3276,7 @@ function unlockApprovalValid(code, purpose) {
 // (אין שדה בממשק) — הכפתור "בדוק עדכונים" משתמש בכתובת זו.
 // הקובץ version.json מתגורר במאגר הגיטהאב הציבורי, וכל שינוי בו
 // (גרסה חדשה) יימצא מיד על ידי כל העותקים המותקנים של התוכנה.
-const UPDATE_URL = 'https://raw.githubusercontent.com/Lev-Good/Between-times/main/version.json';
+const UPDATE_URL = 'https://raw.githubusercontent.com/shmuel-sinay/Between-times/main/version.json';
 const UPDATE_SIGNER_CN = 'Lev Tov Digital';
 
 async function sendRecovery() {
@@ -3440,6 +3442,29 @@ async function checkForUpdate(opts) {
   }
 }
 
+// בדיקת עדכון תקופתית. כשהעדכון האוטומטי פעיל — מורידים ומתקינים (אותן בדיקות
+// מקור/גרסה/SHA-256 של ההתקנה הידנית); ניסיון אחד לכל גרסה בכל הרצה, ואם נכשל
+// מציגים את הודעת העדכון הרגילה כדי שהמשתמש יוכל להתקין ידנית.
+let autoUpdateBusy = false;
+let autoUpdateTried = null;
+async function updateTick() {
+  if (!UPDATE_URL || autoUpdateBusy) return;
+  autoUpdateBusy = true;
+  try {
+    const auto = schedule.autoUpdate !== false;
+    const chk = await checkForUpdate({ silent: auto });
+    if (!auto || !chk.ok || !chk.update || autoUpdateTried === chk.update.version) return;
+    autoUpdateTried = chk.update.version;
+    logEvent('update-auto-start', { version: chk.update.version });
+    const res = await downloadAndInstallUpdate();
+    if (!res || !res.ok) {
+      logEvent('update-auto-fail', { version: chk.update.version, error: String((res && res.error) || '') });
+      notifyUpdate(chk.update);
+    }
+  } catch { /* אופליין — שקט */ }
+  finally { autoUpdateBusy = false; }
+}
+
 /* ================= הורדה והתקנה אוטומטית של עדכון =================
    במקום לפתוח את דף ההורדה בדפדפן — "הורד והתקן עכשיו" מוריד את
    המתקין ישירות לתיקיית Temp, מוודא שהקובץ תקין (EXE בגודל סביר),
@@ -3447,7 +3472,7 @@ async function checkForUpdate(opts) {
    ההתקנה), מפעיל את המתקין בשקט (/S) וסוגר את התוכנה — והמתקין
    משלים את ההתקנה לבד ופותח את הגרסה החדשה. */
 
-const GITHUB_REPO = 'Lev-Good/Between-times';
+const GITHUB_REPO = 'shmuel-sinay/Between-times';
 const GITHUB_REPO_URL = 'https://github.com/' + GITHUB_REPO;
 const MAX_UPDATE_BYTES = 250 * 1024 * 1024;
 
@@ -4202,6 +4227,129 @@ function uiSender(event) { return senderAllowed(event, [win, ...blockWins, quitW
 function settingsSender(event) { return senderAllowed(event, [win, ...blockWins, netIconWin]); }
 function recoverySender(event) { return senderAllowed(event, [win, ...blockWins]); }
 
+/* ================= פתיחה מרחוק מטלפון כשר =================
+   קו ימות המשיח → שרת ביניים (Apps Script) → המחשב שואב פקודות חתומות.
+   כל הבקשות והפקודות חתומות ב-HMAC עם מפתח המכשיר; הקוד בטלפון נבדק בשרת
+   הביניים (נעילה אחרי 5 ניסיונות שגויים). המחשב אינו מקבל חיבורים נכנסים. */
+const REMOTE_POLL_MS = 30000;
+let remoteTimer = null;
+let remoteBusy = false;
+let remotePendingAck = [];
+const remoteSeen = new Set();
+
+function remoteRelayUrl() { return schedule.remote.relayUrl || RECOVERY_URL; }
+
+async function remotePost(body) {
+  const res = await fetch(remoteRelayUrl(), {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify(body),
+    redirect: 'follow',
+    signal: AbortSignal.timeout(20000)
+  });
+  // תשובה שאינה JSON (דף התחברות/שגיאה של גוגל, תשובה ריקה) מוצגת כמות שהיא — לאבחון.
+  const text = await res.text();
+  try { return JSON.parse(text); } catch {
+    throw new Error('תשובה לא צפויה מהשרת (HTTP ' + res.status + '): ' + text.replace(/\s+/g, ' ').slice(0, 160));
+  }
+}
+
+async function remoteSetup(code, relayUrl) {
+  if (!RU.isPhoneCode(code)) return { ok: false, error: 'קוד הטלפון צריך להיות 4–8 ספרות' };
+  const url = String(relayUrl || '').trim();
+  if (url && !/^https:\/\//i.test(url)) return { ok: false, error: 'כתובת שרת הביניים חייבת להתחיל ב-https://' };
+  const previous = JSON.stringify(schedule.remote);
+  const r = { ...schedule.remote, relayUrl: url };
+  const fresh = !(r.deviceId && r.deviceKey);
+  if (fresh) { r.deviceId = RU.newDeviceId(); r.deviceKey = RU.newKey(); }
+  schedule.remote = S.normalizeSchedule({ remote: r }).remote;
+  const mac = RU.codeMac(schedule.remote.deviceKey, code);
+  const ts = Date.now();
+  const body = { remote: 'setup', d: schedule.remote.deviceId, ts, codeMac: mac };
+  if (fresh) body.k = schedule.remote.deviceKey;
+  else body.sig = RU.signSetup(schedule.remote.deviceKey, body.d, ts, mac);
+  try {
+    const res = await remotePost(body);
+    if (!res || !res.ok) throw new Error((res && res.error) || 'השרת סירב');
+  } catch (err) {
+    schedule.remote = JSON.parse(previous);
+    return { ok: false, error: 'הרישום בשרת הביניים נכשל: ' + (err.message || err) };
+  }
+  schedule.remote.enabled = true;
+  const saved = saveSettings();
+  if (!saved.ok) { schedule.remote = JSON.parse(previous); return { ok: false, error: saved.error }; }
+  logEvent('remote-setup', { fresh });
+  startRemotePolling();
+  return { ok: true, deviceId: schedule.remote.deviceId };
+}
+
+function applyRemoteCommand(cmd) {
+  const act = RU.resolveCommand(cmd, trustedNow());
+  if (!act) return false;
+  const eff = activeSchedule();
+  if (act.kind === 'lock') {
+    schedule.remote.open = null;
+    schedule.manualUnlockUntil = null;
+    if (schedule.pinHash) manualLock = true;
+    clearCoolOff();
+    logEvent('remote-lock');
+  } else {
+    // שותף אחריות שדורש אישור: הטלפון אינו עוקף אותו (נכשל סגור).
+    if (requireApprovalActive()) { logEvent('remote-refused', { reason: 'partner-approval' }); return true; }
+    // תקופת צינון: הפתיחה מהטלפון מתחילה רק בתום הצינון (אותה חיכוך כמו בסיסמה).
+    const coolMs = Math.max(0, Number(eff.coolOffMinutes) || 0) * 60000;
+    const from = Math.max(act.from, trustedNow() + coolMs);
+    if (act.until !== null && act.until <= from) { logEvent('remote-refused', { reason: 'window-over' }); return true; }
+    schedule.remote.open = { from, until: act.until };
+    manualLock = false;
+    clearCoolOff();
+    logEvent('remote-open', { type: cmd.type, from, until: act.until });
+  }
+  saveSettings();
+  return true;
+}
+
+async function remotePollOnce() {
+  if (remoteBusy) return;
+  const r = schedule.remote;
+  if (!r.enabled || !r.deviceId || !r.deviceKey) return;
+  remoteBusy = true;
+  try {
+    // חלון שהסתיים — ניקוי
+    if (r.open && r.open.until !== null && trustedNow() >= r.open.until) {
+      r.open = null; saveSettings(); enforce();
+    }
+    const nonce = RU.newNonce();
+    const ts = Date.now();
+    const ack = remotePendingAck.slice(0, 20);
+    const res = await remotePost({
+      remote: 'poll', d: r.deviceId, n: nonce, ts, ack,
+      sig: RU.signPoll(r.deviceKey, r.deviceId, nonce, ts, ack)
+    });
+    if (!res || !res.ok) return;
+    remotePendingAck = remotePendingAck.filter((id) => !ack.includes(id));
+    let changed = false;
+    for (const cmd of (Array.isArray(res.cmds) ? res.cmds : [])) {
+      if (!RU.verifyCommand(r.deviceKey, nonce, cmd)) { logEvent('remote-bad-signature'); continue; }
+      if (!remoteSeen.has(cmd.id)) {
+        remoteSeen.add(cmd.id);
+        if (remoteSeen.size > 100) remoteSeen.delete(remoteSeen.values().next().value);
+        if (applyRemoteCommand(cmd)) changed = true;
+      }
+      if (!remotePendingAck.includes(cmd.id)) remotePendingAck.push(cmd.id);
+    }
+    if (changed) await enforce();
+  } catch { /* אין רשת — המחשב ממשיך לפעול לפי הלוח */ }
+  finally { remoteBusy = false; }
+}
+
+function startRemotePolling() {
+  if (remoteTimer || !schedule.remote.enabled) return;
+  remoteTimer = setInterval(() => { remotePollOnce().catch(() => {}); }, REMOTE_POLL_MS);
+  if (remoteTimer.unref) remoteTimer.unref();
+  remotePollOnce().catch(() => {});
+}
+
 function registerIpc() {
   ipcMain.handle('settings:get', (event) => {
     if (!senderAllowed(event, [win, ...blockWins])) return senderError();
@@ -4214,6 +4362,10 @@ function registerIpc() {
     delete safe.passwordEnc;
     delete safe.recoveryPendingHash;
     delete safe.recoveryPendingUntil;
+    // מפתח המכשיר לעולם אינו עובר לממשק
+    safe.remote = { enabled: schedule.remote.enabled, relayUrl: schedule.remote.relayUrl,
+      deviceId: schedule.remote.deviceId, defaultRelayUrl: RECOVERY_URL, configured: !!(schedule.remote.deviceId && schedule.remote.deviceKey),
+      open: schedule.remote.open };
     return {
       ...safe,
       pinSet: !!schedule.pinHash,
@@ -4241,6 +4393,7 @@ function registerIpc() {
       data.recoveryPendingHash = schedule.recoveryPendingHash;
       data.recoveryPendingUntil = schedule.recoveryPendingUntil;
       data.manualUnlockUntil = schedule.manualUnlockUntil;
+      data.remote = schedule.remote; // פתיחה מרחוק משתנה רק דרך remote:* (עם סשן פתוח)
       data.runAsAdmin = schedule.runAsAdmin;
     }
     const previousSchedule = JSON.stringify(schedule);
@@ -4593,6 +4746,24 @@ function registerIpc() {
       : { ok: true, warning: persisted.error || 'הפתיחה זמינה כעת אך לא נשמרה לדיסק' };
   });
 
+
+  /* ===== פתיחה מרחוק מטלפון כשר ===== */
+  ipcMain.handle('remote:setup', async (event, code, relayUrl) => {
+    if (!mainSender(event)) return senderError();
+    if (schedule.pinHash && !isSessionUnlocked()) return { ok: false, error: 'נדרשת סיסמה כדי להגדיר פתיחה מרחוק' };
+    if (!schedule.pinHash) return { ok: false, error: 'יש להגדיר קודם סיסמת הורה' };
+    return remoteSetup(String(code || ''), String(relayUrl || ''));
+  });
+  ipcMain.handle('remote:disable', (event) => {
+    if (!mainSender(event)) return senderError();
+    if (schedule.pinHash && !isSessionUnlocked()) return { ok: false, error: 'נדרשת סיסמה' };
+    schedule.remote = { ...schedule.remote, enabled: false, open: null };
+    const r = saveSettings();
+    logEvent('remote-disabled');
+    enforce();
+    return r.ok ? { ok: true } : { ok: false, error: r.error };
+  });
+
   ipcMain.handle('pin:set', (event, pin, oldPin) => {
     if (!mainSender(event)) return senderError();
     const newPin = String(pin || '');
@@ -4895,6 +5066,7 @@ function registerIpc() {
       delete exportData.passwordEnc;
       delete exportData.recoveryPendingHash;
       delete exportData.recoveryPendingUntil;
+      delete exportData.remote; // כולל מפתח המכשיר — לא מיוצא
       fs.writeFileSync(res.filePath, JSON.stringify(exportData, null, 2), 'utf8');
       return { ok: true, path: res.filePath };
     } catch (err) {
@@ -4929,7 +5101,8 @@ function registerIpc() {
         passwordEnc: schedule.passwordEnc,
         recoveryPendingHash: schedule.recoveryPendingHash,
         recoveryPendingUntil: schedule.recoveryPendingUntil,
-        manualUnlockUntil: schedule.manualUnlockUntil
+        manualUnlockUntil: schedule.manualUnlockUntil,
+        remote: schedule.remote
       };
       const previous = JSON.stringify(schedule);
       schedule = S.normalizeSchedule(merged);
@@ -5684,6 +5857,7 @@ async function gracefulQuit() {
 
       enforce();
       setInterval(enforce, 5000); // בדיקה כל 5 שניות
+      startRemotePolling();
 
       superviseWatchdog(); // הגנה הדדית: הראשי מקפיץ את השומר
       setTimeout(reportUpdateResult, 2000); // דיווח אם סבב העדכון הקודם לא הושלם
@@ -5706,7 +5880,11 @@ async function gracefulQuit() {
       setTimeout(maybeEscalatePrivilegedSetup, 4000);
 
       // בדיקת עדכונים ברקע (אינה חוסמת, אופליין = שקט) — רק אם המפתח הגדיר מקור
-      if (UPDATE_URL) setTimeout(() => checkForUpdate(), 8000);
+      if (UPDATE_URL) {
+        setTimeout(() => updateTick(), 8000);
+        const t = setInterval(() => updateTick(), 6 * 3600 * 1000);
+        if (t.unref) t.unref();
+      }
 
       app.on('activate', () => showMainWindow());
     });

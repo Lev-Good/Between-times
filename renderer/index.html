@@ -285,6 +285,17 @@
               </div>
             </div>
 
+            <div class="setting">
+              <div class="setting-text">
+                <strong>עדכון אוטומטי</strong>
+                <span>התוכנה בודקת עדכונים בכל הפעלה ובכל 6 שעות, ומורידה ומתקינה גרסה חדשה לבד (רק מהמאגר הרשמי ועם אימות SHA-256). הכפתור "בדוק עדכונים" מאפשר לבדוק ולהתקין ידנית בכל עת.</span>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="autoUpdateToggle" checked />
+                <span class="slider"></span>
+              </label>
+            </div>
+
             <div class="card-head" style="margin-top:24px">
               <h2>אבטחה ושחזור סיסמה</h2>
               <p class="hint">שכחתם את הסיסמה? התוכנה שולחת קוד חד-פעמי למייל שמוגדר כאן ומאפשרת להגדיר סיסמה חדשה. הסיסמה עצמה אינה נשלחת או נשמרת בשרת.</p>
@@ -342,6 +353,31 @@
                 <span>עיכוב מכוון לשליטה עצמית: אחרי הזנת הסיסמה לפתיחה מוקדמת, המחשב יישאר חסום עוד מספר דקות לפני שהפתיחה נכנסת לתוקף. 0 = ללא צינון (פתיחה מיידית).</span>
               </div>
               <input type="number" id="coolOffInput" min="0" max="120" step="1" value="0" class="num-input" />
+            </div>
+
+            <div class="card-head" style="margin-top:24px">
+              <h2>פתיחה מרחוק מטלפון כשר</h2>
+              <p class="hint">מתקשרים לקו ימות המשיח, מקישים קוד, ובוחרים: פתיחה לזמן קצוב, עד שעה, בין שעות, ללא הגבלה — או נעילה מחדש. המחשב שואב את הפקודה מהרשת, ולכן הפתיחה לא תגיע למחשב שאין לו אינטרנט (הלוח ממשיך לפעול כרגיל). הקוד בטלפון נפרד מסיסמת התוכנה ונעילה אחרי 5 טעויות.</p>
+            </div>
+            <div class="recovery-grid">
+              <div class="field">
+                <label>קוד לטלפון (4–8 ספרות)</label>
+                <input type="password" id="remoteCode" class="text-input" inputmode="numeric" maxlength="8" autocomplete="off" />
+              </div>
+              <div class="field">
+                <label>כתובת שרת הביניים (ריק = ברירת המחדל)</label>
+                <input type="url" id="remoteRelay" class="text-input wide" placeholder="https://script.google.com/macros/s/.../exec" dir="ltr" />
+              </div>
+            </div>
+            <div class="setting">
+              <div class="setting-text">
+                <strong id="remoteStatus">כבוי</strong>
+                <span id="remoteHelp">לאחר ההפעלה תופיע כאן הכתובת להגדרת שלוחת ה-API בקו ימות המשיח.</span>
+              </div>
+              <div>
+                <button class="btn btn-primary" id="remoteSaveBtn">שמירה והפעלה</button>
+                <button class="btn btn-ghost" id="remoteOffBtn">כיבוי</button>
+              </div>
             </div>
           </div>
 

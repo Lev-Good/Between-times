@@ -1253,13 +1253,13 @@ function fakeStream(chunks) {
 
 // תשובת ה-API הרשמית של GitHub (שחרור v9.9.9 עם קובץ Setup)
 function githubApiRelease(url) {
-  if (!url.includes('api.github.com/repos/Lev-Good/Between-times/releases/tags/v9.9.9')) return null;
+  if (!url.includes('api.github.com/repos/shmuel-sinay/Between-times/releases/tags/v9.9.9')) return null;
   return {
     ok: true,
     json: async () => ({
       assets: [{
         name: 'Setup.9.9.9.exe',
-        browser_download_url: 'https://github.com/Lev-Good/Between-times/releases/download/v9.9.9/Setup.9.9.9.exe'
+        browser_download_url: 'https://github.com/shmuel-sinay/Between-times/releases/download/v9.9.9/Setup.9.9.9.exe'
       }]
     })
   };
@@ -1275,7 +1275,7 @@ test('update:download downloads installer and starts silent install', async () =
     const api = githubApiRelease(url);
     if (api) return api;
     if (url.includes('raw.githubusercontent.com')) {
-      return { ok: true, json: async () => ({ version: '9.9.9', url: 'https://github.com/Lev-Good/Between-times/releases/latest', sha256: installerHash }) };
+      return { ok: true, json: async () => ({ version: '9.9.9', url: 'https://github.com/shmuel-sinay/Between-times/releases/latest', sha256: installerHash }) };
     }
     if (url.includes('releases/download/v9.9.9/Setup.9.9.9.exe')) {
       // 2MB תקין — חייב להתחיל בחותמת PE (MZ) כמו EXE אמיתי
@@ -1660,7 +1660,7 @@ test('update:check offers 1.7.0 to an installed 1.6.5 client', async () => {
         ok: true,
         json: async () => ({
           version: '1.7.0',
-          url: 'https://github.com/Lev-Good/Between-times/releases/latest',
+          url: 'https://github.com/shmuel-sinay/Between-times/releases/latest',
           notes: 'גרסה 1.7.0 — רשימת אתרים הפוכה, דפדפן מוגבל ומכסת זמן יומית',
           sha256: 'a'.repeat(64)
         })
@@ -1757,17 +1757,17 @@ test('update:LIVE end-to-end against the published GitHub release',
 
     // 1) מה שלקוח מותקן קורא בפועל — אותו UPDATE_URL ש-main.js משתמש בו.
     const metaRes = await realFetch(
-      'https://raw.githubusercontent.com/Lev-Good/Between-times/main/version.json', { headers: UA });
+      'https://raw.githubusercontent.com/shmuel-sinay/Between-times/main/version.json', { headers: UA });
     assert.equal(metaRes.status, 200, 'version.json צריך להיות נגיש');
     const meta = await metaRes.json();
     assert.match(meta.version || '', /^\d+\.\d+\.\d+$/, 'גרסה תקינה ב-version.json');
     assert.match(meta.sha256 || '', /^[0-9a-f]{64}$/, 'ל-version.json חייב להיות SHA-256 תקין');
-    assert.equal(meta.url, 'https://github.com/Lev-Good/Between-times/releases/latest',
+    assert.equal(meta.url, 'https://github.com/shmuel-sinay/Between-times/releases/latest',
       'כתובת העדכון חייבת להיות המהדורה האחרונה הרשמית');
 
     // 2) מה שהמהדורה מכריזה בפועל — מקור בלתי תלוי ב-version.json.
     const apiRes = await realFetch(
-      'https://api.github.com/repos/Lev-Good/Between-times/releases/tags/v' + meta.version,
+      'https://api.github.com/repos/shmuel-sinay/Between-times/releases/tags/v' + meta.version,
       { headers: UA });
     assert.equal(apiRes.status, 200, 'צריכה להיות מהדורה לתג v' + meta.version);
     const release = await apiRes.json();
@@ -1824,7 +1824,7 @@ test('update:LIVE refuses the real installer when the published hash does not ma
   async () => {
     const UA = { 'User-Agent': 'BenHazmanim-verify' };
     const metaRes = await realFetch(
-      'https://raw.githubusercontent.com/Lev-Good/Between-times/main/version.json', { headers: UA });
+      'https://raw.githubusercontent.com/shmuel-sinay/Between-times/main/version.json', { headers: UA });
     assert.equal(metaRes.status, 200);
     const meta = await metaRes.json();
     assert.match(meta.sha256 || '', /^[0-9a-f]{64}$/);

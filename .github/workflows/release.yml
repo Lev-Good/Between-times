@@ -1,0 +1,40 @@
+name: release
+# הרצה ידנית (Actions → release → Run workflow) → נבנה מתקין מגרסת package.json, נוצר תג ו-Release,
+# ו-version.json מתעדכן ב-main רק אחרי שה-Release קיים.
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: npm ci
+      - run: npm run dist
+        env: { CSC_IDENTITY_AUTO_DISCOVERY: 'false' }
+      - name: Release
+        shell: bash
+        env: { GH_TOKEN: '${{ github.token }}' }
+        run: |
+          V=$(node -p "require('./package.json').version")
+          F="dist/Setup.$V.exe"
+          SHA=$(sha256sum "$F" | cut -d' ' -f1)
+          gh release create "v$V" "$F" --target "$GITHUB_SHA" --title "בין הזמנים $V" --notes-file release-notes.md --latest
+          SIZE=$(gh api repos/${{ github.repository }}/releases/tags/v$V --jq '.assets[0].size')
+          [ "$SIZE" = "$(stat -c %s "$F")" ] || { echo "asset size mismatch"; exit 1; }
+          echo "SHA=$SHA" >> $GITHUB_ENV
+          echo "V=$V" >> $GITHUB_ENV
+      - name: Update version.json on main
+        shell: bash
+        run: |
+          git fetch origin main && git checkout -B main origin/main
+          node -e "
+            const fs=require('fs');
+            const repo=process.env.GITHUB_REPOSITORY;
+            const j={version:process.env.V,url:'https://github.com/'+repo+'/releases/latest',sha256:process.env.SHA,notes:fs.readFileSync('release-notes.md','utf8').trim()};
+            fs.writeFileSync('version.json',JSON.stringify(j,null,2)+'\n');"
+          git config user.name "release-bot" && git config user.email "release-bot@users.noreply.github.com"
+          git add version.json && git commit -m "release: $V" && git push origin main

@@ -117,6 +117,8 @@ function noticeBody(kind) {
 function doPost(e) {
   try {
     var body = JSON.parse(e.postData.contents);
+    // פתיחה מרחוק (RemoteUnlock.gs) — חתומה ב-HMAC, ללא מגבלת הדוא"ל.
+    if (body.remote) return remotePost(body);
     var app = String(body.app || 'BenHazmanim').slice(0, 40);
     var email = String(body.email || '').trim().toLowerCase();
     var partner = String(body.partner || '').trim().toLowerCase();
@@ -172,7 +174,9 @@ function doPost(e) {
 }
 
 /** בדיקת תקינות — GET פשוט */
-function doGet() {
+function doGet(e) {
+  // שלוחת API של ימות המשיח (RemoteUnlock.gs)
+  if (e && e.parameter && e.parameter.a === 'ivr') return ivrHandler(e);
   return jsonResponse({ ok: true, name: 'BenHazmanim recovery', status: 'deployed' });
 }
 

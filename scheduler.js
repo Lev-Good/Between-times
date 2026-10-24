@@ -67,6 +67,10 @@
       startWithWindows: true,  // אפליקציית הורים — עולה אוטומטית עם Windows
       runAsAdmin: false,        // הרצה עם הרשאות מנהל (UAC) — מונעת סגירה מחשבון רגיל
       manualUnlockUntil: null,
+      // פתיחה מרחוק מטלפון כשר (ימות המשיח + שרת ביניים). open = חלון הפתיחה
+      // הנוכחי שנקבע מהטלפון: until=null → ללא הגבלה עד נעילה מהטלפון.
+      remote: { enabled: false, relayUrl: '', deviceId: '', deviceKey: '', open: null },
+      autoUpdate: true,         // הורדה והתקנה אוטומטית של עדכון מאומת
       showNetIcon: true,        // אייקון צף קטן כשהמחשב פתוח והאינטרנט חסום
       blockBg: 'blobs',         // רקע מסך החסימה: blobs | fluid | particles | aurora
       showTorahQuotes: true,    // משפטי עידוד מהמקורות במסך החסימה
@@ -199,6 +203,28 @@
   }
 
   // מכסת זמן שימוש יומית. minutes: 0 = ללא הגבלה; enabled כבוי כאשר אין מכסה.
+  function normalizeRemote(v) {
+    const r = v && typeof v === 'object' ? v : {};
+    const from = Number(r.open && r.open.from);
+    const until = r.open && r.open.until !== null && r.open.until !== undefined ? Number(r.open.until) : null;
+    const openOk = r.open && Number.isFinite(from) && from > 0 && (until === null || (Number.isFinite(until) && until > from));
+    return {
+      enabled: r.enabled === true,
+      relayUrl: /^https:\/\//i.test(String(r.relayUrl || '').trim()) ? String(r.relayUrl).trim().slice(0, 300) : '',
+      deviceId: /^[0-9a-f]{32}$/.test(String(r.deviceId || '')) ? String(r.deviceId) : '',
+      deviceKey: /^[0-9a-f]{64}$/.test(String(r.deviceKey || '')) ? String(r.deviceKey) : '',
+      open: openOk ? { from: from, until: until } : null
+    };
+  }
+
+  // האם חלון פתיחה מהטלפון בתוקף ברגע d?
+  function remoteOpenActive(schedule, d) {
+    const o = schedule && schedule.remote && schedule.remote.open;
+    if (!schedule || !schedule.remote || !schedule.remote.enabled || !o) return false;
+    const t = d.getTime();
+    return t >= o.from && (o.until === null || t < o.until);
+  }
+
   function normalizeDailyLimit(v) {
     const o = (v && typeof v === 'object') ? v : {};
     const raw = Number(o.minutes);
@@ -520,6 +546,7 @@
       runAsAdmin: s.runAsAdmin === true,
       manualUnlockUntil: s.manualUnlockUntil !== null && s.manualUnlockUntil !== undefined && s.manualUnlockUntil !== '' && Number.isFinite(Number(s.manualUnlockUntil))
         ? Number(s.manualUnlockUntil) : null,
+      remote: normalizeRemote(s.remote),
       recoveryEmail: String(s.recoveryEmail || '').trim(),
       recoveryPendingHash: /^[0-9a-f]{64}$/.test(String(s.recoveryPendingHash || '').trim().toLowerCase()) ? String(s.recoveryPendingHash).trim().toLowerCase() : null,
       // null/undefined/'' חייבים להישאר null (אין שחזור ממתין). בלי המשמר הזה
@@ -527,6 +554,7 @@
       recoveryPendingUntil: (s.recoveryPendingUntil !== null && s.recoveryPendingUntil !== undefined && s.recoveryPendingUntil !== '' && Number.isFinite(Number(s.recoveryPendingUntil)))
         ? Number(s.recoveryPendingUntil) : null,
       updateUrl: String(s.updateUrl || '').trim(),
+      autoUpdate: s.autoUpdate !== false,
       showNetIcon: s.showNetIcon !== false,
       blockBg: ['blobs', 'fluid', 'particles', 'aurora'].includes(s.blockBg) ? s.blockBg : 'blobs',
       showTorahQuotes: s.showTorahQuotes !== false,
@@ -677,13 +705,21 @@
     // פתוח מעבר לחלון החדש שההורה הגדיר.
     const raw = stateAt(s, d);
     const lockedNow = raw === 'blocked' || raw === 'netblock';
-    const override = s.manualUnlockUntil && d.getTime() < s.manualUnlockUntil && lockedNow;
+    const remoteOverride = lockedNow && remoteOpenActive(s, d);
+    const override = (s.manualUnlockUntil && d.getTime() < s.manualUnlockUntil && lockedNow) || remoteOverride;
     const state = override ? 'allowed' : raw;
     // חסימה לפי ברירת המחדל של "התר" (לוח ריק — חסום תמיד) ולא לפי חלון
     // מוגדר — כדי שמסך החסימה יוכל להסביר להורה מה בדיוק חוסם.
     const byDefault = raw === 'blocked' && s.mode === 'allowlist' && !activeSlot(s, d);
     const t = nextTransition(s, d);
-    const nextAt = override ? new Date(s.manualUnlockUntil) : t.at;
+    let nextAt = t.at;
+    if (override) {
+      const cands = [];
+      if (s.manualUnlockUntil && d.getTime() < s.manualUnlockUntil) cands.push(s.manualUnlockUntil);
+      if (remoteOverride) cands.push(s.remote.open.until === null ? Infinity : s.remote.open.until);
+      const end = Math.max.apply(null, cands);
+      nextAt = Number.isFinite(end) ? new Date(end) : null; // ללא הגבלה — אין "מעבר הבא"
+    }
 
     const secondsUntilNext = nextAt ? Math.max(0, Math.round((nextAt.getTime() - d.getTime()) / 1000)) : null;
 
@@ -820,6 +856,7 @@
     normalizeWebsiteMode,
     normalizeDailyLimit,
     dailyLimitReached,
+    remoteOpenActive,
     dailyLimitResetAt,
     normalizeExtension,
     normalizeAppHours,
