@@ -49,6 +49,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   hideWindow: () => ipcRenderer.invoke('app:hide'),
   getVersion: () => ipcRenderer.invoke('app:version'),
   applyTheme: (resolved) => ipcRenderer.invoke('theme:apply', resolved),
+  closeWarningBanner: () => ipcRenderer.invoke('warning-banner:close'),
 
   onStatus: (cb) => {
     const listener = (_e, status) => cb(status);

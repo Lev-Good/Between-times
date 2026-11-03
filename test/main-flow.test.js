@@ -2686,6 +2686,33 @@ test('system watchdog: recreates deleted scheduled tasks pointing at protected c
   });
 });
 
+test('startup: elevated syncStartup patches task XML to allow running on battery without timeout', async () => {
+  const m = loadMain({
+    elevate: true,
+    exec(cmd, args) {
+      if (cmd === 'schtasks' && args.includes('/Query') && args.includes('/XML')) {
+        return {
+          err: null,
+          stdout: '<Task><Settings><DisallowStartIfOnBatteries>true</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>true</StopIfGoingOnBatteries><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><ExecutionTimeLimit>PT72H</ExecutionTimeLimit></Settings></Task>',
+          stderr: ''
+        };
+      }
+      return { err: null, stdout: '', stderr: '' };
+    }
+  });
+  createAppDir(m);
+  await m.ready();
+
+  const xmlFile = path.join(process.env.PROGRAMDATA, 'BenHazmanim', 'main-task.xml');
+  assert.ok(fs.existsSync(xmlFile), 'קובץ ה-XML של המשימה נוצר');
+  const xml = fs.readFileSync(xmlFile, 'utf8');
+  assert.ok(xml.includes('<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>'), 'מבוטלת מגבלת סוללה');
+  assert.ok(xml.includes('<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>'), 'מבוטלת עצירה בסוללה');
+  assert.ok(xml.includes('<MultipleInstancesPolicy>Parallel</MultipleInstancesPolicy>'), 'מדיניות הרצה במקביל');
+  assert.ok(xml.includes('<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>'), 'ללא מגבלת זמן 72 שעות');
+  m.cleanup();
+});
+
 test('system watchdog: exits on machine quit flag (uninstall)', async () => {
   const m = makeMock({ elevate: true });
   const { machineDir } = guardEnv(m);

@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <title>אזהרה לפני חסימה — בין הזמנים</title>
+  <style>
+    :root {
+      --wb-bg: linear-gradient(135deg, #1e1b2e, #2d1822);
+      --wb-border: rgba(245, 158, 11, 0.4);
+      --wb-title: #fbbf24;
+      --wb-text: #f3f4f6;
+      --wb-shadow: 0 16px 36px rgba(0, 0, 0, 0.6);
+      --wb-btn-bg: rgba(245, 158, 11, 0.2);
+      --wb-btn-border: rgba(245, 158, 11, 0.45);
+      --wb-btn-text: #fef3c7;
+    }
+    :root[data-theme='light'] {
+      --wb-bg: linear-gradient(135deg, #fffbeb, #fef2f2);
+      --wb-border: rgba(217, 119, 6, 0.4);
+      --wb-title: #b45309;
+      --wb-text: #1f2937;
+      --wb-shadow: 0 16px 36px rgba(180, 83, 9, 0.25);
+      --wb-btn-bg: rgba(217, 119, 6, 0.15);
+      --wb-btn-border: rgba(217, 119, 6, 0.35);
+      --wb-btn-text: #92400e;
+    }
+    html, body {
+      margin: 0; padding: 0;
+      background: transparent;
+      overflow: hidden;
+      font-family: "Heebo", "Segoe UI", system-ui, sans-serif;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    .banner-wrap {
+      padding: 8px;
+      box-sizing: border-box;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .banner-card {
+      width: 100%;
+      height: 100%;
+      box-sizing: border-box;
+      background: var(--wb-bg);
+      border: 1.5px solid var(--wb-border);
+      border-radius: 14px;
+      box-shadow: var(--wb-shadow);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 16px;
+      animation: slideDown 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    @keyframes slideDown {
+      from { transform: translateY(-20px); opacity: 0; }
+      to { transform: translateY(0); opacity: 1; }
+    }
+    .icon-box {
+      width: 44px; height: 44px;
+      flex-shrink: 0;
+      border-radius: 10px;
+      background: rgba(245, 158, 11, 0.18);
+      border: 1px solid rgba(245, 158, 11, 0.35);
+      display: grid;
+      place-items: center;
+      color: #f59e0b;
+    }
+    .icon-box svg { width: 24px; height: 24px; }
+    .content-box {
+      flex: 1;
+      min-width: 0;
+    }
+    .banner-title {
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--wb-title);
+      margin-bottom: 2px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .banner-desc {
+      font-size: 12px;
+      color: var(--wb-text);
+      line-height: 1.35;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .dismiss-btn {
+      flex-shrink: 0;
+      background: var(--wb-btn-bg);
+      border: 1px solid var(--wb-btn-border);
+      color: var(--wb-btn-text);
+      padding: 6px 14px;
+      border-radius: 8px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      font-family: inherit;
+      transition: background 0.15s ease;
+    }
+    .dismiss-btn:hover {
+      filter: brightness(1.1);
+    }
+  </style>
+</head>
+<body>
+  <div class="banner-wrap">
+    <div class="banner-card" id="bannerCard">
+      <div class="icon-box">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/>
+          <path d="M12 9v4M12 17h.01"/>
+        </svg>
+      </div>
+      <div class="content-box">
+        <div class="banner-title" id="warnBannerTitle">המחשב עומד להיחסם!</div>
+        <div class="banner-desc" id="warnBannerDesc">החסימה תחל בקרוב — נא לשמור קבצים כעת.</div>
+      </div>
+      <button class="dismiss-btn" id="warnBannerDismiss" type="button">הבנתי</button>
+    </div>
+  </div>
+
+  <script>
+    const API = window.electronAPI;
+    const titleEl = document.getElementById('warnBannerTitle');
+    const descEl = document.getElementById('warnBannerDesc');
+    const dismissBtn = document.getElementById('warnBannerDismiss');
+
+    if (dismissBtn) {
+      dismissBtn.onclick = () => {
+        if (API && API.closeWarningBanner) API.closeWarningBanner();
+      };
+    }
+
+    function applyTheme(theme) {
+      if (theme) document.documentElement.dataset.theme = theme;
+    }
+
+    function updateContent(st) {
+      if (!st) return;
+      applyTheme(st.theme);
+      const isLimit = st.warningReason === 'limit';
+      const isNet = st.next === 'netblock';
+      titleEl.textContent = isLimit
+        ? 'מכסת הזמן היומית עומדת להסתיים!'
+        : (isNet ? 'האינטרנט עומד להיחסם!' : 'המחשב עומד להיחסם!');
+
+      let durText = '';
+      if (st.warningSeconds != null) {
+        const min = Math.max(1, Math.round(st.warningSeconds / 60));
+        durText = min === 1 ? 'דקה אחת' : min + ' דקות';
+      } else {
+        durText = '5 דקות';
+      }
+
+      descEl.textContent = isLimit
+        ? 'בעוד כ-' + durText + ' ייגמר הזמן היומי. שמרו קבצים וסיימו את העבודה.'
+        : (isNet
+            ? 'בעוד כ-' + durText + ' האינטרנט ייחסם (המחשב יישאר פתוח).'
+            : 'בעוד כ-' + durText + ' המחשב ייחסם — נא לשמור קבצים כעת.');
+    }
+
+    if (API) {
+      if (API.getStatus) API.getStatus().then(updateContent).catch(() => {});
+      if (API.onStatus) API.onStatus(updateContent);
+    }
+  </script>
+</body>
+</html>

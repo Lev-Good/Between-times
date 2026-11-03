@@ -249,6 +249,8 @@ let netNeedsValidation = false; // חוק קיים מסשן קודם חייב א
 let netElevationRetryAt = 0;   // מניעת חלונות UAC חוזרים במקרה של ביטול/כשל
 let lastNetActive = false;    // מעקב מצבי לזיהוי תחילת/סיום חסימת אינטרנט ביומן
 let netIconWin = null;        // חלון האייקון הצף (מחשב פתוח + אינטרנט חסום)
+let warnWin = null;           // חלונית האזהרה הצפה 5 דקות לפני חסימה
+let warnAutoCloseTimer = null;
 
 // מצב "תוכנת לימוד מותרת": בזמן חסימה לפי הלוח, אם החלון הפעיל שייך לתוכנה
 // תורנית שההורה התיר (למשל וורד, אוצריא, אוצר החכמה) — מסך החסימה מוסתר
@@ -1971,6 +1973,7 @@ function buildStatus() {
   return {
     ...st,
     now: trustedNow(),
+    elevated: isElevated(),
     manualLock: manualLock,
     coolOff: coolOffActive(),
     coolOffSeconds: coolOffActive() ? Math.max(0, Math.ceil((coolOffUntil - trustedNow()) / 1000)) : null,
@@ -2045,9 +2048,77 @@ function buildStatus() {
   };
 }
 
+function closeWarningWindow() {
+  if (warnAutoCloseTimer) {
+    clearTimeout(warnAutoCloseTimer);
+    warnAutoCloseTimer = null;
+  }
+  if (warnWin && !warnWin.isDestroyed()) {
+    try { warnWin.destroy(); } catch { /* ignore */ }
+  }
+  warnWin = null;
+}
+
+function showWarningWindow(status) {
+  if (!isWin && !process.env.TEST_DISPLAY) return;
+  try {
+    if (warnWin && !warnWin.isDestroyed()) {
+      warnWin.show();
+      return;
+    }
+    const primary = screen.getPrimaryDisplay();
+    const wa = primary ? primary.workArea : { x: 0, y: 0, width: 1024, height: 768 };
+    const width = 480;
+    const height = 96;
+    warnWin = new BrowserWindow({
+      x: wa.x + Math.max(0, Math.round((wa.width - width) / 2)),
+      y: wa.y + 20,
+      width,
+      height,
+      frame: false,
+      transparent: true,
+      alwaysOnTop: true,
+      skipTaskbar: true,
+      resizable: false,
+      movable: false,
+      minimizable: false,
+      maximizable: false,
+      fullscreenable: false,
+      focusable: false,
+      hasShadow: false,
+      backgroundColor: '#00000000',
+      webPreferences: {
+        preload: path.join(__dirname, 'preload.js'),
+        contextIsolation: true,
+        nodeIntegration: false
+      }
+    });
+    try { warnWin.setAlwaysOnTop(true, 'screen-saver'); } catch { /* ignore */ }
+    lockLocalWindowNavigation(warnWin);
+    warnWin.loadFile(path.join(__dirname, 'renderer', 'warning-banner.html'));
+    warnWin.on('closed', () => { warnWin = null; });
+
+    // צפצוף התראה עדין במערכת בעת הצגת האזהרה
+    try { shell.beep(); } catch { /* ignore */ }
+
+    // סגירה אוטומטית אחרי 25 שניות אם המשתמש לא לחץ "הבנתי",
+    // כדי לא להסתיר את המסך לצמיתות בזמן עבודה
+    if (warnAutoCloseTimer) clearTimeout(warnAutoCloseTimer);
+    warnAutoCloseTimer = setTimeout(() => {
+      closeWarningWindow();
+    }, 25000);
+    if (warnAutoCloseTimer && typeof warnAutoCloseTimer.unref === 'function') {
+      warnAutoCloseTimer.unref();
+    }
+  } catch (err) {
+    console.error('showWarningWindow error:', err);
+  }
+}
+
 // אזהרה לפני חסימה: כשהמחשב עדיין פתוח אבל עומד להיחסם בתוך warnMinutes —
 // מציגים הודעה אחת בכניסה לחלון האזהרה שמזהירה לשמור קבצים ולסיים את העבודה.
 function showWarningNotification(status) {
+  showWarningWindow(status);
   try {
     const sec = status.warningSeconds != null ? status.warningSeconds : 0;
     const dur = S.formatDuration(sec);
@@ -2144,7 +2215,9 @@ async function enforceCore() {
     showWarningNotification(status);
   } else if ((!status.warning || manualLock) && lastWarningActive) {
     lastWarningActive = false;
+    closeWarningWindow();
   }
+  if (blocked) closeWarningWindow();
 
   if (blocked !== lastBlockedState) {
     logEvent(blocked ? 'block-start' : 'block-end', { desired });
@@ -2899,13 +2972,50 @@ function taskExists() {
 }
 
 const taskXmlFile = () => path.join(machineDir(), 'main-task.xml');
+const guardTaskXmlFile = () => path.join(machineDir(), 'guard-task.xml');
+
+// הסרת מגבלות ברירת המחדל של Windows Task Scheduler מתוך ה-XML של המשימה:
+// 1) הפעלה גם על סוללה במחשבים ניידים (DisallowStartIfOnBatteries / StopIfGoingOnBatteries = false)
+// 2) ביטול מגבלת 72 שעות (ExecutionTimeLimit = PT0S)
+// 3) MultipleInstancesPolicy = Parallel כדי שהקפצה חוזרת מ-schtasks /Run לא תיבלע
+//    בגלל תהליך-בן שנשאר ב-Job Object של ההרצה הקודמת (התוכנה עצמה אוכפת SingleInstance).
+function patchTaskXml(xml) {
+  return String(xml || '')
+    .replace(/encoding="UTF-16"/i, 'encoding="UTF-8"')
+    .replace(/<DisallowStartIfOnBatteries>\s*true\s*<\/DisallowStartIfOnBatteries>/gi, '<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>')
+    .replace(/<StopIfGoingOnBatteries>\s*true\s*<\/StopIfGoingOnBatteries>/gi, '<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>')
+    .replace(/<MultipleInstancesPolicy>\s*IgnoreNew\s*<\/MultipleInstancesPolicy>/gi, '<MultipleInstancesPolicy>Parallel</MultipleInstancesPolicy>')
+    .replace(/<ExecutionTimeLimit>[^<]*<\/ExecutionTimeLimit>/gi, '<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>');
+}
+
 function snapshotMainTask() {
   if (!isWin || !isElevated()) return;
   execFile('schtasks', ['/Query', '/TN', TASK_NAME, '/XML'], (err, stdout) => {
     if (err || !stdout) return;
     try {
+      const raw = String(stdout);
+      const patched = patchTaskXml(raw);
       fs.mkdirSync(machineDir(), { recursive: true });
-      fs.writeFileSync(taskXmlFile(), String(stdout), 'utf8');
+      fs.writeFileSync(taskXmlFile(), patched, 'utf8');
+      if (patched !== raw && /<Task[\s>]/i.test(patched)) {
+        execFile('schtasks', ['/Create', '/TN', TASK_NAME, '/XML', taskXmlFile(), '/F'], () => {});
+      }
+    } catch { /* ignore */ }
+  });
+}
+
+function snapshotGuardTask() {
+  if (!isWin || !isElevated()) return;
+  execFile('schtasks', ['/Query', '/TN', GUARD_TASK_NAME, '/XML'], (err, stdout) => {
+    if (err || !stdout) return;
+    try {
+      const raw = String(stdout);
+      const patched = patchTaskXml(raw);
+      fs.mkdirSync(machineDir(), { recursive: true });
+      fs.writeFileSync(guardTaskXmlFile(), patched, 'utf8');
+      if (patched !== raw && /<Task[\s>]/i.test(patched)) {
+        execFile('schtasks', ['/Create', '/TN', GUARD_TASK_NAME, '/XML', guardTaskXmlFile(), '/F'], () => {});
+      }
     } catch { /* ignore */ }
   });
 }
@@ -2941,7 +3051,10 @@ async function syncStartup() {
   if (isElevated() && fs.existsSync(sourceExecutable(protectedAppDir()))) {
     const g = await setGuardTask(true);
     if (!g.ok) warnings.push('משימת שומר-השער המערכתי נכשלה: ' + g.error);
-    else execFile('schtasks', ['/Run', '/TN', GUARD_TASK_NAME], () => { /* ignore */ });
+    else {
+      snapshotGuardTask();
+      execFile('schtasks', ['/Run', '/TN', GUARD_TASK_NAME], () => { /* ignore */ });
+    }
   }
   startupFault = warnings.length ? warnings.join(' | ') : null;
   return { ok: true, warning: startupFault };
@@ -4198,7 +4311,7 @@ function mainSender(event) { return senderAllowed(event, [win]); }
 function blockSender(event) { return senderAllowed(event, blockWins); }
 function quitSender(event) { return senderAllowed(event, [quitWin]); }
 function senderError() { return { ok: false, error: 'בקשת IPC אינה מורשית מהחלון הנוכחי' }; }
-function uiSender(event) { return senderAllowed(event, [win, ...blockWins, quitWin, netIconWin]); }
+function uiSender(event) { return senderAllowed(event, [win, ...blockWins, quitWin, netIconWin, warnWin]); }
 function settingsSender(event) { return senderAllowed(event, [win, ...blockWins, netIconWin]); }
 function recoverySender(event) { return senderAllowed(event, [win, ...blockWins]); }
 
@@ -4844,6 +4957,13 @@ function registerIpc() {
     return { ok: true };
   });
 
+  // סגירת חלונית האזהרה הצפה
+  ipcMain.handle('warning-banner:close', (event) => {
+    if (!senderAllowed(event, [warnWin])) return senderError();
+    closeWarningWindow();
+    return { ok: true };
+  });
+
   // דשבורד: יומן פעילות + מצב ההגנה + גיבוי ושחזור
   ipcMain.handle('activity:get', (event, limit) => {
     if (!mainSender(event)) return senderError();
@@ -4959,8 +5079,12 @@ const isSystemWatchdog = process.argv.includes('--watchdog-system');
 // הרצה חד-פעמית של ההגדרה המוגבת (עותק מוגן, משימות, רישום לכל המשתמשים).
 // מועלית ע"י maybeEscalatePrivilegedSetup, מבצעת ויוצאת — בלי חלון ובלי מגש.
 const isPrivilegedSetup = process.argv.includes('--setup-privileged');
+if ((isWatchdog || isSystemWatchdog || isPrivilegedSetup) && app && typeof app.disableHardwareAcceleration === 'function') {
+  try { app.disableHardwareAcceleration(); } catch { /* ignore */ }
+}
 const stateDir = () => app.getPath('userData');
 const mainHbFile = () => path.join(stateDir(), 'main.heartbeat');
+const machineMainHbFile = () => path.join(machineDir(), 'main.heartbeat');
 const watchHbFile = () => path.join(stateDir(), 'watchdog.heartbeat');
 
 // ================= קבצי התיאום עם המתקין =================
@@ -5223,13 +5347,18 @@ let ownWatchdogPid = null; // ה-PID של השומר שהתהליך הזה הק�
 function superviseWatchdog() {
   // בתהליך הראשי: לוודא שהשומר חי, ואם נסגר — להקים אותו מחדש
   writeHeartbeat(mainHbFile());
+  try { writeHeartbeat(machineMainHbFile()); } catch { /* ignore */ }
   // אחרי שינה/הערת מערכת כותבים heartbeat מיד — אחרת השומר רואה את הראשי
   // כ"מת" (ה-heartbeat האחרון נכתב לפני השינה) והורג/מקפיץ אותו מחדש.
   if (powerMonitor && typeof powerMonitor.on === 'function') {
-    powerMonitor.on('resume', () => writeHeartbeat(mainHbFile()));
+    powerMonitor.on('resume', () => {
+      writeHeartbeat(mainHbFile());
+      try { writeHeartbeat(machineMainHbFile()); } catch { /* ignore */ }
+    });
   }
   const check = () => {
     writeHeartbeat(mainHbFile());
+    try { writeHeartbeat(machineMainHbFile()); } catch { /* ignore */ }
     recordClockSample();
     reloadSettingsIfChanged();
     // דגל עצירה (נכתב ע"י מתקין העדכון לפני ההתקנה) — לצאת בשקט,
@@ -5413,22 +5542,37 @@ async function restoreUninstaller() {
 
 let lastMainTaskRun = 0;
 function ensureInteractiveMain() {
-  if (!isWin || isTestMode || trustedNow() - lastMainTaskRun < 10000) return;
+  if (!isWin || isTestMode || trustedNow() - lastMainTaskRun < 5000) return;
+  if (guardShouldExit() || updateInProgress()) return;
+
+  // אם הדופק המשותף של התהליך הראשי עדיין רענן — התהליך הראשי פועם וחי
+  if (!heartbeatStale(machineMainHbFile(), 8000)) return;
+
   const exeName = path.basename(sourceExecutable(protectedAppDir()));
-  // שם קובץ ההרצה משולב בסקריפט PowerShell. שימוש במחרוזת יחיד ליטרלית
-  // (psSingleQuote) במקום JSON.stringify (מרכאות כפולות) מונע אינטרפולציה של
-  // `$(...)`/backtick/$var, כך שגם אם שם הקובץ ישונה בעתיד לא ניתן להזריק קוד.
+  // סינון מדויק של תהליכים:
+  // מחפשים תהליך של התוכנה שאינו שומר מערכתי, אינו שומר צמוד, אינו תהליך עזר פנימי (--type=),
+  // ואינו תהליך הגדרה מוגבת (--setup-privileged)
   const script =
     "$n=" + psSingleQuote(exeName) + "; " +
-    "@(Get-CimInstance Win32_Process -Filter \"Name='$n'\") | " +
-    "Where-Object { $_.CommandLine -notmatch '--watchdog-system' -and $_.CommandLine -notmatch '--watchdog' } | " +
-    "Select-Object -First 1 | ForEach-Object { 'running' }";
-  execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true, timeout: 10000 }, (err, stdout) => {
-    if (err || String(stdout || '').trim() === 'running') return;
+    "$alive = $false; " +
+    "try { " +
+    "  @(Get-CimInstance Win32_Process -Filter \"Name='$n'\" -ErrorAction Stop) | ForEach-Object { " +
+    "    $c = [string]$_.CommandLine; " +
+    "    if ($c -notmatch '--watchdog-system' -and $c -notmatch '--watchdog' -and $c -notmatch '--type=' -and $c -notmatch '--setup-privileged') { $alive = $true } " +
+    "  } " +
+    "} catch { " +
+    "  $procs = @(Get-Process -Name ([System.IO.Path]::GetFileNameWithoutExtension($n)) -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -gt 0 }); " +
+    "  if ($procs.Count -gt 0) { $alive = $true } " +
+    "}; " +
+    "if ($alive) { 'running' } else { 'dead' }";
+
+  execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true, timeout: 8000 }, (err, stdout) => {
+    if (!err && String(stdout || '').trim() === 'running') return;
+    if (guardShouldExit() || updateInProgress()) return;
     lastMainTaskRun = trustedNow();
-    // The SYSTEM guard cannot safely display UI itself. Re-running the
-    // interactive scheduled task restores the enforcement process in the
-    // logged-on user's session after both user processes were killed.
+    logTamper('main-process-respawn');
+    // שומר המערכת אינו יכול להציג ממשק משתמש ישירות. הפעלה מחדש של המשימה המתוזמנת
+    // מחזירה את תהליך האכיפה לתוך סשן המשתמש הפעיל גם אם שני תהליכי המשתמש נהרגו.
     execFile('schtasks', ['/Run', '/TN', TASK_NAME], () => {});
   });
 }
@@ -5452,9 +5596,13 @@ function ensureGuardTasks() {
   });
   execFile('schtasks', ['/Query', '/TN', GUARD_TASK_NAME], (err) => {
     if (err) {
-      execFile('schtasks',
-        ['/Create', '/TN', GUARD_TASK_NAME, '/TR', guardTaskCommand(), '/SC', 'ONSTART', '/RU', 'SYSTEM', '/RL', 'HIGHEST', '/F'],
-        () => { /* ignore */ });
+      if (fs.existsSync(guardTaskXmlFile())) {
+        execFile('schtasks', ['/Create', '/TN', GUARD_TASK_NAME, '/XML', guardTaskXmlFile(), '/F'], () => {});
+      } else {
+        execFile('schtasks',
+          ['/Create', '/TN', GUARD_TASK_NAME, '/TR', guardTaskCommand(), '/SC', 'ONSTART', '/RU', 'SYSTEM', '/RL', 'HIGHEST', '/F'],
+          () => { /* ignore */ });
+      }
     }
   });
 }
@@ -5482,12 +5630,13 @@ async function runSystemWatchdog() {
       checking = false;
     }
   };
-  setInterval(() => { check().catch(() => {}); }, 10000);
+  setInterval(() => { check().catch(() => {}); }, 5000);
   await check();
 }
 
 async function gracefulQuit() {
   isQuitting = true;
+  closeWarningWindow();
   saveUsage(true); // שמירת מכסת זמן השימוש היומית לפני יציאה
   logEvent('app-quit');
   writeQuitFlag(); // בכל הנתיבים — כדי שהמתקין/השומר יראו את דגל העצירה

@@ -50,7 +50,8 @@ const PAGES = [
   { html: 'renderer/block.html', scripts: ['renderer/block.html'] },
   { html: 'renderer/site-browser.html', scripts: ['renderer/site-browser.html'] },
   { html: 'renderer/quit.html', scripts: ['renderer/quit.html'] },
-  { html: 'renderer/netblock-icon.html', scripts: ['renderer/netblock-icon.html'] }
+  { html: 'renderer/netblock-icon.html', scripts: ['renderer/netblock-icon.html'] },
+  { html: 'renderer/warning-banner.html', scripts: ['renderer/warning-banner.html'] }
 ];
 
 test('wiring: כל id שהקוד מתייחס אליו קיים בדף שלו', () => {
