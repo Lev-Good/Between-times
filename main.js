@@ -59,6 +59,23 @@ function lockLocalWindowNavigation(w) {
   if (typeof w.webContents.on === 'function') {
     w.webContents.on('will-navigate', (e, url) => { if (!allow(url)) e.preventDefault(); });
     w.webContents.on('will-redirect', (e, url) => { if (!allow(url)) e.preventDefault(); });
+    // מניעת כלי מפתחים (DevTools / Inspect) — סגירה מיידית אם נפתח
+    w.webContents.on('devtools-opened', () => {
+      try { w.webContents.closeDevTools(); } catch { /* ignore */ }
+    });
+    // חסימת קיצורי מקשים מסוכנים (F12, F5, Ctrl+Shift+I/J/C, Ctrl+U, Ctrl+R)
+    w.webContents.on('before-input-event', (e, input) => {
+      const key = (input && input.key ? input.key : '').toLowerCase();
+      const isBlockedKey = key === 'f12' ||
+        key === 'f5' ||
+        ((input.control || input.meta) && input.shift && (key === 'i' || key === 'j' || key === 'c')) ||
+        ((input.control || input.meta) && (key === 'u' || key === 'r'));
+      if (isBlockedKey) e.preventDefault();
+    });
+    // ביטול תפריט מקש ימני כדי שלא ניתן יהיה ללחוץ Inspect Element
+    w.webContents.on('context-menu', (e) => {
+      e.preventDefault();
+    });
   }
   if (typeof w.webContents.setWindowOpenHandler === 'function') {
     w.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
@@ -889,7 +906,8 @@ function createBlockWindow(display) {
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      devTools: false
     }
   });
   lockLocalWindowNavigation(bw);
@@ -1243,7 +1261,8 @@ function showNetIcon(show) {
       webPreferences: {
         preload: path.join(__dirname, 'preload.js'),
         contextIsolation: true,
-        nodeIntegration: false
+        nodeIntegration: false,
+        devTools: false
       }
     });
     lockLocalWindowNavigation(netIconWin);
@@ -2090,7 +2109,8 @@ function showWarningWindow(status) {
       webPreferences: {
         preload: path.join(__dirname, 'preload.js'),
         contextIsolation: true,
-        nodeIntegration: false
+        nodeIntegration: false,
+        devTools: false
       }
     });
     try { warnWin.setAlwaysOnTop(true, 'screen-saver'); } catch { /* ignore */ }
@@ -2367,7 +2387,8 @@ function showQuitPrompt() {
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      devTools: false
     }
   });
   lockLocalWindowNavigation(quitWin);
@@ -2421,7 +2442,8 @@ function createMainWindow() {
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      devTools: false
     }
   });
   lockLocalWindowNavigation(win);
@@ -3934,6 +3956,7 @@ function openWebsiteApp(nameOrIndex) {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      devTools: false,
       // אין preload — תוכן מרוחק לא מקבל גישה ל-electronAPI
       webviewTag: false
     }
@@ -4080,7 +4103,8 @@ function openRestrictedBrowserCore() {
       preload: path.join(__dirname, 'renderer', 'site-browser-preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true
+      sandbox: true,
+      devTools: false
     }
   });
   siteBrowserWin = w;
@@ -4093,6 +4117,7 @@ function openRestrictedBrowserCore() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      devTools: false,
       webviewTag: false
       // אין preload — תוכן רשתי אינו נחשף ל-API של התוכנה
     }
@@ -4282,7 +4307,8 @@ function openFileExplorerWindow() {
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      devTools: false
     }
   });
   lockLocalWindowNavigation(fileExplorerWin);
@@ -5714,6 +5740,24 @@ async function gracefulQuit() {
       if (!isQuitting && isBlockedNow() && schedule.pinHash) {
         setTimeout(focusBlockWindows, 60);
       }
+    });
+
+    // הגנה גלובלית כנגד כלי מפתחים (DevTools) בכל תוכן שנוצר באפליקציה
+    app.on('web-contents-created', (_event, contents) => {
+      try {
+        if (!contents || typeof contents.on !== 'function') return;
+        contents.on('devtools-opened', () => {
+          try { contents.closeDevTools(); } catch { /* ignore */ }
+        });
+        contents.on('before-input-event', (e, input) => {
+          const key = (input && input.key ? input.key : '').toLowerCase();
+          const isBlockedKey = key === 'f12' ||
+            key === 'f5' ||
+            ((input.control || input.meta) && input.shift && (key === 'i' || key === 'j' || key === 'c')) ||
+            ((input.control || input.meta) && (key === 'u' || key === 'r'));
+          if (isBlockedKey) e.preventDefault();
+        });
+      } catch { /* ignore */ }
     });
 
     app.whenReady().then(async () => {

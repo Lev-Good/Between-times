@@ -965,6 +965,20 @@
   <script src="torah-quotes.js"></script>
   <script src="vendor/webgl-fluid-simulation.js"></script>
   <script>
+    // חסימה מוחלטת של תפריט ימני (Inspect) וקיצורי כלי מפתחים (Ctrl+Shift+I / F12 / וכו')
+    window.addEventListener('contextmenu', (e) => e.preventDefault(), true);
+    window.addEventListener('keydown', (e) => {
+      const k = (e.key || '').toLowerCase();
+      if (
+        k === 'f12' ||
+        k === 'f5' ||
+        ((e.ctrlKey || e.metaKey) && (k === 'r' || k === 'u' || (e.shiftKey && (k === 'i' || k === 'j' || k === 'c'))))
+      ) {
+        e.preventDefault();
+        e.stopPropagation();
+        return false;
+      }
+    }, true);
     const T = window.TimeScheduler;
     const API = window.electronAPI;
     const countdown = document.getElementById('countdown');

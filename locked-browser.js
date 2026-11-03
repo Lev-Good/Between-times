@@ -47,6 +47,24 @@ function applyLockedNavigationGuards(webContents, opts) {
   webContents.on('will-redirect', urlGuard);
   webContents.on('will-frame-navigate', frameGuard);
 
+  // סגירה מיידית של כלי מפתחים אם נפתחו
+  if (typeof webContents.on === 'function') {
+    webContents.on('devtools-opened', () => {
+      try { webContents.closeDevTools(); } catch { /* ignore */ }
+    });
+    webContents.on('before-input-event', (event, input) => {
+      const key = (input && input.key ? input.key : '').toLowerCase();
+      const isBlockedKey = key === 'f12' ||
+        key === 'f5' ||
+        ((input && (input.control || input.meta)) && input.shift && (key === 'i' || key === 'j' || key === 'c')) ||
+        ((input && (input.control || input.meta)) && (key === 'u' || key === 'r'));
+      if (isBlockedKey) prevent(event);
+    });
+    webContents.on('context-menu', (event) => {
+      prevent(event);
+    });
+  }
+
   webContents.setWindowOpenHandler((details) => {
     const url = details && details.url ? String(details.url) : '';
     if (allows(url)) {
