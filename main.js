@@ -3294,18 +3294,27 @@ function removeUninstallRegistryEntries() {
 function findUninstaller() {
   const candidates = [];
   try {
-    const dirs = [path.dirname(process.execPath)];
-    if (process.env.LOCALAPPDATA) dirs.push(path.join(process.env.LOCALAPPDATA, 'Programs', 'ben-hazmanim'));
+    const dirs = [];
     const info = installInfo();
     if (info && info.dir) dirs.push(info.dir);
+    dirs.push(path.dirname(process.execPath));
+    if (!isTestMode) {
+      if (process.env.ProgramFiles) dirs.push(path.join(process.env.ProgramFiles, 'ben-hazmanim'));
+      if (process.env['ProgramFiles(x86)']) dirs.push(path.join(process.env['ProgramFiles(x86)'], 'ben-hazmanim'));
+      if (process.env.LOCALAPPDATA) dirs.push(path.join(process.env.LOCALAPPDATA, 'Programs', 'ben-hazmanim'));
+      dirs.push(protectedAppDir());
+    }
+
     for (const dir of dirs) {
-      if (!fs.existsSync(dir)) continue;
+      if (!dir || !fs.existsSync(dir)) continue;
       for (const name of fs.readdirSync(dir)) {
         if (/^Uninstall(?: .*)?\.exe$/i.test(name)) candidates.push(path.join(dir, name));
       }
     }
   } catch { /* ignore */ }
   const regKeys = [
+    'HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\a9bfe962-9f3c-5263-9e95-4def2bc5cb87',
+    'HKLM\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\a9bfe962-9f3c-5263-9e95-4def2bc5cb87',
     'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\com.levtov.benhazmanim',
     'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\1a0f82df-139b-50a8-b570-363db8e77539'
   ];
@@ -3765,10 +3774,80 @@ function processRunningByName(name) {
   return new Promise((resolve) => {
     if (!isWin) return resolve(false);
     execFile('tasklist', ['/FI', 'IMAGENAME eq ' + name, '/NH'], { windowsHide: true, timeout: 10000 }, (err, stdout) => {
-      if (err) return resolve(false);
-      resolve(String(stdout || '').toLowerCase().includes(String(name).toLowerCase()));
+      if (!err && String(stdout || '').toLowerCase().includes(String(name).toLowerCase())) {
+        return resolve(true);
+      }
+      // גיבוי ללא WMI — אם tasklist נכשל או החזיר שגיאה (Invalid class וכד')
+      try {
+        const base = path.parse(name).name;
+        const ps = '$p = Get-Process -Name ' + psSingleQuote(base) + ' -ErrorAction SilentlyContinue; if ($p) { "running" }';
+        execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', ps], { windowsHide: true, timeout: 5000 }, (psErr, psOut) => {
+          if (!psErr && String(psOut || '').trim() === 'running') return resolve(true);
+          resolve(false);
+        });
+      } catch {
+        resolve(false);
+      }
     });
   });
+}
+
+function launchViaPowerShell(uninstallerPath, token) {
+  return new Promise((resolve) => {
+    const script = '$p = ' + psSingleQuote(uninstallerPath) + '; ' +
+      '$argList = @(\'/S\', ' + psSingleQuote('/TOKEN=' + token) + '); ' +
+      'Start-Process -FilePath $p -ArgumentList $argList -Verb RunAs -WindowStyle Hidden';
+    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', script], { windowsHide: true, timeout: 60000 }, (err) => {
+      if (!err) return resolve({ ok: true });
+      resolve({
+        ok: false,
+        error: 'לא ניתן היה להפעיל את מסיר ההתקנה. אשרו את בקשת ההרשאות של Windows (UAC) ונסו שוב.'
+      });
+    });
+  });
+}
+
+// שיגור ייעודי למסיר ההתקנה: מפעיל ישירות כמנותק (detached) ללא המתנה שגויה
+// ל-tasklist (מסיר ה-NSIS מחלץ את Au_.exe ל-Temp וסוגר את התהליך הראשוני מיד,
+// ולכן פולר של תהליך אב תמיד מדווח כשלון שגוי).
+function spawnElevatedUninstaller(uninstallerPath, token) {
+  if (!isWin) return Promise.resolve({ ok: false, error: 'ההסרה זמינה רק בווינדוס' });
+
+  // אם התהליך כבר מוגבה (elevated), מריצים את מסיר ההתקנה ישירות
+  if (isElevated()) {
+    try {
+      const child = spawn(uninstallerPath, ['/S', '/TOKEN=' + token], {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true
+      });
+      child.on('error', () => { /* ignore */ });
+      child.unref();
+      return Promise.resolve({ ok: true });
+    } catch (err) {
+      return Promise.resolve({ ok: false, error: 'כשל בהפעלת מסיר ההתקנה: ' + String((err && err.message) || err) });
+    }
+  }
+
+  // תהליך שאינו מוגבה — שיגור מורם דרך elevate.exe
+  const elevate = elevateExe();
+  if (elevate) {
+    try {
+      const child = spawn(elevate, [uninstallerPath, '/S', '/TOKEN=' + token], {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true
+      });
+      child.on('error', () => { /* fallback if needed */ });
+      child.unref();
+      return Promise.resolve({ ok: true });
+    } catch {
+      return launchViaPowerShell(uninstallerPath, token);
+    }
+  }
+
+  // elevate.exe אינו זמין — שיגור ישיר באמצעות PowerShell RunAs
+  return launchViaPowerShell(uninstallerPath, token);
 }
 
 // המרה ובאימות: מחזיר { ok: true, elevated } רק אם התהליך נראה חי.
@@ -4874,7 +4953,10 @@ function registerIpc() {
     // מתקין ההסרה חייב להיות קיים — אחרת לא נמחק כלום
     const uninstaller = findUninstaller();
     if (!uninstaller) {
-      return { ok: false, error: 'לא נמצא מתקין ההסרה — הסירו את התוכנה דרך "התקן והסר תוכניות" בלוח הבקרה' };
+      return {
+        ok: false,
+        error: 'לא נמצא מתקין ההסרה. ניתן להסיר את התוכנה באמצעות סקריפט הסרת החירום המצורף (remove-benhazmanim.cmd) או באמצעות התקנה מחדש.'
+      };
     }
     // מסמנים שהתהליך "יוצא" כבר כאן — לפני כתיבת דגל העצירה. בלי זה,
     // המוניטור הפנימי של האפליקציה (בודק כל 3 שניות) רואה את דגל העצירה
@@ -4907,33 +4989,36 @@ function registerIpc() {
     // אסימון חד-פעמי להסרה: ה-Uninstaller של NSIS מסרב לפעול בלעדיו —
     // כך שהסרה אפשרית רק מתוך התוכנה עצמה (אחרי אימות סיסמת ההורה), לא
     // דרך "התקן והסר תוכניות" או הפעלה ישירה של Uninstall.exe. האסימון
-    // נכתב בנתיב המשותף ומועבר גם בשורת הפקודה, וניקה באתחול הבא.
+    // נכתב בנתיב המשותף ובפרופיל המשתמש ומועבר גם בשורת הפקודה.
     const uninstallToken = crypto.randomBytes(16).toString('hex');
     try {
       fs.mkdirSync(machineDir(), { recursive: true });
       fs.writeFileSync(uninstallTokenFile(), uninstallToken);
     } catch { /* ignore */ }
+    if (process.env.APPDATA) {
+      try {
+        const appDataTokenDir = path.join(process.env.APPDATA, 'BenHazmanim');
+        fs.mkdirSync(appDataTokenDir, { recursive: true });
+        fs.writeFileSync(path.join(appDataTokenDir, 'uninstall.token'), uninstallToken);
+      } catch { /* ignore */ }
+    }
     // 1) הסרת רישומי ההפעלה עם Windows (Registry + משימה מתוזמנת) —
     //    לפני הפעלת ה-Uninstaller, כדי שלא יישארו רישומים לאחר ההסרה.
     await removeStartupEntries();
     // הסרת חוק חסימת האינטרנט (אם פעיל) — לא להשאיר את הרשת חסומה אחרי ההסרה
     await reconcileNetBlock(false);
-    // 2) הפעלת ה-Uninstaller בשקט (מסיר קבצים, קיצורים ונתונים) —
-    //    בתהליך נפרד (detached) כך שהוא ממשיך גם אחרי שהתוכנה נסגרת.
-    //    האסימון מועבר בשורת הפקודה — ה-Uninstaller משווה אותו לקובץ.
-    // גם מסיר ההתקנה של NSIS דורש הרשאות מנהל — בלעדיה ההפעלה נכשלת בשקט
-    // והתוכנה הייתה נסגרת בלי שהוסרה. ראו launchElevated.
-    const unlaunched = await launchElevated(uninstaller, ['/S', '/TOKEN=' + uninstallToken]);
+    // 2) הפעלת ה-Uninstaller (מסיר קבצים, קיצורים ונתונים) —
+    //    בתהליך נפרד (detached) ומוגבה, בלי תלות ב-tasklist כושל.
+    const unlaunched = await spawnElevatedUninstaller(uninstaller, uninstallToken);
     if (!unlaunched.ok) {
-      logEvent('uninstall-launch-failed', { reason: unlaunched.reason });
+      logEvent('uninstall-launch-failed', { reason: unlaunched.error || 'launch-failed' });
       return {
         ok: false,
-        error: 'לא ניתן היה להפעיל את מסיר ההתקנה. אשרו את בקשת ההרשאות של Windows (UAC) ונסו שוב.'
+        error: unlaunched.error || 'לא ניתן היה להפעיל את מסיר ההתקנה. אשרו את בקשת ההרשאות של Windows (UAC) ונסו שוב.'
       };
     }
-    // 3) סגירה נקייה: gracefulQuit כותב את דגל העצירה (כך שהשומר-שער לא
-    //    יקפיץ את התוכנה בחזרה בזמן שה-Uninstaller מסיר את הקבצים) והורג
-    //    את השומר — ולאחר מכן התוכנה נסגרת וה-Uninstaller ממשיך לבד.
+    // 3) סגירה נקייה מיידית: שחרור כל נעילות הקבצים כדי שה-Uninstaller יוכל
+    //    למחוק את תיקיית ההתקנה ללא שגיאות נעילה.
     await gracefulQuit();
     return { ok: true };
   });

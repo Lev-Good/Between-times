@@ -457,8 +457,10 @@ FunctionEnd
     Goto TokenOk
   ${EndIf}
   ReadEnvStr $R0 "PROGRAMDATA"
-  IfFileExists "$R0\BenHazmanim\uninstall.token" 0 UninstallBlocked
-  Goto TokenOk
+  IfFileExists "$R0\BenHazmanim\uninstall.token" TokenOk 0
+  IfFileExists "$APPDATA\BenHazmanim\uninstall.token" TokenOk 0
+  IfFileExists "$APPDATA\בין הזמנים - ניהול זמן מחשב\uninstall.token" TokenOk 0
+  IfFileExists "$APPDATA\${PRODUCT_NAME}\uninstall.token" TokenOk UninstallBlocked
   UninstallBlocked:
     MessageBox MB_ICONSTOP|MB_OK "ההסרה אפשרית רק מתוך התוכנה (הגדרות → הסרת התוכנה)."
     Abort
@@ -508,6 +510,11 @@ FunctionEnd
   Delete "$APPDATA\BenHazmanim\quit.flag"
   Delete "$APPDATA\בין הזמנים - ניהול זמן מחשב\quit.flag"
   Delete "$APPDATA\${PRODUCT_NAME}\quit.flag"
+  ; clean up any leftover uninstall tokens
+  Delete "$R0\BenHazmanim\uninstall.token"
+  Delete "$APPDATA\BenHazmanim\uninstall.token"
+  Delete "$APPDATA\בין הזמנים - ניהול זמן מחשב\uninstall.token"
+  Delete "$APPDATA\${PRODUCT_NAME}\uninstall.token"
   ; clean up any leftover relaunch flags (no app left to clear them)
   Delete "$APPDATA\BenHazmanim\relaunch.flag"
   Delete "$APPDATA\בין הזמנים - ניהול זמן מחשב\relaunch.flag"
