@@ -1,121 +1,211 @@
 @echo off
-setlocal EnableDelayedExpansion
+setlocal EnableExtensions EnableDelayedExpansion
+chcp 65001 >nul 2>&1
 title BenHazmanim Emergency Removal Tool
 echo ============================================================
-echo   BenHazmanim (Between Times - Screen Time Manager)
-echo   EMERGENCY REMOVAL TOOL
+echo   BenHazmanim - EMERGENCY REMOVAL TOOL (Live Windows + WinRE)
 echo   Removes the app completely - WITHOUT the parent password.
-echo   Requires administrator (UAC prompt will appear).
 echo ============================================================
 echo.
 
-REM ---------- self-elevate via UAC ----------
+REM Detect environment: WinRE / WinPE always runs from the X: RAM drive.
+if /i "%SystemDrive%"=="X:" goto :mode_winre
+
+REM =============================================================
+REM  LIVE WINDOWS MODE
+REM =============================================================
+:mode_online
+echo [Mode] Live Windows session.
 net session >nul 2>&1
 if not "%errorlevel%"=="0" (
   echo Requesting administrator rights...
-  powershell -NoProfile -Command "Start-Process -Verb RunAs -FilePath '%~f0'"
+  powershell -NoProfile -Command "Start-Process -Verb RunAs -FilePath '%~f0'" >nul 2>&1
+  if errorlevel 1 (
+    echo ERROR: Administrator rights are required.
+    echo Right-click this file and choose "Run as administrator".
+    pause
+  )
   exit /b
 )
-echo Running with administrator rights.
-echo.
 
-REM ---------- 1. quit flags: stop the watchdogs / SYSTEM guard (no respawn) ----------
-echo [1/8] Signaling the app to stop...
-if not exist "%PROGRAMDATA%\BenHazmanim" mkdir "%PROGRAMDATA%\BenHazmanim" 2>nul
-type nul > "%PROGRAMDATA%\BenHazmanim\quit.flag" 2>nul
-if not exist "%APPDATA%\BenHazmanim" mkdir "%APPDATA%\BenHazmanim" 2>nul
+echo [1/7] Signaling the guards to stop...
+if not exist "%ProgramData%\BenHazmanim" mkdir "%ProgramData%\BenHazmanim" >nul 2>&1
+type nul > "%ProgramData%\BenHazmanim\quit.flag" 2>nul
+if not exist "%APPDATA%\BenHazmanim" mkdir "%APPDATA%\BenHazmanim" >nul 2>&1
 type nul > "%APPDATA%\BenHazmanim\quit.flag" 2>nul
-reg delete "HKLM\Software\BenHazmanim" /v Quit /f >nul 2>&1
+reg add "HKLM\Software\BenHazmanim" /v Quit /t REG_SZ /d 1 /f >nul 2>&1
 
-REM ---------- 2. stop + delete the scheduled tasks ----------
-echo [2/8] Stopping and removing scheduled tasks...
+echo [2/7] Stopping and removing scheduled tasks...
 schtasks /End /TN BenHazmanimGuard >nul 2>&1
 schtasks /End /TN BenHazmanim >nul 2>&1
-timeout /t 2 /nobreak >nul 2>&1
+call :sleep 3
 schtasks /Delete /TN BenHazmanimGuard /F >nul 2>&1
 schtasks /Delete /TN BenHazmanim /F >nul 2>&1
-
-REM ---------- 3. kill all app processes (also kills the SYSTEM guard) ----------
-echo [3/8] Stopping all app processes...
 call :kill_apps
 
-REM ---------- 4. remove startup entries + registry keys ----------
-echo [4/8] Removing startup entries and registry keys...
+echo [3/7] Removing startup entries and registry keys...
 reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v BenHazmanim /f >nul 2>&1
 reg delete "HKLM\Software\Microsoft\Windows\CurrentVersion\Run" /v BenHazmanim /f /reg:64 >nul 2>&1
 reg delete "HKLM\Software\Microsoft\Windows\CurrentVersion\Run" /v BenHazmanim /f /reg:32 >nul 2>&1
-reg delete "HKLM\Software\BenHazmanim" /f /reg:64 >nul 2>&1
-reg delete "HKLM\Software\BenHazmanim" /f /reg:32 >nul 2>&1
+reg delete "HKLM\SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\Schedule" /f >nul 2>&1
+reg delete "HKLM\SYSTEM\CurrentControlSet\Control\SafeBoot\Network\Schedule" /f >nul 2>&1
 reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\com.levtov.benhazmanim" /f >nul 2>&1
+reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\a9bfe962-9f3c-5263-9e95-4def2bc5cb87" /f >nul 2>&1
 reg delete "HKLM\Software\Microsoft\Windows\CurrentVersion\Uninstall\a9bfe962-9f3c-5263-9e95-4def2bc5cb87" /f >nul 2>&1
 reg delete "HKLM\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\a9bfe962-9f3c-5263-9e95-4def2bc5cb87" /f >nul 2>&1
-reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\a9bfe962-9f3c-5263-9e95-4def2bc5cb87" /f >nul 2>&1
 
-REM ---------- 5. remove the internet-block firewall rule ----------
-echo [5/8] Removing the internet-block firewall rule...
+echo [4/7] Removing the internet-block firewall rule...
 netsh advfirewall firewall delete rule name=BenHazmanimNetBlock >nul 2>&1
 
-REM ---------- 6. lift deny-delete ACLs + take ownership ----------
-echo [6/8] Lifting protection ACLs...
-icacls "%PROGRAMFILES%\ben-hazmanim" /remove:d *S-1-1-0 /T /C >nul 2>&1
-icacls "%PROGRAMFILES(X86)%\ben-hazmanim" /remove:d *S-1-1-0 /T /C >nul 2>&1
-icacls "%PROGRAMDATA%\BenHazmanim" /remove:d *S-1-1-0 /T /C >nul 2>&1
-takeown /f "%PROGRAMFILES%\ben-hazmanim" /a /r /d y >nul 2>&1
-takeown /f "%PROGRAMDATA%\BenHazmanim" /a /r /d y >nul 2>&1
+echo [5/7] Lifting protection ACLs...
+call :unlock_dir "%ProgramFiles%\ben-hazmanim"
+call :unlock_dir "%ProgramFiles(x86)%\ben-hazmanim"
+call :unlock_dir "%ProgramData%\BenHazmanim"
 
-REM ---------- 7. delete files - with retries for locked files ----------
-echo [7/8] Deleting files (retrying locked files)...
-set tries=0
+echo [6/7] Deleting files (retrying locked files)...
+set /a tries=0
 :retry_del
 set /a tries+=1
-if %tries% gtr 10 goto del_giveup
 call :kill_apps
-timeout /t 3 /nobreak >nul 2>&1
-rmdir /S /Q "%PROGRAMFILES%\ben-hazmanim" >nul 2>&1
-rmdir /S /Q "%PROGRAMFILES(X86)%\ben-hazmanim" >nul 2>&1
-rmdir /S /Q "%PROGRAMDATA%\BenHazmanim" >nul 2>&1
-call :delete_appdata
-if exist "%PROGRAMFILES%\ben-hazmanim" goto retry_del
-if exist "%PROGRAMFILES(X86)%\ben-hazmanim" goto retry_del
-if exist "%PROGRAMDATA%\BenHazmanim" goto retry_del
-goto del_done
-:del_giveup
-echo   WARNING: some folders could not be deleted (files in use).
-echo   Queueing the remaining files for deletion at the next reboot...
-call :queue_reboot_delete
-:del_done
+rmdir /S /Q "%ProgramFiles%\ben-hazmanim" >nul 2>&1
+rmdir /S /Q "%ProgramFiles(x86)%\ben-hazmanim" >nul 2>&1
+rmdir /S /Q "%ProgramData%\BenHazmanim" >nul 2>&1
+call :remaining "%SystemDrive%"
+if "!LEFT!"=="0" goto :online_appdata
+if !tries! geq 5 goto :online_appdata
+call :sleep 3
+goto :retry_del
 
-REM ---------- 8. verify ----------
-echo [8/8] Verifying...
-call :verify
+:online_appdata
+call :delete_appdata "%SystemDrive%"
+reg delete "HKLM\Software\BenHazmanim" /f /reg:64 >nul 2>&1
+reg delete "HKLM\Software\BenHazmanim" /f /reg:32 >nul 2>&1
+
+echo [7/7] Verifying...
+call :remaining "%SystemDrive%"
+goto :report
+
+REM =============================================================
+REM  WINRE / WINPE MODE (offline Windows on another drive letter)
+REM =============================================================
+:mode_winre
+echo [Mode] Windows Recovery Environment (WinRE / WinPE).
+echo Scanning drives for the Windows installation...
+set "T="
+for %%d in (C D E F G H I J K L M N O P Q R S T U V W Y Z) do (
+  if not defined T if exist "%%d:\Windows\System32\config\SYSTEM" if exist "%%d:\ProgramData\BenHazmanim" set "T=%%d:"
+)
+for %%d in (C D E F G H I J K L M N O P Q R S T U V W Y Z) do (
+  if not defined T if exist "%%d:\Windows\System32\config\SYSTEM" if exist "%%d:\Program Files\ben-hazmanim" set "T=%%d:"
+)
+if not defined T (
+  echo ERROR: Could not find a Windows drive with BenHazmanim installed.
+  echo If the drive is encrypted with BitLocker, unlock it first:
+  echo   manage-bde -unlock C: -RecoveryPassword YOUR-48-DIGIT-KEY
+  pause
+  exit /b 1
+)
+echo Found Windows on drive %T%
+
+echo [1/5] Removing scheduled task definitions...
+del /f /q "%T%\Windows\System32\Tasks\BenHazmanim" >nul 2>&1
+del /f /q "%T%\Windows\System32\Tasks\BenHazmanimGuard" >nul 2>&1
+
+echo [2/5] Loading offline registry hives...
+reg unload HKLM\BHZ_SYS >nul 2>&1
+reg unload HKLM\BHZ_SOFT >nul 2>&1
+reg load HKLM\BHZ_SYS "%T%\Windows\System32\config\SYSTEM" >nul 2>&1
+reg load HKLM\BHZ_SOFT "%T%\Windows\System32\config\SOFTWARE" >nul 2>&1
+
+echo [3/5] Cleaning offline registry...
+for %%c in (ControlSet001 ControlSet002 ControlSet003) do (
+  reg delete "HKLM\BHZ_SYS\%%c\Control\SafeBoot\Minimal\Schedule" /f >nul 2>&1
+  reg delete "HKLM\BHZ_SYS\%%c\Control\SafeBoot\Network\Schedule" /f >nul 2>&1
+)
+set "TC=HKLM\BHZ_SOFT\Microsoft\Windows NT\CurrentVersion\Schedule\TaskCache"
+for %%n in (BenHazmanim BenHazmanimGuard) do (
+  for /f "tokens=3" %%g in ('reg query "%TC%\Tree\%%n" /v Id 2^>nul ^| findstr /i "REG_SZ"') do (
+    for %%k in (Tasks Boot Logon Plain) do reg delete "%TC%\%%k\%%g" /f >nul 2>&1
+  )
+  reg delete "%TC%\Tree\%%n" /f >nul 2>&1
+)
+reg delete "HKLM\BHZ_SOFT\Microsoft\Windows\CurrentVersion\Run" /v BenHazmanim /f >nul 2>&1
+reg delete "HKLM\BHZ_SOFT\WOW6432Node\Microsoft\Windows\CurrentVersion\Run" /v BenHazmanim /f >nul 2>&1
+reg delete "HKLM\BHZ_SOFT\BenHazmanim" /f >nul 2>&1
+reg delete "HKLM\BHZ_SOFT\WOW6432Node\BenHazmanim" /f >nul 2>&1
+reg delete "HKLM\BHZ_SOFT\Microsoft\Windows\CurrentVersion\Uninstall\a9bfe962-9f3c-5263-9e95-4def2bc5cb87" /f >nul 2>&1
+reg delete "HKLM\BHZ_SOFT\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\a9bfe962-9f3c-5263-9e95-4def2bc5cb87" /f >nul 2>&1
+reg unload HKLM\BHZ_SYS >nul 2>&1
+reg unload HKLM\BHZ_SOFT >nul 2>&1
+
+echo [4/5] Lifting protection ACLs and deleting program files...
+call :unlock_dir "%T%\Program Files\ben-hazmanim"
+call :unlock_dir "%T%\Program Files (x86)\ben-hazmanim"
+call :unlock_dir "%T%\ProgramData\BenHazmanim"
+rmdir /S /Q "%T%\Program Files\ben-hazmanim" >nul 2>&1
+rmdir /S /Q "%T%\Program Files (x86)\ben-hazmanim" >nul 2>&1
+rmdir /S /Q "%T%\ProgramData\BenHazmanim" >nul 2>&1
+
+echo [5/5] Cleaning user data of all profiles...
+call :delete_appdata "%T%"
+call :remaining "%T%"
+goto :report
+
+REM =============================================================
+REM  REPORT
+REM =============================================================
+:report
 echo.
 echo ============================================================
-timeout /t 5 /nobreak >nul 2>&1
-exit /b
+if "!LEFT!"=="0" (
+  echo   SUCCESS: BenHazmanim was removed completely.
+) else (
+  echo   NOTICE: some program folders could not be deleted ^(see above^).
+  echo   The app can no longer start, but to finish the cleanup:
+  echo   restart the computer and run this tool again.
+)
+if /i "%SystemDrive%"=="X:" echo   Type EXIT and choose "Continue" to start Windows.
+echo ============================================================
+pause
+exit /b 0
 
-REM ============================================================
-REM  helpers
-REM ============================================================
+REM =============================================================
+REM  HELPERS (pure cmd - no PowerShell, works inside WinRE)
+REM =============================================================
+:unlock_dir
+if not exist "%~1" exit /b 0
+REM Locale-independent ownership (Administrators) + reset ACLs to inherited.
+REM This removes the "deny delete for Everyone" ACE the app applies.
+icacls "%~1" /setowner *S-1-5-32-544 /T /C /Q >nul 2>&1
+icacls "%~1" /reset /T /C /Q >nul 2>&1
+attrib -r -s -h "%~1\*" /S /D >nul 2>&1
+exit /b 0
 
 :kill_apps
-REM Kill every app process by name (Hebrew, built from char codes) or by path.
-powershell -NoProfile -Command "$n = -join ([char]0x05D1,[char]0x05D9,[char]0x05DF,[char]0x20,[char]0x05D4,[char]0x05D6,[char]0x05DE,[char]0x05E0,[char]0x05D9,[char]0x05DD); Get-Process | Where-Object { $_.ProcessName -eq $n -or $_.ProcessName -like ('Uninstall ' + $n) -or $_.Path -like '*ben-hazmanim*' -or $_.Path -like '*BenHazmanim*' } | Stop-Process -Force -ErrorAction SilentlyContinue"
-exit /b
+taskkill /F /T /IM "בין הזמנים.exe" >nul 2>&1
+taskkill /F /T /IM "Uninstall בין הזמנים.exe" >nul 2>&1
+taskkill /F /T /IM "ben-hazmanim.exe" >nul 2>&1
+exit /b 0
 
 :delete_appdata
-REM Delete the app's data dirs (Hebrew name via char codes) for the current
-REM user and, best-effort, for every user profile on the machine.
-powershell -NoProfile -Command "$h = -join ([char]0x05D1,[char]0x05D9,[char]0x05DF,[char]0x20,[char]0x05D4,[char]0x05D6,[char]0x05DE,[char]0x05E0,[char]0x05D9,[char]0x05DD,[char]0x20,[char]0x2D,[char]0x20,[char]0x05E0,[char]0x05D9,[char]0x05D4,[char]0x05D5,[char]0x05DC,[char]0x20,[char]0x05D6,[char]0x05DE,[char]0x05DF,[char]0x20,[char]0x05DE,[char]0x05D7,[char]0x05E9,[char]0x05D1); $t = @(); $t += Join-Path ([Environment]::GetFolderPath('ApplicationData')) $h; $t += Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'BenHazmanim'; Get-ChildItem 'C:\Users' -Directory -ErrorAction SilentlyContinue | ForEach-Object { $p = Join-Path (Join-Path $_.FullName 'AppData\Roaming') $h; if (Test-Path $p) { $t += $p } }; try { $j = Get-Content (Join-Path $env:PROGRAMDATA 'BenHazmanim\install.json') -Raw -ErrorAction Stop | ConvertFrom-Json; if ($j.dir -and (Test-Path $j.dir)) { $t += $j.dir } } catch { }; foreach ($p in $t) { Remove-Item $p -Recurse -Force -ErrorAction SilentlyContinue }; Start-Sleep -Milliseconds 600; foreach ($p in $t) { if (Test-Path $p) { Remove-Item $p -Recurse -Force -ErrorAction SilentlyContinue } }"
-exit /b
+for /d %%u in ("%~1\Users\*") do (
+  rmdir /S /Q "%%u\AppData\Roaming\BenHazmanim" >nul 2>&1
+  rmdir /S /Q "%%u\AppData\Local\Programs\ben-hazmanim" >nul 2>&1
+  rmdir /S /Q "%%u\AppData\Roaming\בין הזמנים" >nul 2>&1
+  rmdir /S /Q "%%u\AppData\Roaming\בין הזמנים - ניהול זמן מחשב" >nul 2>&1
+)
+exit /b 0
 
-:queue_reboot_delete
-REM Register remaining folders for deletion at next boot (PendingFileRenameOperations).
-REM This handles files whose ACLs were corrupted by the app while it was running
-REM (rare but possible) - the boot-time cleanup uses SYSTEM privileges.
-powershell -NoProfile -Command "$key='HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager'; $prop='PendingFileRenameOperations'; $list=New-Object System.Collections.Generic.List[string]; try { $cur=(Get-ItemProperty -Path $key -Name $prop -ErrorAction SilentlyContinue).$prop; if ($cur) { foreach ($c in $cur) { $list.Add([string]$c) } } } catch {}; foreach ($d in @('C:\Program Files\ben-hazmanim','C:\Program Files (x86)\ben-hazmanim',(Join-Path $env:PROGRAMDATA 'BenHazmanim'))) { if (Test-Path $d) { $list.Add('\??\' + $d); $list.Add('') } }; if ($list.Count -gt 0) { Set-ItemProperty -Path $key -Name $prop -Value $list.ToArray() -Type MultiString }"
-echo   Remaining files will be removed automatically at the next reboot.
-exit /b
+:remaining
+set "LEFT=0"
+for %%p in ("%~1\Program Files\ben-hazmanim" "%~1\Program Files (x86)\ben-hazmanim" "%~1\ProgramData\BenHazmanim") do (
+  if exist "%%~p" (
+    echo   STILL PRESENT: %%~p
+    set /a LEFT+=1
+  )
+)
+exit /b 0
 
-:verify
-powershell -NoProfile -Command "$n = -join ([char]0x05D1,[char]0x05D9,[char]0x05DF,[char]0x20,[char]0x05D4,[char]0x05D6,[char]0x05DE,[char]0x05E0,[char]0x05D9,[char]0x05DD); $bad = 0; if (Test-Path 'C:\Program Files\ben-hazmanim') { echo 'STILL PRESENT: C:\Program Files\ben-hazmanim'; $bad++ }; if (Test-Path 'C:\Program Files (x86)\ben-hazmanim') { echo 'STILL PRESENT: C:\Program Files (x86)\ben-hazmanim'; $bad++ }; if (Test-Path (Join-Path $env:PROGRAMDATA 'BenHazmanim')) { echo 'STILL PRESENT: ProgramData\BenHazmanim'; $bad++ }; if (Get-Process -Name $n -ErrorAction SilentlyContinue) { echo 'STILL RUNNING: app process'; $bad++ }; if ($bad -eq 0) { echo 'SUCCESS: BenHazmanim fully removed.' } else { echo 'NOTICE: some items remain (see above).' }"
-exit /b
+:sleep
+ping -n %~1 127.0.0.1 >nul 2>&1
+exit /b 0

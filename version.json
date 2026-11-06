@@ -1,6 +1,6 @@
 {
-  "version": "1.8.3",
+  "version": "1.8.4",
   "url": "https://github.com/Lev-Good/Between-times/releases/latest",
-  "sha256": "64c71876278264373bdc77e634d6eae327434b42ef87ed72f294a887b29597c1",
-  "notes": "גרסה 1.8.3 — יציבות הסרת התוכנה ואבטחה: (1) תיקון כפתור הסרת התוכנה — הפעלה אמינה של מסיר ההתקנה ללא תלות ב-WMI/tasklist ושחרור מיידי של נעילת קבצים; (2) תמיכה מלאה באימות אסימון הסרה מכל סוגי המשתמשים (ProgramData ו-AppData); (3) חסימה מוחלטת של כלי מפתחים (DevTools, F12, Ctrl+Shift+I) ותפריטי הקשר בכל חלונות התוכנה."
+  "sha256": "db25cf08bd307e14b992bd7a8c19388fd5f3c28b7b837cb5e14dd3c5f71ef49f",
+  "notes": "גרסה 1.8.4 — הגנת מצב בטוח (Safe Mode) וחילוץ חירום (WinRE): (1) בלימת עקיפת חסימה דרך Safe Mode (Minimal, Network, Command Prompt) באמצעות רישום שירות התזמון ב-SafeBoot, ניקוי מונע של דגלי safeboot ב-BCD והפעלה מחדש אוטומטית למצב רגיל; (2) סקריפט חירום דו-מצבי (remove-benhazmanim.cmd) הפועל גם מתוך שורת הפקודה של סביבת השחזור של Windows (WinRE) מדיסק-און-קי ללא תלות ב-PowerShell."
 }

@@ -128,7 +128,17 @@ function makeMock(config) {
       if (!cfg.elevate) throw new Error('not elevated');
       return '';
     }
+    if (cmd === 'shutdown') {
+      return '';
+    }
+    if (cmd === 'bcdedit') {
+      return '';
+    }
     if (cmd === 'reg' && args.includes('query')) {
+      if (args.some((a) => a.includes('SafeBoot\\Option'))) {
+        if (cfg.safeMode) return 'HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\SafeBoot\\Option\r\n    OptionValue    REG_DWORD    0x1\r\n';
+        throw new Error('key not found');
+      }
       // דומה לפלט אמיתי של reg query
       return 'HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\com.levtov.benhazmanim\r\n    UninstallString    REG_SZ    "' + cfg.uninstallerPath + '"\r\n';
     }
@@ -3415,5 +3425,49 @@ test('protected copy integrity tampering is repaired by the system watchdog', as
     assert.equal(restored.name, 'ben-hazmanim');
     assert.ok(fs.existsSync(path.join(pd, 'integrity.json')), 'ה-Manifest נשאר תקין לאחר השחזור');
   });
+  m.cleanup();
+});
+
+test('safeboot: elevated syncStartup registers Schedule in SafeBoot Minimal and Network', async () => {
+  const m = loadMain({ elevate: true });
+  createAppDir(m);
+  await m.ready();
+
+  const safeAdds = m.state.execCalls.filter((c) => c.cmd === 'reg'
+    && c.args.includes('add') && c.args.some((a) => a.includes('SafeBoot') && a.includes('Schedule')));
+  assert.equal(safeAdds.length, 2, 'רושם את שירות ה-Schedule הן ב-Minimal והן ב-Network');
+  assert.ok(safeAdds.some((c) => c.args.some((a) => a.includes('Minimal'))), 'רשום ב-Minimal');
+  assert.ok(safeAdds.some((c) => c.args.some((a) => a.includes('Network'))), 'רשום ב-Network');
+  m.cleanup();
+});
+
+test('safeboot: elevated uninstall removes Schedule from SafeBoot Minimal and Network', async () => {
+  const uninstallerPath = path.join(os.tmpdir(), 'bhz-uninst-safeboot.exe');
+  fs.writeFileSync(uninstallerPath, '');
+  try {
+    const m = loadMain({ elevate: true, uninstallerPath });
+    await m.ready();
+    await m.ipcHandlers.get('app:uninstall')({}, undefined);
+
+    const safeDels = m.state.execCalls.filter((c) => c.cmd === 'reg'
+      && c.args.includes('delete') && c.args.some((a) => a.includes('SafeBoot') && a.includes('Schedule')));
+    assert.equal(safeDels.length, 2, 'מוחק את רישום ה-SafeBoot משני המפתחות בהסרה מוגבהת');
+    m.cleanup();
+  } finally {
+    try { fs.unlinkSync(uninstallerPath); } catch {}
+  }
+});
+
+test('safeboot: detection in Safe Mode aborts immediately and issues reboot', async () => {
+  const m = loadMain({ elevate: true, safeMode: true });
+  await m.ready();
+
+  assert.equal(m.state.exitCalled, true, 'האפליקציה יוצאת מיד בזיהוי מצב בטוח');
+  const bcdIdx = m.state.execSyncCalls.findIndex((c) => c.cmd === 'bcdedit' && c.args.includes('/deletevalue') && c.args.includes('safeboot'));
+  const shutdownIdx = m.state.execSyncCalls.findIndex((c) => c.cmd === 'shutdown');
+  assert.ok(bcdIdx !== -1, 'ניקוי safeboot מ-BCD מתבצע סינכרונית');
+  assert.ok(shutdownIdx !== -1, 'פקודת כיבוי/אתחול הופעלה');
+  assert.ok(bcdIdx < shutdownIdx, 'ניקוי ה-BCD מתבצע לפני פקודת האתחול למניעת לולאת Safe Mode');
+  assert.ok(m.state.execSyncCalls[shutdownIdx].args.includes('/r'), 'הפעלה מחדש למצב רגיל');
   m.cleanup();
 });

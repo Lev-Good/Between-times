@@ -2470,6 +2470,72 @@ const TASK_NAME = 'BenHazmanim';
 // משימה של שומר-השער המערכתי — רצה כ-SYSTEM מתוך העותק המוגן.
 const GUARD_TASK_NAME = 'BenHazmanimGuard';
 
+const SAFEBOOT_KEYS = [
+  'HKLM\\SYSTEM\\CurrentControlSet\\Control\\SafeBoot\\Minimal\\Schedule',
+  'HKLM\\SYSTEM\\CurrentControlSet\\Control\\SafeBoot\\Network\\Schedule'
+];
+
+function isSafeModeBoot() {
+  if (!isWin) return false;
+  try {
+    const out = execFileSync('reg', ['query', 'HKLM\\SYSTEM\\CurrentControlSet\\Control\\SafeBoot\\Option', '/v', 'OptionValue'], { encoding: 'utf8', windowsHide: true });
+    return /OptionValue/i.test(out);
+  } catch {
+    return false;
+  }
+}
+
+// מחיקת דגל safeboot מה-BCD (למשל אחרי סימון "Safe boot" ב-msconfig).
+// sync=true משמש לפני אתחול כפוי — חובה שהמחיקה תסתיים לפני ה-reboot,
+// אחרת המחשב יעלה שוב ל-Safe Mode וייכנס ללולאת אתחול.
+function clearBcdSafeBoot(sync = false) {
+  if (!isWin || !isElevated()) return; // bcdedit דורש מנהל — בלי זה רק מבזבזים תהליכים
+  const args = ['/deletevalue', '{current}', 'safeboot'];
+  if (sync) {
+    try { execFileSync('bcdedit', args, { windowsHide: true, stdio: 'ignore', timeout: 10000 }); } catch { /* הערך לא קיים */ }
+  } else {
+    execFile('bcdedit', args, { windowsHide: true, timeout: 10000 }, () => {});
+  }
+}
+
+// שמירה תקופתית (מצערת): שחזור רישום Schedule ב-SafeBoot אם נמחק,
+// וניקוי דגל safeboot מה-BCD. רץ רק בשומר המערכתי, לא בכל מחזור של 5 שניות.
+const SAFEBOOT_GUARD_INTERVAL_MS = 30000;
+let lastSafeBootGuard = 0;
+function safeBootGuardTick() {
+  if (Date.now() - lastSafeBootGuard < SAFEBOOT_GUARD_INTERVAL_MS) return;
+  lastSafeBootGuard = Date.now();
+  clearBcdSafeBoot();
+  registerSafeBootSchedule();
+}
+
+function registerSafeBootSchedule() {
+  if (!isWin || !isElevated()) return;
+  for (const k of SAFEBOOT_KEYS) {
+    execFile('reg', ['add', k, '/ve', '/t', 'REG_SZ', '/d', 'Service', '/f'], { windowsHide: true }, () => {});
+  }
+}
+
+function unregisterSafeBootSchedule() {
+  if (!isWin || !isElevated()) return;
+  for (const k of SAFEBOOT_KEYS) {
+    execFile('reg', ['delete', k, '/f'], { windowsHide: true }, () => {});
+  }
+}
+
+function abortSafeModeIfActive() {
+  if (!isSafeModeBoot()) return false;
+  try { logEvent('safeboot-evasion-blocked'); } catch {}
+  clearBcdSafeBoot(true);
+  try {
+    execFileSync('shutdown', ['/r', '/f', '/t', '2', '/c', 'השימוש במחשב במצב בטוח חסום על ידי בין הזמנים. המחשב יופעל מחדש כעת.'], { windowsHide: true });
+  } catch {
+    try { execFileSync('shutdown', ['/r', '/f', '/t', '0'], { windowsHide: true }); } catch {}
+  }
+  app.exit(0);
+  return true;
+}
+
 function startupValue() {
   const exe = process.execPath;
   const dir = app.getAppPath();
@@ -3067,6 +3133,7 @@ async function syncStartup() {
   if (isElevated()) {
     const m = await setRegistryMachine();
     if (!m.ok) warnings.push('רישום לכל המשתמשים נכשל: ' + m.error);
+    registerSafeBootSchedule();
   }
   // שומר-שער מערכתי — משימה בעת אתחול (כ-SYSTEM, מתוך העותק המוגן).
   // הקפצה מיידית שלו אחרי עדכון/התקנה, כדי שיחזור לפעול מיד ולא רק באתחול.
@@ -3238,6 +3305,7 @@ function removeStartupEntries() {
       execFile('schtasks', ['/Delete', '/TN', TASK_NAME, '/F'], () => {
         execFile('schtasks', ['/Delete', '/TN', GUARD_TASK_NAME, '/F'], () => {
           if (!isElevated()) return resolve();
+          unregisterSafeBootSchedule();
           // רישומים ברמת כל המשתמשים — זמינים רק עם הרשאות מנהל
           execFile('reg', ['delete', RUN_KEY_MACHINE, '/v', RUN_NAME, '/f'], resolve);
         });
@@ -5417,6 +5485,7 @@ function spawnWatchdog() {
 
 let lastMainSpawn = 0;
 async function runWatchdog() {
+  if (abortSafeModeIfActive()) return;
   // מניעת שומרים כפולים: אם כבר רץ שומר חי אחר (לא אני) — לחכות שייסגר
   // (במסירת הרשאות מוגבהת השומר הישן נסגר תוך פחות משנייה) ורק אז להמשיך.
   const existing = readHeartbeat(watchHbFile());
@@ -5719,6 +5788,7 @@ function ensureGuardTasks() {
 }
 
 async function runSystemWatchdog() {
+  if (abortSafeModeIfActive()) return;
   // שומר-שער מערכתי: ללא חלונות וללא מגש — רק שחזור קבצים ומשימות
   writeHeartbeat(guardHbFile());
   let checking = false;
@@ -5729,6 +5799,7 @@ async function runSystemWatchdog() {
       if (guardShouldExit()) { app.exit(0); return; }
       fs.mkdirSync(machineDir(), { recursive: true });
       writeHeartbeat(guardHbFile());
+      safeBootGuardTick();
       // קודם משחזרים את העותק שממנו השומר עצמו יכול להמשיך לעבוד,
       // ורק אחר כך את ההתקנה/ההגדרות התלויות בו.
       await restoreProtectedCopy();
@@ -5847,6 +5918,7 @@ async function gracefulQuit() {
 
     app.whenReady().then(async () => {
       if (isWin) app.setAppUserModelId('com.levtov.benhazmanim');
+      if (abortSafeModeIfActive()) return;
 
       // הופעלנו בזמן שהמתקין מחליף את קבצי התוכנה (המשתמש לחץ על הסמל, או
       // השומר הקיץ אותנו). עלייה כזו נועלת את בין הזמנים.exe ואת app.asar

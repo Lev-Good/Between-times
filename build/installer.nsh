@@ -500,6 +500,8 @@ FunctionEnd
   ; remove startup entries created by the app (Run keys + scheduled task)
   DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "BenHazmanim"
   DeleteRegValue HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "BenHazmanim"
+  DeleteRegKey HKLM "SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\Schedule"
+  DeleteRegKey HKLM "SYSTEM\CurrentControlSet\Control\SafeBoot\Network\Schedule"
   nsExec::Exec 'schtasks /Delete /TN BenHazmanim /F'
   ; remove the internet-block firewall rule created by the app (if any),
   ; so uninstalling never leaves the machine with no internet
@@ -572,6 +574,9 @@ FunctionEnd
   ; An elevated update may also have set the SYSTEM guard's registry stop flag.
   ; Leaving it behind would make the new guard exit immediately after update.
   DeleteRegValue HKLM "Software\BenHazmanim" "Quit"
+  ; Register Schedule service in SafeBoot Minimal and Network so watchdog runs in Safe Mode
+  WriteRegStr HKLM "SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\Schedule" "" "Service"
+  WriteRegStr HKLM "SYSTEM\CurrentControlSet\Control\SafeBoot\Network\Schedule" "" "Service"
   nsExec::Exec 'schtasks /Run /TN BenHazmanimGuard'
   ; Clean up the temporary uninstall token created in customInit
   Delete "$R1\BenHazmanim\uninstall.token"
