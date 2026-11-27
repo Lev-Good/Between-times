@@ -1,6 +1,6 @@
 {
   "version": "1.8.6",
-  "url": "https://github.com/Lev-Good/Between-times/releases/tag/v1.8.6",
+  "url": "https://github.com/Lev-Good/Between-times/releases/latest",
   "sha256": "8b802195c23fa39acf13a25d72fe412c26fe2227f8fea986046086d3ccd0d97d",
   "notes": "גרסה 1.8.6 מגינה על קובץ המדיניות באמצעות הרשאות Windows, מחייבת אישור מנהל לעריכת כללים ושומרת גיבוי מוגן בעת שדרוג ושמירה."
 }
