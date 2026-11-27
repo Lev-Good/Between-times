@@ -1,6 +1,6 @@
 {
-  "version": "1.8.4",
-  "url": "https://github.com/Lev-Good/Between-times/releases/latest",
-  "sha256": "db25cf08bd307e14b992bd7a8c19388fd5f3c28b7b837cb5e14dd3c5f71ef49f",
-  "notes": "גרסה 1.8.4 — הגנת מצב בטוח (Safe Mode) וחילוץ חירום (WinRE): (1) בלימת עקיפת חסימה דרך Safe Mode (Minimal, Network, Command Prompt) באמצעות רישום שירות התזמון ב-SafeBoot, ניקוי מונע של דגלי safeboot ב-BCD והפעלה מחדש אוטומטית למצב רגיל; (2) סקריפט חירום דו-מצבי (remove-benhazmanim.cmd) הפועל גם מתוך שורת הפקודה של סביבת השחזור של Windows (WinRE) מדיסק-און-קי ללא תלות ב-PowerShell."
+  "version": "1.8.6",
+  "url": "https://github.com/Lev-Good/Between-times/releases/tag/v1.8.6",
+  "sha256": "8b802195c23fa39acf13a25d72fe412c26fe2227f8fea986046086d3ccd0d97d",
+  "notes": "גרסה 1.8.6 מגינה על קובץ המדיניות באמצעות הרשאות Windows, מחייבת אישור מנהל לעריכת כללים ושומרת גיבוי מוגן בעת שדרוג ושמירה."
 }
