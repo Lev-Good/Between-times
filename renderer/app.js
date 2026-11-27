@@ -88,6 +88,33 @@ function lockLocalSession() {
   applyLoginState();
 }
 
+let policyReadOnly = false;
+let policyEditor = false;
+
+function applyPolicyPermissions(data) {
+  policyReadOnly = !!(data && data.policyReadOnly);
+  policyEditor = !!(data && data.policyEditor);
+  $('policyReadOnlyBanner').classList.toggle('hidden', !policyReadOnly);
+  $('policyEditorBanner').classList.toggle('hidden', !policyEditor);
+  for (const id of ['lockNowBtn', 'unlockBtn', 'backupExportBtn', 'checkUpdateBtn']) $(id).classList.toggle('hidden', policyEditor);
+}
+
+async function openAdminPolicyEditor() {
+  if (!API || !API.openPolicyEditor) return;
+  const button = $('policyEditBtn');
+  if (button.disabled) return;
+  button.disabled = true;
+  try {
+    const res = await API.openPolicyEditor();
+    if (!res || !res.ok) toast((res && res.error) || 'חלון העריכה לא נפתח', 'error');
+    else await restoreScheduleFromServer();
+  } catch {
+    toast('חלון העריכה לא נפתח', 'error');
+  } finally {
+    button.disabled = false;
+  }
+}
+
 /* ---------- PIN ---------- */
 function pinRequired() {
   return !!(hasPin() && sessionUnlocked && Date.now() - pinVerifiedAt > PIN_SESSION_MS);
@@ -167,11 +194,16 @@ async function restoreScheduleFromServer() {
       const data = await API.getSettings();
       schedule = T.normalizeSchedule(data);
       schedule.pinSet = !!(data && data.pinSet);
+      applyPolicyPermissions(data);
+      if (policyReadOnly) {
+        sessionUnlocked = !!data.sessionUnlocked;
+        applyLoginState();
+      }
     } catch { /* ignore */ }
   } else {
     try {
       const raw = localStorage.getItem('ben-hazmanim-settings');
-      if (raw) schedule = T.normalizeSchedule(JSON.parse(raw));
+      schedule = raw ? T.normalizeSchedule(JSON.parse(raw)) : T.defaultSchedule();
     } catch { /* ignore */ }
   }
   renderWeek();
@@ -180,6 +212,11 @@ async function restoreScheduleFromServer() {
 }
 
 async function persist() {
+  if (policyReadOnly) {
+    await restoreScheduleFromServer();
+    toast('לשמירת השינוי פתחו את חלון עריכת הכללים כמנהל', 'error');
+    return false;
+  }
   // הגנה מפני נעילה פתאומית בזמן הגדרה: אם הלוח החדש חוסם את המחשב (או את
   // האינטרנט) בשעה הנוכחית — השמירה תפעיל את החסימה מיד, בעוד המשתמש באמצע
   // ההגדרה, וזה נראה כמו "קריסה" (מסך חסימה כהה שקופץ שוב ושוב). לכן מבקשים
@@ -213,7 +250,9 @@ async function persist() {
         toast('שולח קוד אישור לשותף האחריות…');
         const sent = await API.requestUnlockApproval('settings-change');
         if (!sent || !sent.ok) throw new Error((sent && sent.error) || 'שליחת קוד האישור נכשלה');
-        const code = window.prompt('הזינו את קוד האישור שקיבל שותף האחריות:');
+        const [code] = await requestInput('אישור שותף אחריות', [
+          { label: 'הקוד שקיבל שותף האחריות במייל', autocomplete: 'one-time-code' }
+        ]) || [];
         if (!code) throw new Error('השינוי בוטל — נדרש אישור שותף');
         res = await API.saveSettings(schedule, code.trim());
       }
@@ -223,6 +262,7 @@ async function persist() {
       localStorage.setItem('ben-hazmanim-settings', JSON.stringify(schedule));
     }
     flashSaved();
+    refreshStatus();
     return true;
   } catch (e) {
     toast('שגיאה בשמירה: ' + e.message, 'error');
@@ -231,6 +271,7 @@ async function persist() {
     if (API) {
       API.getSession().then((s) => { if (s && !s.unlocked) lockLocalSession(); }).catch(() => {});
     }
+    await restoreScheduleFromServer();
     return false;
   }
 }
@@ -244,20 +285,20 @@ function flashSaved() {
 /* ---------- חלונות חופפים (בדיקה תצוגה בלבד) ----------
    החלטה בלוח היא "הראשון שמתאים זוכה" — חלונות חופפים עלולים לבלבל,
    אז מסמנים אותם באדום עם הסבר. */
-function slotSegments(slot) {
-  if (slot.end > slot.start) return [[slot.start, slot.end]];
-  return [[slot.start, 1440], [0, slot.end]]; // חוצה חצות = שני קטעים
+function slotEndToday(slot) {
+  return slot.end < slot.start ? 1440 : slot.end;
 }
-function segmentsOverlap(a, b) { return a[0] < b[1] && b[0] < a[1]; }
-function overlappingIndexes(day) {
+function overnightSlotsBefore(day) {
+  return schedule.week[(day.day + 6) % 7].slots.filter((slot) => slot.start > slot.end && slot.end > 0);
+}
+function overlappingIndexes(day, carryovers) {
   const idx = new Set();
   for (let i = 0; i < day.slots.length; i++) {
+    const a = day.slots[i];
+    if (carryovers.some((slot) => a.start < slot.end)) idx.add(i);
     for (let j = i + 1; j < day.slots.length; j++) {
-      for (const a of slotSegments(day.slots[i])) {
-        for (const b of slotSegments(day.slots[j])) {
-          if (segmentsOverlap(a, b)) { idx.add(i); idx.add(j); }
-        }
-      }
+      const b = day.slots[j];
+      if (a.start < slotEndToday(b) && b.start < slotEndToday(a)) { idx.add(i); idx.add(j); }
     }
   }
   return idx;
@@ -291,7 +332,7 @@ function svgEl(name, attrs) {
   return el;
 }
 
-function renderClock(day, now, todayIdx) {
+function renderClock(day, now, todayIdx, carryovers) {
   const svg = svgEl('svg', {
     viewBox: '0 0 100 100',
     class: 'day-clock',
@@ -315,14 +356,12 @@ function renderClock(day, now, todayIdx) {
   }
 
   // קשתות החלונות (חסום = אדום, מותר = ירוק)
-  day.slots.forEach((slot) => {
-    const segs = slot.end <= slot.start
-      ? [[slot.start, 1440], [0, slot.end]]
-      : [[slot.start, slot.end]];
-    segs.forEach(([f, t]) => {
-      svg.appendChild(svgEl('path', { d: arcPath(cx, cy, 37, f, t), class: 'clock-seg ' + slot.type }));
-    });
-  });
+  const drawSlot = (start, end, type) => {
+    svg.appendChild(svgEl('path', { d: arcPath(cx, cy, 37, start, end), class: 'clock-seg ' + type }));
+  };
+  // Draw lower-priority windows first so the visible color follows the schedule.
+  carryovers.slice().reverse().forEach((slot) => drawSlot(0, slot.end, slot.type));
+  day.slots.slice().reverse().forEach((slot) => drawSlot(slot.start, slotEndToday(slot), slot.type));
 
   // מחוג "עכשיו" ליום הנוכחי — קצר מהשעות המודפסות כדי לא לכסות אותן
   if (day.day === todayIdx) {
@@ -361,7 +400,8 @@ function renderWeek() {
   schedule.week.forEach((day) => {
     const card = document.createElement('div');
     card.className = 'day-card' + (day.day === todayIdx ? ' today' : '');
-    const overlapIdx = overlappingIndexes(day);
+    const carryovers = overnightSlotsBefore(day);
+    const overlapIdx = overlappingIndexes(day, carryovers);
 
     const head = document.createElement('div');
     head.className = 'day-head';
@@ -384,7 +424,7 @@ function renderWeek() {
       card.appendChild(warn);
     }
 
-    card.appendChild(renderClock(day, now, todayIdx));
+    card.appendChild(renderClock(day, now, todayIdx, carryovers));
 
     const list = document.createElement('div');
     list.className = 'slot-list';
@@ -395,7 +435,7 @@ function renderWeek() {
     // כדי שלא יהיה בלבול בין "פתוח תמיד" ל"חסום תמיד".
     // הניסוח "כברירת מחדל" מדויק גם כשיש חריג חד-פעמי לאותו תאריך
     // או חלון שחוצה חצות מהיום הקודם — אז בפועל היום יכול להיות חסום.
-    if (day.slots.length === 0) {
+    if (day.slots.length === 0 && carryovers.length === 0) {
       const note = document.createElement('div');
       const open = schedule.mode !== 'allowlist';
       note.className = 'day-empty-note ' + (open ? 'open' : 'blocked');
@@ -637,7 +677,7 @@ function applyStatus(st) {
   status = st;
   const card = $('statusCard');
   const blocked = st.state === 'blocked' || !!st.manualLock;
-  const netFailed = st.state === 'netblock' && !st.manualLock && st.netBlockFailed === true;
+  const netFailed = !blocked && st.netBlockFailed === true;
   const netblocked = st.state === 'netblock' && !st.manualLock && !netFailed;
   card.classList.toggle('blocked', blocked);
   card.classList.toggle('netblock', netblocked || netFailed);
@@ -670,7 +710,7 @@ function applyStatus(st) {
   $('statusTitle').textContent = blocked
     ? (st.manualLock ? 'המחשב חסום (נעילה ידנית)' : (noPin ? 'החסימה אינה פעילה — אין סיסמה' : st.limitReached ? 'נגמר זמן השימוש היומי' : 'המחשב חסום בשעה זו'))
     : netFailed
-      ? 'חסימת האינטרנט לא הופעלה בפועל'
+      ? (st.state === 'netblock' ? 'חסימת האינטרנט לא הופעלה בפועל' : 'לא ניתן לאמת שחסימת האינטרנט הוסרה')
       : netblocked
         ? (noPin ? 'חסימת האינטרנט אינה פעילה — אין סיסמה' : 'המחשב פתוח — האינטרנט חסום')
         : st.enabled === false
@@ -1551,7 +1591,7 @@ function renderWebsiteApps() {
     addUrlBtn.textContent = 'הוסף כתובת';
     addUrlBtn.onclick = async () => {
       if (!(await verifyPinSession())) return;
-      const raw = window.prompt('כתובת נוספת מותרת לאתר זה:');
+      const [raw] = await requestInput('הוספת כתובת', [{ label: 'כתובת נוספת לאתר' }]) || [];
       if (!raw) return;
       const nu = T.normalizeUrl ? T.normalizeUrl(raw) : raw;
       if (!nu) { toast('כתובת לא תקינה', 'error'); return; }
@@ -1776,12 +1816,20 @@ async function renderSecurity() {
 function init() {
   initTabs();
   initSettingsSubtabs();
+  $('policyEditBtn').onclick = openAdminPolicyEditor;
+  $('policyQuitBtn').onclick = async () => {
+    const pin = hasPin() ? await promptPin() : '';
+    if (pin === null) return;
+    const result = await API.quitApp(pin);
+    if (!result || !result.ok) toast((result && result.error) || 'היציאה נכשלה', 'error');
+  };
   const load = async () => {
     if (API) {
       const data = await API.getSettings();
       schedule = T.normalizeSchedule(data);
       schedule.pinSet = !!(data && data.pinSet);
       sessionUnlocked = !!(data && data.sessionUnlocked);
+      applyPolicyPermissions(data);
     } else {
       try {
         const raw = localStorage.getItem('ben-hazmanim-settings');
@@ -1802,6 +1850,7 @@ function init() {
       API.onUpdate(showUpdateBanner);
       if (API.onUpdateProgress) API.onUpdateProgress(onUpdateProgress);
       if (API.onSessionLock) API.onSessionLock(lockLocalSession);
+      if (API.onPolicyChanged) API.onPolicyChanged(() => restoreScheduleFromServer());
       if (API.onNetblockError) API.onNetblockError((msg) => toast(msg, 'error'));
     }
   };
@@ -1838,13 +1887,12 @@ function init() {
   $('loginInput').onkeydown = (e) => { if (e.key === 'Enter') doLogin(); };
   $('loginForgot').onclick = async () => {
     if (!API) { toast('שחזור זמין רק בגרסת המחשב המלאה'); return; }
+    if (policyReadOnly) { await openAdminPolicyEditor(); return; }
     const sent = await API.sendRecovery();
     if (!sent || !sent.ok) { toast((sent && sent.error) || 'שליחה נכשלה', 'error'); return; }
-    const code = window.prompt('קוד השחזור שנשלח למייל:');
-    if (!code) return;
-    const nextPin = window.prompt('סיסמה חדשה (4–20 תווים ללא רווחים):');
-    const confirm = window.prompt('אימות הסיסמה החדשה:');
-    if (!nextPin || nextPin !== confirm) { toast('הסיסמאות אינן תואמות', 'error'); return; }
+    const details = await requestRecoveryDetails();
+    if (!details) return;
+    const [code, nextPin] = details;
     const res = await API.completeRecovery(code.trim(), nextPin);
     if (res && res.ok) {
       sessionUnlocked = true;
@@ -1916,9 +1964,7 @@ function init() {
     disarmClearAll();
     schedule.week.forEach((d) => { d.slots = []; });
     renderWeek();
-    persist();
-    refreshStatus(); // עדכון מיידי של הספירה לאחור לפי הלוח החדש
-    toast('כל חלונות הזמן נמחקו — אפשר להתחיל להגדיר מחדש', 'success');
+    if (await persist()) toast('כל חלונות הזמן נמחקו — אפשר להתחיל להגדיר מחדש', 'success');
   };
 
   /* ---------- ערכת נושא ---------- */
@@ -2045,11 +2091,12 @@ function init() {
   /* ---------- שחזור ועדכונים ---------- */
   const saveSecurity = async (silent) => {
     // אימות סיסמה לפני שינוי המצב — כדי לא להשאיר ערכים לא שמורים בממשק
-    if (!(await verifyPinSession())) { applySettingsToUI(); return; }
+    if (!(await verifyPinSession())) { applySettingsToUI(); return false; }
     schedule.recoveryEmail = $('recoveryEmail').value.trim();
     if ($('accountabilityEmail')) schedule.accountabilityEmail = $('accountabilityEmail').value.trim();
-    await persist();
-    if (!silent) toast('הגדרות האבטחה נשמרו', 'success');
+    const saved = await persist();
+    if (saved && !silent) toast('הגדרות האבטחה נשמרו', 'success');
+    return saved;
   };
   ['recoveryEmail', 'accountabilityEmail'].forEach((id) => {
     if ($(id)) $(id).addEventListener('change', () => saveSecurity(false));
@@ -2182,7 +2229,7 @@ function init() {
       $('dailyLimitMinutes').value = schedule.dailyLimit.minutes;
       updateDailyLimitUI();
       const saved = await persist();
-      if (!saved) { await restoreScheduleFromServer(); return; }
+      if (!saved) return;
       refreshStatus();
       toast(desired ? 'מכסת זמן שימוש יומית הופעלה' : 'מכסת זמן שימוש יומית כובתה', 'success');
     };
@@ -2200,7 +2247,7 @@ function init() {
       if ($('dailyLimitToggle')) $('dailyLimitToggle').checked = schedule.dailyLimit.enabled === true;
       updateDailyLimitUI();
       const saved = await persist();
-      if (!saved) { await restoreScheduleFromServer(); return; }
+      if (!saved) return;
       refreshStatus();
       updateDailyLimitUI();
       toast('מכסת הזמן היומית נשמרה: ' + minutes + ' דקות ביום', 'success');
@@ -2300,18 +2347,17 @@ function init() {
   $('testRecoveryBtn').onclick = async () => {
     if (!API) { toast('שליחה זמינה רק בגרסת המחשב המלאה'); return; }
     if (!(await verifyPinSession())) return;
-    await saveSecurity(true);
-    toast('שולח את הסיסמה למייל…');
+    if (!(await saveSecurity(true))) return;
+    toast('שולח קוד שחזור למייל…');
     const sent = await API.sendRecovery();
     if (sent && sent.ok) {
-      const code = window.prompt('קוד השחזור שנשלח למייל:');
-      const nextPin = code && window.prompt('סיסמה חדשה (4–20 תווים ללא רווחים):');
-      const confirm = nextPin && window.prompt('אימות הסיסמה החדשה:');
-      if (code && nextPin && nextPin === confirm) {
+      const details = await requestRecoveryDetails();
+      if (details) {
+        const [code, nextPin] = details;
         const res = await API.completeRecovery(code.trim(), nextPin);
         if (res && res.ok) toast('הסיסמה שוחזרה בהצלחה', 'success');
         else toast((res && res.error) || 'שחזור נכשל', 'error');
-      } else if (code) toast('הסיסמאות אינן תואמות', 'error');
+      }
     } else {
       toast((sent && sent.error) || 'שליחה נכשלה', 'error');
     }
@@ -2337,8 +2383,7 @@ function init() {
   $('blockMessage').addEventListener('change', async () => {
     if (!(await verifyPinSession())) { $('blockMessage').value = schedule.blockMessage || ''; return; }
     schedule.blockMessage = $('blockMessage').value.trim();
-    await persist();
-    toast('הודעת מסך החסימה נשמרה', 'success');
+    if (await persist()) toast('הודעת מסך החסימה נשמרה', 'success');
   });
 
   /* ---------- חריגים חד-פעמיים ---------- */
@@ -2346,8 +2391,10 @@ function init() {
     if (!(await verifyPinSession())) { renderOverrides(); return; }
     setOverride(date, type);
     renderOverrides();
-    await persist();
-    toast('החריג נשמר — ' + (type === 'block' ? 'חסום' : 'מותר') + ' כל היום', 'success');
+    if (await persist()) {
+      const label = { block: 'המחשב חסום', netblock: 'האינטרנט חסום', allow: 'המחשב פתוח' };
+      toast('החריג נשמר — ' + label[type] + ' כל היום', 'success');
+    }
   };
   $('addOverrideBtn').onclick = async () => {
     const date = $('overrideDate').value;
@@ -2387,6 +2434,7 @@ function init() {
 
   /* ---------- הסרת התוכנה ---------- */
   $('uninstallBtn').onclick = () => {
+    if (policyReadOnly) { openAdminPolicyEditor(); return; }
     if (!API) { toast('הסרה זמינה רק בגרסת המחשב המלאה'); return; }
     $('uninstallModal').classList.remove('hidden');
     $('uninstallInput').value = '';

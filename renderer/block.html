@@ -962,6 +962,7 @@
   </button>
 
   <script src="../scheduler.js"></script>
+  <script src="input-dialog.js"></script>
   <script src="torah-quotes.js"></script>
   <script src="vendor/webgl-fluid-simulation.js"></script>
   <script>
@@ -1538,7 +1539,7 @@
       // מכסת זמן שימוש יומית שנוצלה — להסביר שהחסימה אינה תקלה, ומתי היא תסתיים
       if (status.limitReached && status.state === 'blocked' && !status.configError) {
         const mins = (status.dailyLimit && status.dailyLimit.minutes) || 0;
-        blockReasonText.textContent = 'נגמר זמן השימוש היומי שהוגדר (מכסה של ' + mins + ' דקות ליום). המחשב ייפתח מחדש בחצות — או כעת עם סיסמת ההורה.';
+        blockReasonText.textContent = 'מכסת השימוש של ' + mins + ' דקות נוצלה. המכסה מתאפסת בחצות. אפשר לבקש פתיחה מוקדמת עם סיסמת ההורה.';
         blockReason.classList.remove('hidden');
       } else if (status.blockedByDefault && status.state === 'blocked' && !status.configError) {
         blockReasonText.textContent = 'המחשב חסום לפי ברירת המחדל שנבחרה בהגדרות (מצב "המחשב חסום תמיד") — כדי לפתוח, הוסיפו חלון "מותר" בלוח או חזרו למצב "המחשב פתוח תמיד". פתיחה בסיסמה כאן פותחת לשעה בלבד.';
@@ -1627,7 +1628,9 @@
           lockMsg.textContent = 'שולח קוד אישור לשותף האחריות…';
           const sent = API.requestUnlockApproval ? await API.requestUnlockApproval('unlock') : { ok: false, error: 'לא נתמך' };
           if (!sent || !sent.ok) { showError((sent && sent.error) || 'שליחת קוד האישור לשותף נכשלה'); return; }
-          const code = window.prompt('הזינו את קוד האישור שקיבל שותף האחריות במייל:');
+          const [code] = await requestInput('אישור שותף אחריות', [
+            { label: 'הקוד שקיבל שותף האחריות במייל', autocomplete: 'one-time-code' }
+          ]) || [];
           if (!code) { showError('נדרש קוד אישור מהשותף כדי לפתוח מוקדם'); return; }
           res = await API.unlockNow(pin, code.trim());
         }
@@ -1666,16 +1669,21 @@
       document.getElementById('forgotBtn').onclick = async () => {
         lockMsg.textContent = 'שולח קוד חד-פעמי למייל…';
         const sent = await API.sendRecovery();
+        if (sent && sent.needAdmin && API.openPolicyEditor) {
+          lockMsg.textContent = 'אשרו הרשאת מנהל ושחזרו את הסיסמה בחלון העריכה';
+          const result = await API.openPolicyEditor();
+          if (result && !result.ok) showError(result.error);
+          return;
+        }
         if (sent && sent.ok) {
-          const code = window.prompt('קוד השחזור שנשלח למייל:');
-          const nextPin = code && window.prompt('סיסמה חדשה (4–20 תווים ללא רווחים):');
-          const confirm = nextPin && window.prompt('אימות הסיסמה החדשה:');
-          if (code && nextPin && nextPin === confirm) {
+          const details = await requestRecoveryDetails();
+          if (details) {
+            const [code, nextPin] = details;
             const res = await API.completeRecovery(code.trim(), nextPin);
             lockMsg.textContent = res && res.ok ? 'הסיסמה שוחזרה — אפשר להיכנס' : ((res && res.error) || 'שחזור נכשל');
             lockMsg.classList.toggle('ok', !!(res && res.ok));
-          } else if (code) {
-            lockMsg.textContent = 'הסיסמאות אינן תואמות';
+          } else {
+            lockMsg.textContent = 'שחזור הסיסמה בוטל';
             lockMsg.classList.remove('ok');
           }
         } else {

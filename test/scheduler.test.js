@@ -94,6 +94,22 @@ test('overnight slot wraps to next day', () => {
   assert.equal(S.getStatus(s, late).state, 'blocked');
   assert.equal(S.getStatus(s, early).state, 'blocked');
   assert.equal(S.getStatus(s, noon).state, 'allowed');
+  const beforeStart = S.getStatus(s, new Date(2026, 0, 4, 5, 30));
+  assert.equal(beforeStart.state, 'allowed');
+  assert.deepEqual(beforeStart.nextAt, new Date(2026, 0, 4, 22));
+  const afterMidnight = S.getStatus(s, early);
+  assert.deepEqual(afterMidnight.nextAt, new Date(2026, 0, 5, 6));
+  assert.equal(afterMidnight.next, 'allowed');
+});
+
+test('the weekly schedule resumes after a long run of one-off overrides', () => {
+  const s = S.defaultSchedule();
+  s.week[0].slots.push({ start: 8 * 60, end: 9 * 60, type: 'blocked' });
+  s.overrides = Array.from({ length: 13 }, (_, day) => ({
+    date: S.dateKey(new Date(2026, 0, 4 + day)), type: 'allow'
+  }));
+  const st = S.getStatus(s, new Date(2026, 0, 4, 7));
+  assert.deepEqual(st.nextAt, new Date(2026, 0, 18, 8));
 });
 
 test('disabled schedule is always allowed', () => {
@@ -126,6 +142,9 @@ test('manual unlock overrides until next transition', () => {
   const st = S.getStatus(s, at);
   assert.equal(st.state, 'allowed');
   assert.equal(st.nextAt.getTime(), unlockUntil);
+  assert.equal(st.next, 'blocked');
+  s.manualUnlockUntil = new Date(2026, 0, 4, 16).getTime();
+  assert.deepEqual(S.getStatus(s, at).nextAt, new Date(2026, 0, 11, 8));
 });
 
 // "פתוח עד המעבר הבא" שנשאר מלוח קודם (אחרי שמחקו את כל החלונות) אסור
@@ -482,6 +501,18 @@ test('nextTransition is DST-safe: fall-back day (25h day)', () => {
   assert.equal(st.nextAt.getHours(), 8, 'חלון 08:00 חייב להתחיל ב-08:00 גם ביום DST');
 });
 
+test('nextTransition handles skipped and repeated wall-clock hours', () => {
+  const spring = S.defaultSchedule();
+  spring.week[5].slots.push({ start: 150, end: 210, type: 'blocked' }); // 02:30–03:30
+  const beforeJump = new Date('2026-03-27T01:59:00+02:00');
+  assert.deepEqual(S.getStatus(spring, beforeJump).nextAt, new Date('2026-03-27T03:00:00+03:00'));
+
+  const fall = S.defaultSchedule();
+  fall.week[0].slots.push({ start: 90, end: 105, type: 'blocked' }); // 01:30–01:45
+  const betweenOccurrences = new Date('2026-10-25T01:50:00+03:00');
+  assert.deepEqual(S.getStatus(fall, betweenOccurrences).nextAt, new Date('2026-10-25T01:30:00+02:00'));
+});
+
 /* ================= חסימת אינטרנט בלבד (netblock) ================= */
 
 test('netblock slot survives normalize and yields the netblock state', () => {
@@ -662,6 +693,7 @@ test('appHoursAllow: restricts an app to the configured windows only', () => {
 test('appHoursAllow: a window crossing midnight stays valid after midnight', () => {
   const hours = new Array(7).fill(null).map(() => ({ slots: [] }));
   hours[0] = { slots: [{ start: 22 * 60, end: 2 * 60 }] }; // ראשון 22:00 → שני 02:00
+  assert.equal(S.appHoursAllow(hours, new Date(2026, 0, 4, 1, 30)), false);
   assert.equal(S.appHoursAllow(hours, new Date(2026, 0, 4, 23, 30)), true);
   assert.equal(S.appHoursAllow(hours, new Date(2026, 0, 5, 1, 30)), true);
   assert.equal(S.appHoursAllow(hours, new Date(2026, 0, 5, 3, 0)), false);

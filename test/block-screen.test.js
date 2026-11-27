@@ -147,6 +147,7 @@ function loadBlockScreen() {
   };
 
   const window = {
+    addEventListener() {},
     TimeScheduler: require('../scheduler.js'),
     TORAH_QUOTES: require('../renderer/torah-quotes.js'),
     electronAPI: api,

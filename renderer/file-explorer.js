@@ -3,6 +3,7 @@
 var API = window.electronAPI;
 var roots = [];
 var current = { id: null, rel: '', readonly: false };
+var latestLoad = 0;
 
 function fmtSize(n) {
   if (!n) return '';
@@ -43,7 +44,12 @@ function showError(msg) {
 
 async function load(rootId, rel) {
   if (!API) { showError('זמין רק בגרסת המחשב המלאה'); return; }
-  var res = await API.fileExplorerList(rootId, rel || '');
+  var request = ++latestLoad;
+  document.getElementById('fileOpenError').textContent = '';
+  var res;
+  try { res = await API.fileExplorerList(rootId, rel || ''); }
+  catch { res = null; }
+  if (request !== latestLoad) return;
   if (!res || !res.ok) { showError((res && res.error) || 'לא ניתן להציג את התיקייה'); return; }
   current = { id: res.root.id, rel: res.rel || '', readonly: !!res.root.readonly };
   renderRoots();
@@ -73,10 +79,19 @@ async function load(rootId, rel) {
     meta.className = 'meta';
     meta.textContent = item.isDir ? '' : fmtSize(item.size);
     row.append(icon, name, meta);
-    row.onclick = function () {
+    row.onclick = async function () {
       var childRel = current.rel ? (current.rel + '\\' + item.name) : item.name;
       if (item.isDir) load(current.id, childRel);
-      else API.fileExplorerOpen(current.id, childRel);
+      else {
+        var openError = document.getElementById('fileOpenError');
+        openError.textContent = '';
+        var result;
+        try { result = await API.fileExplorerOpen(current.id, childRel); }
+        catch { result = null; }
+        if (request === latestLoad && (!result || !result.ok)) {
+          openError.textContent = (result && result.error) || 'לא ניתן לפתוח את הקובץ';
+        }
+      }
     };
     list.appendChild(row);
   });

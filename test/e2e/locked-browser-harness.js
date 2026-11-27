@@ -31,6 +31,7 @@ if (process.env.ELECTRON_E2E !== '1') {
 }
 
 app.disableHardwareAcceleration();
+const offscreen = process.env.ELECTRON_E2E_OFFSCREEN === '1';
 
 // ברירת המחדל של Electron היא לצאת כשאין חלונות. בין שני התרחישים נסגר החלון
 // של הראשון בלי שיהיה עדיין חלון אחר — בלי המאזין הזה התהליך מתחיל לצאת
@@ -102,7 +103,7 @@ function createRestrictedBrowser(allows, partition) {
   const win = new BrowserWindow({
     width: 900, height: 640,
     show: false,
-    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true }
+    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true, offscreen }
   });
   const view = new WebContentsView({
     webPreferences: {
@@ -132,7 +133,8 @@ function createApprovedSiteWindow(allows, partition) {
     width: 900, height: 640,
     show: false,
     webPreferences: {
-      partition, contextIsolation: true, nodeIntegration: false, sandbox: true, webviewTag: false
+      partition, contextIsolation: true, nodeIntegration: false, sandbox: true, webviewTag: false,
+      offscreen, backgroundThrottling: false
     }
   });
   const wc = win.webContents;

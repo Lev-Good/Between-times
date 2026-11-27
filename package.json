@@ -1,7 +1,7 @@
 {
   "name": "ben-hazmanim",
   "productName": "בין הזמנים - ניהול זמן מחשב",
-  "version": "1.8.4",
+  "version": "1.8.6",
   "description": "ניהול שעות גישה למחשב - הגדרת שעות וימים מותרים/חסומים מראש",
   "main": "main.js",
   "author": "לב טוב דיגיטל <mytovmail@gmail.com> (https://digital.levtov.uk/)",
@@ -9,15 +9,15 @@
   "license": "MIT",
   "scripts": {
     "start": "electron .",
-    "test": "node --test test/advanced-flows.test.js test/main-flow.test.js test/schema-v2.test.js test/wiring.test.js test/gas-recovery.test.js",
-    "test:e2e": "node --test test/block-screen.e2e.test.js",
+    "test": "node --test test/advanced-flows.test.js test/block-screen.test.js test/gas-recovery.test.js test/installer-manifest.test.js test/main-flow.test.js test/policy-migration.test.js test/scheduler-fuzz.test.js test/scheduler.test.js test/schema-v2.test.js test/torah-quotes.test.js test/wiring.test.js",
+    "test:e2e": "node --test test/block-screen.e2e.test.js test/locked-browser.e2e.test.js",
     "test:update-live": "node --test --test-name-pattern=\"update:LIVE\" test/main-flow.test.js",
     "preview": "node scripts/build-preview.js",
     "postinstall": "node scripts/patch-nsis-template.js",
     "dist": "node scripts/patch-nsis-template.js && node scripts/verify-installer-manifest.js --pre && electron-builder --win && node scripts/verify-installer-manifest.js"
   },
   "devDependencies": {
-    "electron": "^37.2.0",
+    "electron": "45.5.0",
     "electron-builder": "^26.15.3"
   },
   "build": {

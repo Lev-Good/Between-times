@@ -124,6 +124,7 @@ function makeMock(config) {
   const execImpl = cfg.exec || defaultExec;
 
   function defaultExecSync(cmd, args) {
+    if (cmd === 'icacls') return '';
     if (cmd === 'net') {
       if (!cfg.elevate) throw new Error('not elevated');
       return '';
@@ -1364,15 +1365,20 @@ test('update:download writes relaunch flag so the installer reopens the app', as
 test('startup: stale relaunch flags are cleared on launch', async () => {
   // אם המתקין לא ניקה דגל ישן (או ההתקנה בוטלה) — אסור שהוא יגרום
   // להפעלה אוטומטית בהתקנה עתידית; האפליקציה מנקה אותו באתחול.
-  fs.mkdirSync(path.join(process.env.APPDATA, 'BenHazmanim'), { recursive: true });
-  fs.writeFileSync(path.join(process.env.APPDATA, 'BenHazmanim', 'relaunch.flag'), String(Date.now()));
   const m = loadMain({});
-  // דגל ישן גם בנתיב ה-userData — שני הנתיבים חייבים להתנקות באתחול
-  fs.writeFileSync(path.join(m.tmpRoot, 'userData', 'relaunch.flag'), String(Date.now()));
+  const flagDirs = [
+    path.join(process.env.APPDATA, 'BenHazmanim'),
+    path.join(m.tmpRoot, 'userData'),
+    path.join(process.env.PROGRAMDATA, 'BenHazmanim')
+  ];
+  for (const dir of flagDirs) {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'relaunch.flag'), String(Date.now()));
+  }
   await m.ready();
-  assert.equal(fs.existsSync(path.join(process.env.APPDATA, 'BenHazmanim', 'relaunch.flag')), false, 'דגל הפעלה מחדש מנוקה באתחול');
-  assert.equal(fs.existsSync(path.join(m.tmpRoot, 'userData', 'relaunch.flag')), false, 'דגל ב-userData מנוקה באתחול');
-  assert.equal(fs.existsSync(path.join(process.env.PROGRAMDATA, 'BenHazmanim', 'relaunch.flag')), false, 'דגל בנתיב המשותף מנוקה באתחול');
+  for (const dir of flagDirs) {
+    assert.equal(fs.existsSync(path.join(dir, 'relaunch.flag')), false, 'דגל הפעלה מחדש מנוקה ב-' + dir);
+  }
   m.cleanup();
 });
 
@@ -1968,6 +1974,68 @@ test('update:download reports clear error when no update is available', async ()
   }
 });
 
+test('update:download does not fetch a release withdrawn after an earlier check', async () => {
+  let version = '9.9.9';
+  const requests = [];
+  const original = fakeInstallerBytes();
+  fetchMock = async (url) => {
+    requests.push(url);
+    if (url.includes('raw.githubusercontent.com')) {
+      return { ok: true, json: async () => ({ version, sha256: fakeInstallerHash(original) }) };
+    }
+    throw new Error('A withdrawn update must not be downloaded');
+  };
+  const m = loadMain({});
+  await m.ready();
+  assert.equal((await m.ipcHandlers.get('update:check')()).update.version, '9.9.9');
+  version = '1.2.3';
+  assert.equal((await m.ipcHandlers.get('update:download')()).ok, false);
+  assert.equal(requests.length, 2);
+  assert.ok(requests.every((url) => url.includes('raw.githubusercontent.com')));
+  assert.equal(m.state.quitCalled, false);
+  m.cleanup();
+});
+
+test('update:download snapshots its hash and shares concurrent download requests', async () => {
+  const installer = fakeInstallerBytes();
+  const firstHash = fakeInstallerHash(installer);
+  let release = { version: '9.9.9', sha256: firstHash };
+  let requestCount = 0;
+  let startDownload, completeDownload;
+  const started = new Promise((resolve) => { startDownload = resolve; });
+  const download = new Promise((resolve) => { completeDownload = resolve; });
+  fetchMock = async (url) => {
+    const api = githubApiRelease(url);
+    if (api) return api;
+    if (url.includes('raw.githubusercontent.com')) {
+      const data = release;
+      return { ok: true, json: async () => data };
+    }
+    if (url.includes('releases/download/v9.9.9/Setup.9.9.9.exe')) {
+      requestCount++;
+      startDownload();
+      return download;
+    }
+    throw new Error('unexpected fetch: ' + url);
+  };
+  const m = loadMain({});
+  await m.ready();
+  const handler = m.ipcHandlers.get('update:download');
+  const pending = handler();
+  await Promise.race([started, pending.then(() => assert.fail('download did not start'))]);
+  const duplicate = handler();
+  release = { version: '9.9.10', sha256: '0'.repeat(64) };
+  assert.equal((await m.ipcHandlers.get('update:check')()).update.version, '9.9.10');
+  completeDownload({ ok: true, headers: { get: () => String(installer.length) }, body: fakeStream([installer]) });
+  const [result, duplicateResult] = await Promise.all([pending, duplicate]);
+  assert.equal(result.installing, true, JSON.stringify(result));
+  assert.deepEqual(duplicateResult, result);
+  assert.equal(requestCount, 1);
+  assert.equal(m.state.spawnCalls.filter((call) =>
+    (call.args || []).some((arg) => /BenHazmanim-Setup-9\.9\.9\.exe$/.test(arg))).length, 1);
+  m.cleanup();
+});
+
 /* ================= עמידות נתיב ההורדה (1.8.1) =================
    הרגרסיה שהתגלתה אצל משתמש: בדיקת העדכון עבדה (באנר והתראה), אבל ההורדה
    עצמה נכשלה כעבור ~2 שניות בלי שום רישום — ולכן אי אפשר היה לאבחן. כאן
@@ -2152,6 +2220,47 @@ test('recovery:send fails cleanly when no recovery email configured', async () =
   const res = await m.ipcHandlers.get('recovery:send')();
   assert.equal(res.ok, false);
   assert.match(res.error || '', /מייל שחזור/);
+  m.cleanup();
+});
+
+test('recovery: a failed request preserves settings saved while the mail was pending', async () => {
+  const settings = { ...S.defaultSchedule(), recoveryEmail: 'me@example.com', theme: 'dark' };
+  const m = loadMain({ settings });
+  await m.ready();
+  let rejectMail;
+  fetchMock = () => new Promise((_resolve, reject) => { rejectMail = reject; });
+  const pending = m.ipcHandlers.get('recovery:send')();
+  assert.equal(typeof rejectMail, 'function');
+  assert.equal((await m.ipcHandlers.get('settings:save')({}, { ...settings, theme: 'light' })).ok, true);
+  rejectMail(new Error('simulated connection failure'));
+  assert.equal((await pending).ok, false);
+  assert.equal((await m.ipcHandlers.get('settings:get')()).theme, 'light');
+  const disk = JSON.parse(fs.readFileSync(path.join(m.tmpRoot, 'userData', 'settings.json'), 'utf8'));
+  assert.equal(disk.theme, 'light');
+  assert.equal(disk.recoveryPendingHash, null);
+  m.cleanup();
+});
+
+test('recovery: the new PIN can be used immediately after a temporary PIN lock', async () => {
+  const settings = S.defaultSchedule();
+  settings.pinHash = S.sha256Hex('1234');
+  settings.recoveryEmail = 'me@example.com';
+  const m = loadMain({ settings });
+  await m.ready();
+  const verify = m.ipcHandlers.get('pin:verify');
+  for (let i = 0; i < 5; i++) await verify({}, 'wrong');
+  assert.ok((await verify({}, '1234')).locked > 0);
+
+  let token;
+  fetchMock = async (_url, opts) => {
+    token = JSON.parse(opts.body).token;
+    return { ok: true, json: async () => ({ ok: true }) };
+  };
+  assert.equal((await m.ipcHandlers.get('recovery:send')()).ok, true);
+  const complete = m.ipcHandlers.get('recovery:complete');
+  assert.equal((await complete({}, token, '5678')).ok, true);
+  assert.equal((await verify({}, '5678')).ok, true);
+  assert.equal((await complete({}, token, '9012')).ok, false);
   m.cleanup();
 });
 
@@ -2541,13 +2650,15 @@ function guardEnv(m) {
   const pd = protectedDir(m);
   fs.mkdirSync(pd, { recursive: true });
   fs.writeFileSync(path.join(pd, 'package.json'), JSON.stringify({ name: 'ben-hazmanim', version: '9.9.9' }), 'utf8');
-  fs.writeFileSync(path.join(pd, path.basename(process.execPath)), 'protected-exe');
+  fs.copyFileSync(path.join(appDir, path.basename(process.execPath)), path.join(pd, path.basename(process.execPath)));
   const machineDir = path.join(process.env.PROGRAMDATA, 'BenHazmanim');
   fs.mkdirSync(machineDir, { recursive: true });
   // הגדרות משותפות חייבות להתקיים — אחרת השומר יוצא (סימן הסרה)
   fs.writeFileSync(path.join(machineDir, 'settings.json'), '{}', 'utf8');
   fs.writeFileSync(path.join(machineDir, 'install.json'), JSON.stringify({ exe: 'x', dir: appDir }), 'utf8');
   fs.writeFileSync(path.join(pd, 'settings.backup.json'), '{}', 'utf8');
+  writeGuardManifest(appDir);
+  writeGuardManifest(pd);
   // תבנית ה-XML משמרת את המשתמש האינטראקטיבי של המשימה הראשית;
   // שומר שרץ כ-SYSTEM לא יוצר אותה מחדש עם principal שגוי.
   fs.writeFileSync(path.join(machineDir, 'main-task.xml'), '<Task><Principals/><Actions/></Task>', 'utf8');
@@ -2677,6 +2788,68 @@ test('system watchdog: restores deleted protected copy from install dir', async 
     const tamper = fs.readFileSync(guardTamperLog(), 'utf8');
     assert.match(tamper, /protected-copy-restored/, 'אירוע החבלה נרשם ליומן');
   });
+});
+
+test('system watchdog: an interrupted copy cannot replace either install tree or the settings backup', async () => {
+  const m = makeMock({ elevate: true });
+  const { appDir, pd } = guardEnv(m);
+  const protectedPackage = path.join(pd, 'package.json');
+  fs.writeFileSync(protectedPackage, '{"version":"corrupt"}');
+  const originalPackage = fs.readFileSync(path.join(appDir, 'package.json'), 'utf8');
+  const backupSettings = path.join(pd, 'settings.backup.json');
+  fs.writeFileSync(backupSettings, '{"theme":"dark"}');
+  const copy = fs.cpSync;
+  let interrupted = false;
+  fs.cpSync = (src, dst, options) => {
+    if (src === appDir && String(dst).startsWith(pd + '.stage-')) {
+      interrupted = true;
+      fs.copyFileSync(path.join(src, path.basename(process.execPath)), path.join(dst, path.basename(process.execPath)));
+      fs.copyFileSync(path.join(src, 'package.json'), path.join(dst, 'package.json'));
+      throw new Error('simulated copy interruption');
+    }
+    return copy(src, dst, options);
+  };
+  try {
+    await withSystemWatchdogArg(m, async () => {
+      await m.ready();
+      assert.equal(interrupted, true);
+      assert.equal(fs.readFileSync(path.join(appDir, 'package.json'), 'utf8'), originalPackage);
+      assert.equal(fs.readFileSync(protectedPackage, 'utf8'), '{"version":"corrupt"}');
+      assert.equal(fs.readFileSync(backupSettings, 'utf8'), '{"theme":"dark"}');
+      assert.equal(fs.readdirSync(path.dirname(pd)).some((name) => name.startsWith('app.stage-')), false);
+    });
+  } finally {
+    fs.cpSync = copy;
+    m.cleanup();
+  }
+});
+
+test('system watchdog: a failed directory swap rolls back the previous tree', async () => {
+  const m = makeMock({ elevate: true });
+  const { appDir, pd } = guardEnv(m);
+  const installed = path.join(appDir, 'package.json');
+  fs.writeFileSync(installed, '{"version":"corrupt"}');
+  const rename = fs.renameSync;
+  let failed = false;
+  fs.renameSync = (from, to) => {
+    if (String(from).startsWith(appDir + '.stage-') && to === appDir) {
+      failed = true;
+      throw Object.assign(new Error('simulated directory lock'), { code: 'EPERM' });
+    }
+    return rename(from, to);
+  };
+  try {
+    await withSystemWatchdogArg(m, async () => {
+      await m.ready();
+      assert.equal(failed, true);
+      assert.equal(fs.readFileSync(installed, 'utf8'), '{"version":"corrupt"}');
+      assert.equal(fs.existsSync(appDir + '.restore-previous'), false);
+      assert.equal(fs.readFileSync(path.join(pd, path.basename(process.execPath)), 'utf8'), 'fake-exe');
+    });
+  } finally {
+    fs.renameSync = rename;
+    m.cleanup();
+  }
 });
 
 test('system watchdog: recreates deleted scheduled tasks pointing at protected copy', async () => {
@@ -3411,6 +3584,108 @@ test('corrupt shared settings fail closed instead of falling back to a user file
   assert.equal(st.configError, true);
   assert.equal(st.state, 'blocked');
   m.cleanup();
+});
+
+test('shared settings with the wrong JSON shape are recovered from the valid backup', async () => {
+  const m = loadMain({});
+  const pd = protectedDir(m);
+  fs.mkdirSync(pd, { recursive: true });
+  fs.writeFileSync(path.join(path.dirname(pd), 'settings.json'), 'null');
+  const settings = { ...S.defaultSchedule(), mode: 'allowlist', pinHash: S.sha256Hex('1234') };
+  fs.writeFileSync(path.join(pd, 'settings.backup.json'), JSON.stringify(settings));
+  await m.ready();
+  const st = await m.ipcHandlers.get('status:get')();
+  assert.equal(st.configError, false);
+  assert.equal(st.state, 'blocked');
+  assert.equal(st.pinSet, true);
+  m.cleanup();
+});
+
+function protectedPolicyFixture(settings) {
+  const dir = path.join(process.env.PROGRAMDATA, 'BenHazmanim');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'policy-acl.json'), '{"version":1}');
+  const primary = path.join(dir, 'settings.json');
+  const backup = path.join(dir, 'settings.last-good.json');
+  const raw = JSON.stringify(settings);
+  fs.writeFileSync(primary, raw);
+  fs.writeFileSync(backup, raw);
+  return { primary, backup, raw };
+}
+
+test('managed policy: a standard account can read but needs UAC for permanent changes', async () => {
+  const m = loadMain({});
+  const settings = { ...S.defaultSchedule(), pinHash: S.sha256Hex('1234'), theme: 'dark' };
+  const { primary, backup, raw } = protectedPolicyFixture(settings);
+  await m.ready();
+  const view = await m.ipcHandlers.get('settings:get')();
+  assert.equal(view.policyReadOnly, true);
+  assert.equal(view.theme, 'dark');
+  assert.equal((await m.ipcHandlers.get('session:unlock')({}, '1234')).ok, true);
+  for (const [channel, args] of [
+    ['settings:save', [{ ...settings, theme: 'light' }]],
+    ['pin:set', ['5678', '1234']],
+    ['pin:clear', ['1234']],
+    ['backup:import', []],
+    ['recovery:send', []],
+    ['recovery:complete', ['code', '5678']]
+  ]) {
+    const result = await m.ipcHandlers.get(channel)({}, ...args);
+    assert.equal(result.needAdmin, true, channel);
+  }
+  assert.equal((await m.ipcHandlers.get('policy:edit')({})).ok, true);
+  assert.ok(m.state.execCalls.some(({ cmd, args }) => /elevate\.exe$/i.test(cmd) && args.includes('--policy-editor')));
+  assert.equal(fs.readFileSync(primary, 'utf8'), raw);
+  assert.equal(fs.readFileSync(backup, 'utf8'), raw);
+  m.cleanup();
+});
+
+test('managed policy: administrator can save after PIN authentication and restore the protected backup', async () => {
+  const settings = { ...S.defaultSchedule(), pinHash: S.sha256Hex('1234'), theme: 'dark' };
+  const m = loadMain({ elevate: true });
+  const { primary, backup } = protectedPolicyFixture(settings);
+  await m.ready();
+  const update = { ...settings, theme: 'light' };
+  assert.equal((await m.ipcHandlers.get('settings:save')({}, update)).ok, false);
+  assert.equal((await m.ipcHandlers.get('session:unlock')({}, '1234')).ok, true);
+  assert.equal((await m.ipcHandlers.get('settings:save')({}, update)).ok, true);
+  assert.equal(JSON.parse(fs.readFileSync(primary, 'utf8')).theme, 'light');
+  assert.equal(fs.readFileSync(primary, 'utf8'), fs.readFileSync(backup, 'utf8'));
+  assert.ok(m.state.execSyncCalls.some(({ cmd, args }) => cmd === 'icacls' && args.includes('/setowner')));
+  fs.writeFileSync(primary, 'null');
+  await withSystemWatchdogArg(m, async () => {
+    await m.ready();
+    assert.equal(fs.readFileSync(primary, 'utf8'), fs.readFileSync(backup, 'utf8'));
+  });
+  m.cleanup();
+});
+
+test('managed policy: the separate editor requires an administrator token and exposes only editor IPC', async () => {
+  const argv = process.argv;
+  for (const elevate of [false, true]) {
+    const m = makeMock({ elevate });
+    protectedPolicyFixture({ ...S.defaultSchedule(), pinHash: S.sha256Hex('1234') });
+    process.argv = [argv[0], 'main.js', '--policy-editor'];
+    try {
+      delete require.cache[require.resolve('../main.js')];
+      require('../main.js');
+      await m.ready();
+      if (!elevate) {
+        assert.equal(m.state.exitCalled, true);
+        assert.equal(m.ipcHandlers.size, 0);
+      } else {
+        assert.equal((await m.ipcHandlers.get('settings:get')()).policyEditor, true);
+        assert.equal((await m.ipcHandlers.get('settings:save')({}, S.defaultSchedule())).ok, false);
+        assert.equal((await m.ipcHandlers.get('session:unlock')({}, '1234')).ok, true);
+        assert.equal((await m.ipcHandlers.get('settings:save')({}, S.defaultSchedule())).ok, true);
+        assert.equal((await m.ipcHandlers.get('update:download')()).ok, false);
+        assert.equal((await m.ipcHandlers.get('shell:open')({}, 'https://example.test')).ok, false);
+      }
+    } finally {
+      process.argv = argv;
+      m.cleanup();
+    }
+  }
 });
 
 test('protected copy integrity tampering is repaired by the system watchdog', async () => {

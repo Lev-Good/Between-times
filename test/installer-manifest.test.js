@@ -403,18 +403,18 @@ test('main: כשל ברענון העותק המוגן נרשם ביומן — ל
 });
 
 test('main: לפני החלפת העותק המוגן עוצרים את השומר ומרימים איסור מחיקה', () => {
-  assert.ok(ensureFn.includes('stopSystemGuardForRefresh'),
-    'השומר המערכתי רץ מתוך העותק המוגן ומחזיק את הקבצים — חייבים לעצור אותו');
-  const order = ['stopSystemGuardForRefresh', 'liftDirProtection', 'removeTreeRetry', 'cpSync'];
+  assert.ok(ensureFn.indexOf('stopSystemGuardForRefresh') < ensureFn.indexOf('replaceVerifiedTree') &&
+    ensureFn.includes('stopSystemGuardForRefresh'), 'עוצרים את השומר לפני החלפת העותק המוגן');
+  const main = read('main.js');
+  const start = main.indexOf('async function replaceVerifiedTree');
+  const replaceFn = main.slice(start, main.indexOf('\n}', start));
+  const order = ['fs.cpSync', 'verifyIntegrityManifest(staged', 'liftDirProtection(dst)', 'fs.renameSync(staged, dst)'];
   let last = -1;
   for (const step of order) {
-    const at = ensureFn.indexOf(step);
+    const at = replaceFn.indexOf(step);
     assert.ok(at > last, 'הסדר חייב להיות: ' + order.join(' → '));
     last = at;
   }
-  const main = read('main.js');
-  assert.ok(main.includes('async function removeTreeRetry'),
-    'מחיקה עם נסיונות חוזרים — fs.rmSync נכשל בקלות על קובץ נעול לרגע');
   assert.ok(main.includes('function processesFromDir'),
     'לעצירת השומר משתמשים ב-Get-Process לפי נתיב (לא ב-tasklist/WMI)');
 });

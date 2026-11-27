@@ -6,14 +6,18 @@
 
 const test = require('node:test');
 const assert = require('node:assert');
+const fs = require('node:fs');
+const os = require('node:os');
 const path = require('path');
 const { spawn } = require('child_process');
 
 // במוד Node, 'electron' מייצא את הנתיב לקובץ ההרצה עצמו
 const electron = require('electron');
 
-test('block E2E: מסך החסימה האמיתי ב-Electron — קובץ פגום וחזרה לקדמותו', async () => {
-  const child = spawn(electron, [path.join(__dirname, 'e2e', 'block-harness.js')], {
+test('block E2E: מסך החסימה האמיתי ב-Electron — קובץ פגום וחזרה לקדמותו', async (t) => {
+  const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'bhz-block-e2e-'));
+  t.after(() => fs.rmSync(profile, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 }));
+  const child = spawn(electron, ['--user-data-dir=' + profile, path.join(__dirname, 'e2e', 'block-harness.js')], {
     env: { ...process.env, ELECTRON_E2E: '1' },
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true

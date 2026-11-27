@@ -497,12 +497,57 @@ test('netblock: firewall rule add failure is detected by the reconcile loop', as
   m.cleanup();
 });
 
-test('netblock: verification failure (firewall off) sets a cooldown — no UAC window every 5 seconds', async () => {
+test('netblock: an unverified rule is removed when the policy ends', async () => {
+  const settings = S.defaultSchedule();
+  settings.pinHash = S.sha256Hex('1234');
+  settings.week.forEach((day) => day.slots.push({ start: 0, end: 1440, type: 'netblock' }));
+  let ruleExists = false;
+  let finishAttempt;
+  const attempted = new Promise((resolve) => { finishAttempt = resolve; });
+  let finishRemoval;
+  const removed = new Promise((resolve) => { finishRemoval = resolve; });
+  const m = loadMain({
+    settings,
+    elevate: false,
+    exec(cmd, args) {
+      if (cmd === 'netsh' && args.includes('show')) {
+        return { err: ruleExists ? null : new Error('no rule'), stdout: '', stderr: '' };
+      }
+      if (cmd === 'powershell.exe' && args.join(' ').includes('Get-NetFirewallProfile')) {
+        finishAttempt();
+        return { err: null, stdout: 'False', stderr: '' };
+      }
+      if (cmd === 'powershell.exe' && args.join(' ').includes('Start-Process') && args.join(' ').includes('netsh.exe')) {
+        const deleting = args.join(' ').includes("'delete'");
+        ruleExists = !deleting;
+        if (deleting) finishRemoval();
+      }
+      return { err: null, stdout: '', stderr: '' };
+    }
+  });
+  await m.ready();
+  await Promise.race([attempted, sleep(1000).then(() => assert.fail('initial firewall verification was not attempted'))]);
+  await sleep(30);
+  assert.equal(ruleExists, true);
+  assert.equal((await m.ipcHandlers.get('status:get')()).netBlockApplied, false);
+  await m.ipcHandlers.get('session:unlock')({}, '1234');
+  assert.equal((await m.ipcHandlers.get('settings:save')({}, { ...settings, enabled: false })).ok, true);
+  await Promise.race([removed, sleep(1000).then(() => assert.fail('firewall removal was not attempted'))]);
+  await sleep(80);
+  assert.equal(ruleExists, false, 'cleanup must run even during the enable cooldown');
+  assert.equal((await m.ipcHandlers.get('status:get')()).enforcement.actual, 'allowed');
+  m.cleanup();
+});
+
+test('netblock: repeated verification during cooldown does not extend it', async (t) => {
   // תרחיש המשתמש: החוק נוצר בהצלחה אבל חומת האש כבויה — החוק קיים אך אינו
   // אוכף. בעבר לולאת האכיפה (כל 5 שניות) חזרה והריצה netsh מורם בכל פעם,
   // ולכן נפתח חלון UAC/קונסול שוב ושוב. הקירור חייב למנוע את זה.
   let uacAttempts = 0;
   let ruleExists = false;
+  let timeOffset = 0n;
+  const realHrtime = process.hrtime.bigint;
+  t.mock.method(process.hrtime, 'bigint', () => realHrtime() + timeOffset);
   const s = S.defaultSchedule();
   s.pinHash = S.sha256Hex('1234');
   s.week.forEach((d) => d.slots.push({ start: 0, end: 1440, type: 'netblock' }));
@@ -538,9 +583,15 @@ test('netblock: verification failure (firewall off) sets a cooldown — no UAC w
   // אכיפה נוספת בתוך חלון הקירור אסורה לפתוח UAC שוב
   await m.ipcHandlers.get('session:unlock')({}, '1234');
   const settingsNow = await m.ipcHandlers.get('settings:get')();
+  timeOffset += 30_000_000_000n;
   await m.ipcHandlers.get('settings:save')({}, settingsNow);
   await new Promise((r) => setTimeout(r, 150));
   assert.equal(uacAttempts, 1, 'בתוך הקירור לא נפתחים חלונות UAC חוזרים (got ' + uacAttempts + ')');
+
+  timeOffset += 31_000_000_000n;
+  m.electron.powerMonitor.emit('resume');
+  await new Promise((r) => setTimeout(r, 150));
+  assert.equal(uacAttempts, 2, 'הניסיון הבא מותר בתום הדקה המקורית');
   m.cleanup();
 });
 
@@ -916,6 +967,40 @@ test('atomic-write: settings are never partially written (verify content integri
   const tmpFiles = files.filter((f) => f.includes('.tmp-'));
   assert.equal(tmpFiles.length, 0, 'No .tmp files should remain: ' + JSON.stringify(tmpFiles));
   m.cleanup();
+});
+
+test('atomic-write: an interrupted replacement leaves the original settings usable', async () => {
+  const settings = { ...S.defaultSchedule(), theme: 'dark' };
+  const m = loadMain({ settings });
+  await m.ready();
+  const file = path.join(m.tmpRoot, 'userData', 'settings.json');
+  const before = fs.readFileSync(file, 'utf8');
+  const rename = fs.renameSync;
+  const write = fs.writeFileSync;
+  let attempts = 0;
+  fs.renameSync = (from, to) => {
+    if (to === file) { attempts++; throw Object.assign(new Error('simulated lock'), { code: 'EPERM' }); }
+    return rename(from, to);
+  };
+  fs.writeFileSync = (destination, data, ...args) => {
+    if (destination === file) {
+      write(destination, String(data).slice(0, 8));
+      throw new Error('simulated short write');
+    }
+    return write(destination, data, ...args);
+  };
+  try {
+    const res = await m.ipcHandlers.get('settings:save')({}, { ...settings, theme: 'light' });
+    assert.equal(res.ok, false);
+    assert.ok(attempts > 0);
+    assert.equal(fs.readFileSync(file, 'utf8'), before);
+    assert.equal((await m.ipcHandlers.get('settings:get')()).theme, 'dark');
+    assert.equal(fs.readdirSync(path.dirname(file)).some((name) => name.startsWith('settings.json.tmp-')), false);
+  } finally {
+    fs.renameSync = rename;
+    fs.writeFileSync = write;
+    m.cleanup();
+  }
 });
 
 /* ================= IPC Sender Validation ================= */
@@ -1601,6 +1686,47 @@ test('daily limit: usage from a previous day is reset and does not block', async
   assert.equal(st.state, 'allowed', 'שימוש של יום קודם אינו נספר להיום');
   assert.equal(st.limitReached, false);
   assert.equal(st.dailyLimit.usedSeconds, 0, 'המכסה מתאפסת ביום חדש');
+  m.cleanup();
+});
+
+test('daily limit: a long gap between samples is not counted as use', async () => {
+  const settings = S.defaultSchedule();
+  const realHrtime = process.hrtime.bigint;
+  let offset = 0n;
+  process.hrtime.bigint = () => realHrtime() + offset;
+  try {
+    const m = loadMain({ settings });
+    await m.ready();
+    const getStatus = m.ipcHandlers.get('status:get');
+    const before = (await getStatus()).dailyLimit.usedSeconds;
+    offset += 600_000_000_000n;
+    m.electron.powerMonitor.emit('resume');
+    await sleep(40);
+    assert.equal((await getStatus()).dailyLimit.usedSeconds, before);
+    offset += 5_000_000_000n;
+    m.electron.powerMonitor.emit('resume');
+    await sleep(40);
+    assert.equal((await getStatus()).dailyLimit.usedSeconds, before + 5);
+    m.cleanup();
+  } finally {
+    process.hrtime.bigint = realHrtime;
+  }
+});
+
+test('daily limit: midnight reset does not promise access during a scheduled block', async () => {
+  const settings = S.defaultSchedule();
+  settings.pinHash = S.sha256Hex('1234');
+  settings.dailyLimit = { enabled: true, minutes: 30 };
+  const tomorrow = S.dailyLimitResetAt(new Date());
+  settings.week[tomorrow.getDay()].slots.push({ start: 0, end: 360, type: 'blocked' });
+  const m = loadMain({ settings });
+  seedUsage(m, 30 * 60);
+  await m.ready();
+  const st = await m.ipcHandlers.get('status:get')({});
+  assert.equal(st.limitReached, true);
+  tomorrow.setHours(6);
+  assert.deepEqual(st.nextAt, tomorrow);
+  assert.equal(st.next, 'allowed');
   m.cleanup();
 });
 

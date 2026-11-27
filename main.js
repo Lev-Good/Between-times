@@ -93,7 +93,12 @@ function isElevated() {
     execFileSync('net', ['session'], { stdio: 'pipe', windowsHide: true });
     elevatedCache = true;
   } catch {
-    elevatedCache = false;
+    try {
+      const result = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+        '([Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)'],
+        { encoding: 'utf8', windowsHide: true, timeout: 5000 });
+      elevatedCache = String(result).trim() === 'True';
+    } catch { elevatedCache = false; }
   }
   return elevatedCache;
 }
@@ -167,6 +172,12 @@ function recordClockSample() {
 // במחשב נחסם לפי אותו לוח זמנים. אחרת — בתיקיית הנתונים של המשתמש הנוכחי.
 const machineDir = () => path.join(process.env.PROGRAMDATA || 'C:\\ProgramData', 'BenHazmanim');
 const machineSettingsFile = () => path.join(machineDir(), 'settings.json');
+const policyBackupFile = () => path.join(machineDir(), 'settings.last-good.json');
+const policyAclMarker = () => path.join(machineDir(), 'policy-acl.json');
+const managedPolicy = () => isWin && (app.isPackaged || fs.existsSync(policyAclMarker()));
+const policyEditor = process.argv.includes('--policy-editor');
+const canWritePolicy = () => !managedPolicy() || (isElevated() && fs.existsSync(policyAclMarker()));
+const policyPermissionError = () => ({ ok: false, needAdmin: true, error: 'שינוי המדיניות מחייב אישור מנהל של Windows' });
 
 // עותק מוגן של קבצי התוכנה — נשמר אצל "כל המשתמשים" כדי שמחיקת תיקיית
 // ההתקנה המקורית (שנמצאת בפרופיל המשתמש וניתנת למחיקה) לא תשבית את האכיפה.
@@ -176,7 +187,7 @@ const settingsFile = () => {
   if (!isWin) return path.join(app.getPath('userData'), 'settings.json');
   // לאחר שהותקן מקור משותף, מחיקתו אינה מחזירה את התהליך לקובץ משתמש
   // שאפשר לעצב כרצוננו. נשארים נעולים למקור המשותף עד שהוא משוחזר או מתוקן.
-  if (sharedSettingsRequired || fs.existsSync(machineSettingsFile())) return machineSettingsFile();
+  if (managedPolicy() || sharedSettingsRequired || fs.existsSync(machineSettingsFile())) return machineSettingsFile();
   return isElevated() ? machineSettingsFile() : path.join(app.getPath('userData'), 'settings.json');
 };
 
@@ -196,6 +207,10 @@ function reloadSettingsIfChanged() {
   settingsReloadBusy = true;
   try {
     loadSettings();
+    if (managedPolicy() && win && !win.isDestroyed()) {
+      lockSession();
+      win.webContents.send('policy-changed');
+    }
     logEvent('settings-reloaded', { source: 'external-change' });
     enforce();
   } finally {
@@ -263,7 +278,7 @@ let netBlockWarned = false;   // הודעת השגיאה נשלחה פעם אח�
 let netDesired = false;       // המצב הרצוי האחרון של חוק חומת האש
 let netOperation = null;      // Promise יחיד — מונע add/delete חופפים
 let netNeedsValidation = false; // חוק קיים מסשן קודם חייב אימות מחדש
-let netElevationRetryAt = 0;   // מניעת חלונות UAC חוזרים במקרה של ביטול/כשל
+const netElevationRetryAt = { enable: 0, disable: 0 };
 let lastNetActive = false;    // מעקב מצבי לזיהוי תחילת/סיום חסימת אינטרנט ביומן
 let netIconWin = null;        // חלון האייקון הצף (מחשב פתוח + אינטרנט חסום)
 let warnWin = null;           // חלונית האזהרה הצפה 5 דקות לפני חסימה
@@ -351,7 +366,7 @@ function readActivity(limit) {
     return [];
   }
 }
-let updateNote = null;
+let updateInstallation = null;
 
 // הגנה מפני ניחוש סיסמה (ברוט-פורס): מונה כישלונות + נעילה זמנית.
 // הנעילה נשמרת לקובץ — כך שהיא לא מתאפסת באתחול או בהרגת התהליך.
@@ -362,7 +377,7 @@ const pinLockFile = () => {
   // beside the protected policy on managed Windows installs so deleting a
   // file from the profile cannot reset the lockout counter.
   const managed = isWin && (sharedSettingsRequired || fs.existsSync(machineSettingsFile()));
-  return managed
+  return managed && (!managedPolicy() || isElevated())
     ? path.join(machineDir(), 'pinlock.json')
     : path.join(app.getPath('userData'), 'pinlock.json');
 };
@@ -489,6 +504,17 @@ function decryptPassword(store) {
   return '';
 }
 
+function parseSettingsObject(content) {
+  const raw = JSON.parse(content);
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error('Settings must be a JSON object');
+  }
+  if (Number(raw.schemaVersion || 0) > S.SCHEMA_VERSION) {
+    throw new Error('Settings schema is newer than this application');
+  }
+  return raw;
+}
+
 function loadSettings() {
   configurationFault = null;
   // מקור אמת יחיד: אם נוצר קובץ משותף, קובץ משתמש לעולם אינו גובר עליו.
@@ -497,15 +523,12 @@ function loadSettings() {
   const tryRead = (file) => {
     try {
       if (!file || !fs.existsSync(file)) return null;
-      const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
-      if (Number(raw && raw.schemaVersion || 0) > S.SCHEMA_VERSION) {
-        throw new Error('settings schema is newer than this application');
-      }
+      const raw = parseSettingsObject(fs.readFileSync(file, 'utf8'));
       const normalized = S.normalizeSchedule(raw);
       // Non-enumerable: available to loadSettings but never serialized into
       // settings.json or exposed through IPC.
       Object.defineProperty(normalized, '__needsSchemaMigration', {
-        value: Number(raw && raw.schemaVersion || 0) < S.SCHEMA_VERSION,
+        value: Number(raw.schemaVersion || 0) < S.SCHEMA_VERSION,
         enumerable: false
       });
       return normalized;
@@ -517,7 +540,7 @@ function loadSettings() {
 
   // קיום של קובץ משותף/גיבוי/עותק מוגן מסמן התקנה מנוהלת. מרגע זה
   // קובץ משתמש לעולם אינו יכול להפוך למקור האמת, גם אם machine settings נמחק.
-  if (isWin && (fs.existsSync(machineFile) || fs.existsSync(protectedSettingsFile()) ||
+  if (isWin && (managedPolicy() || fs.existsSync(machineFile) || fs.existsSync(protectedSettingsFile()) ||
       fs.existsSync(path.join(machineDir(), 'install.json')))) {
     sharedSettingsRequired = true;
   }
@@ -537,7 +560,7 @@ function loadSettings() {
   } else if (fs.existsSync(machineFile) || sharedSettingsRequired) {
     // קובץ משותף קיים/נדרש אך פגום או נמחק: מנסים קודם את העותק המוגן.
     // אסור ליפול לקובץ משתמש שאינו מקור אמת, ואם אין Backup — Fail Closed.
-    const backup = tryRead(protectedSettingsFile());
+    const backup = tryRead(managedPolicy() ? policyBackupFile() : protectedSettingsFile());
     if (backup) {
       schedule = backup;
       source = 'backup-recovered';
@@ -611,7 +634,8 @@ function loadSettings() {
   // תישאר עקבית, והתיקונים (מחיקת חלונות וכדומה) יישארו קבועים לכל המשתמשים.
   // בהרצה מוגבהת חייב להיווצר קובץ משותף גם בהתקנה חדשה עם לוח ריק —
   // השומר המערכתי משתמש בקיומו כסמן שהתוכנה הותקנה.
-  if (isWin && isElevated() && (dirty || source === 'user' || source === 'backup' || source === 'backup-recovered' || !fs.existsSync(machineFile))) {
+  if (isWin && isElevated() && !configurationFault &&
+      (dirty || source === 'user' || source === 'backup' || source === 'backup-recovered' || !fs.existsSync(machineFile))) {
     saveSettings();
   }
 
@@ -631,54 +655,73 @@ function loadSettings() {
 function writeProtectedSettingsBackup() {
   if (!isWin || !isElevated() || !fs.existsSync(protectedAppDir())) return;
   try {
-    atomicWrite(protectedSettingsFile(), fs.readFileSync(machineSettingsFile()));
-  } catch { /* העותק המוגן עדיין לא נוצר או אינו נגיש */ }
+    atomicWrite(protectedSettingsFile(), fs.readFileSync(machineSettingsFile()), (tmp) => {
+      execFileSync('icacls', fileWithoutInheritedDenialsAcl(tmp, 'R'), { windowsHide: true, timeout: 10000 });
+    });
+  } catch (err) {
+    logEvent('settings-backup-write-failed', { error: err.message });
+  }
 }
 
-function atomicWrite(file, content) {
+function preparePolicyFile(file) {
+  const opts = { windowsHide: true, timeout: 10000 };
+  execFileSync('icacls', [file, '/setowner', '*S-1-5-32-544'], opts);
+  execFileSync('icacls', fileWithoutInheritedDenialsAcl(file, 'R'), opts);
+}
+
+function atomicWrite(file, content, prepare) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  const tmp = file + '.tmp-' + process.pid + '-' + Date.now();
+  const tmp = file + '.tmp-' + crypto.randomBytes(12).toString('hex');
   let fd = null;
+  let created = false;
   try {
-    fd = fs.openSync(tmp, 'w');
+    fd = fs.openSync(tmp, 'wx');
+    created = true;
     fs.writeFileSync(fd, content, 'utf8');
-    try { fs.fsyncSync(fd); } catch { /* לא זמין בכל מערכת קבצים */ }
+    fs.fsyncSync(fd);
     fs.closeSync(fd);
     fd = null;
+    if (prepare) prepare(tmp);
     fs.renameSync(tmp, file);
-  } catch (err) {
-    if (fd !== null) { try { fs.closeSync(fd); } catch { /* ignore */ } fd = null; }
-    // אם יצירת קובץ זמני באותה תיקייה נכשלה (למשל EPERM בתיקייה משותפת),
-    // ננסה כתיבה ישירה לקובץ היעד (אם הקובץ עצמו ניתן לכתיבה)
-    try {
-      fs.writeFileSync(file, content, 'utf8');
-      return;
-    } catch {
-      throw err;
-    }
   } finally {
     if (fd !== null) { try { fs.closeSync(fd); } catch { /* ignore */ } }
-    try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch { /* ignore */ }
+    try { if (created && fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch { /* ignore */ }
   }
 }
 
 function saveSettings() {
+  if (!canWritePolicy()) return policyPermissionError();
   const serialized = JSON.stringify(schedule, null, 2);
   const target = settingsFile();
+  const secured = managedPolicy();
+  if (policyEditor && settingsSignature && settingsSignatureFor(target) !== settingsSignature) {
+    return { ok: false, error: 'המדיניות השתנתה בחלון אחר. סגרו ופתחו מחדש את חלון העריכה' };
+  }
   try {
-    // Windows תמיד משתמש במקור משותף מוגן; לעולם לא יוצרים fallback
-    // בתיקיית משתמש שניתן למחוק או לערוך.
-    // isElevated check removed, settings are writable by users due to installer ACLs
-    atomicWrite(target, serialized);
-    writeProtectedSettingsBackup();
+    if (secured && fs.existsSync(target)) {
+      const previous = fs.readFileSync(target, 'utf8');
+      let usable = true;
+      try { parseSettingsObject(previous); } catch { usable = false; }
+      if (usable) atomicWrite(policyBackupFile(), previous, preparePolicyFile);
+    }
+    atomicWrite(target, serialized, secured ? preparePolicyFile : undefined);
     rememberSettingsSignature();
+    if (secured) {
+      try { atomicWrite(policyBackupFile(), serialized, preparePolicyFile); }
+      catch (err) {
+        logEvent('settings-backup-write-failed', { error: err.message });
+        return { ok: true, warning: 'הכללים נשמרו. לא ניתן לעדכן את גיבוי המדיניות' };
+      }
+    } else {
+      writeProtectedSettingsBackup();
+    }
     return { ok: true, warning: null };
   } catch (err) {
     // Windows never falls back to a user-writable settings source. A
     // transient permission or replacement failure must not turn the user
     // profile into a new source of truth (including during a race where the
     // shared file disappears after the preflight check).
-    if (isWin && !isTestMode) {
+    if (secured || (isWin && !isTestMode)) {
       return { ok: false, error: 'שמירת ההגדרות המשותפות נכשלה: ' + err.message };
     }
     try {
@@ -692,6 +735,10 @@ function saveSettings() {
   }
 }
 
+function saveRuntimeSettings() {
+  return managedPolicy() ? { ok: true } : saveSettings();
+}
+
 /* ================= מכסת זמן שימוש יומית =================
    ההורה יכול להגביל כמה זמן המחשב מותר לשימוש בכל יום (למשל חצי שעה).
    הזמן נספר בפועל לפי המצב האמיתי: נצבר רק כשהמחשב פתוח לשימוש, לא בזמן
@@ -700,7 +747,7 @@ function saveSettings() {
    של המחשב לא מאפס את מכסת היום, והקובץ יושב במקום המוגן כשהתוכנה מנוהלת. */
 const usageFile = () => {
   const managed = isWin && (sharedSettingsRequired || fs.existsSync(machineSettingsFile()));
-  return managed
+  return managed && (!managedPolicy() || isElevated())
     ? path.join(machineDir(), 'usage.json')
     : path.join(app.getPath('userData'), 'usage.json');
 };
@@ -711,6 +758,15 @@ let usageLastTick = 0;   // trustedNow של הדגימה האחרונה
 let usagePersisted = 0;  // סה"כ השניות שנשמרו לאחרונה לדיסק (כללי + תוכנות)
 
 function usageDayKey() { return S.dateKey(trustedDate()); }
+function resetUsageDay(now) {
+  const day = S.dateKey(new Date(now));
+  if (day === dailyUsage.day) return;
+  dailyUsage = { day, seconds: 0, apps: {} };
+  usagePersisted = 0;
+  const midnight = new Date(now);
+  midnight.setHours(0, 0, 0, 0);
+  usageLastTick = Math.max(usageLastTick, midnight.getTime());
+}
 function usageAppsSum() {
   let sum = 0;
   const apps = dailyUsage.apps || {};
@@ -725,7 +781,10 @@ function usageTotal() { return dailyUsage.seconds + usageAppsSum(); }
 function loadUsage() {
   dailyUsage = { day: usageDayKey(), seconds: 0, apps: {} };
   try {
-    const data = JSON.parse(fs.readFileSync(usageFile(), 'utf8'));
+    const local = usageFile();
+    const source = managedPolicy() && !isElevated() && !fs.existsSync(local)
+      ? path.join(machineDir(), 'usage.json') : local;
+    const data = JSON.parse(fs.readFileSync(source, 'utf8'));
     if (data && data.day === dailyUsage.day) {
       if (Number.isFinite(Number(data.seconds))) {
         dailyUsage.seconds = Math.max(0, Math.min(86400, Math.round(Number(data.seconds))));
@@ -757,16 +816,14 @@ function saveUsage(force) {
 // appKey (אופציונלי): מפתח התוכנה המותרת שנמצאת כעת בשימוש — לצבירת מכסת התוכנה.
 function trackDailyUsage(inUse, appKey) {
   const now = trustedNow();
+  resetUsageDay(now);
   const previous = usageLastTick || now;
   usageLastTick = now;
-  const day = usageDayKey();
-  if (day !== dailyUsage.day) {
-    dailyUsage = { day, seconds: 0, apps: {} };
-    usagePersisted = 0;
+  const delta = (now - previous) / 1000;
+  if (delta > 0 && delta <= 15) {
+    if (inUse) dailyUsage.seconds += delta;
+    if (appKey) dailyUsage.apps[appKey] = (dailyUsage.apps[appKey] || 0) + delta;
   }
-  const delta = Math.max(0, Math.min((now - previous) / 1000, 15));
-  if (inUse) dailyUsage.seconds += delta;
-  if (appKey) dailyUsage.apps[appKey] = (dailyUsage.apps[appKey] || 0) + delta;
   saveUsage(false);
 }
 
@@ -775,6 +832,7 @@ function appUsageKey(app) {
   return String((app && app.exe) || '').trim().toLowerCase();
 }
 function appUsageSeconds(app) {
+  resetUsageDay(trustedNow());
   const key = appUsageKey(app);
   return key ? (Number(dailyUsage.apps[key]) || 0) : 0;
 }
@@ -810,6 +868,7 @@ function logAllowedAppDenied(app) {
 // האם מכסת היום נוצלה? פתיחה מוקדמת בסיסמת ההורה (manualUnlockUntil) מבטלת
 // את מכסת היום — כמו בכל חסימה אחרת של הלוח.
 function dailyLimitExhausted(s) {
+  resetUsageDay(trustedNow());
   const eff = s || activeSchedule();
   if (!eff || eff.enabled === false || !eff.pinHash) return false;
   if (eff.manualUnlockUntil && trustedNow() < Number(eff.manualUnlockUntil)) return false;
@@ -835,12 +894,15 @@ function policyStatus(s) {
   let out = st;
   if (exhausted) {
     const reset = S.dailyLimitResetAt(trustedDate());
+    const afterReset = S.getStatus(eff, reset);
+    const stillBlocked = afterReset.state === 'blocked';
+    const nextAt = stillBlocked ? afterReset.nextAt : reset;
     out = {
       ...st,
       state: 'blocked',
-      next: 'allowed',
-      nextAt: reset,
-      secondsUntilNext: Math.max(0, Math.ceil((reset.getTime() - trustedNow()) / 1000)),
+      next: stillBlocked ? afterReset.next : afterReset.state,
+      nextAt,
+      secondsUntilNext: nextAt ? Math.max(0, Math.ceil((nextAt.getTime() - trustedNow()) / 1000)) : null,
       warning: false,
       warningSeconds: null,
       limitReached: true
@@ -1070,7 +1132,7 @@ function reconcileNetBlock(desired) {
       const wanted = netDesired;
       const already = wanted
         ? netBlockApplied && !netBlockFailed && !netNeedsValidation
-        : !netBlockApplied;
+        : !netBlockApplied && !netNeedsValidation;
       if (already) break;
       const res = await netBlockSet(wanted);
       if (res.ok) {
@@ -1080,6 +1142,8 @@ function reconcileNetBlock(desired) {
         netBlockError = null;
         netBlockWarned = false;
       } else {
+        netNeedsValidation = true;
+        if (wanted) netBlockApplied = false;
         netBlockFailed = true;
         netBlockError = res.error || 'לא ניתן לאמת שחסימת האינטרנט פעילה';
         if (!netBlockWarned) {
@@ -1127,7 +1191,7 @@ function elevateExe() {
   return null;
 }
 
-function runNetsh(args) {
+function runNetsh(args, direction) {
   return new Promise((resolve) => {
     if (isElevated()) {
       // גם בהרצה מוגבהת יש timeout: netsh תקוע אסור שיתקע את לולאת האכיפה
@@ -1136,14 +1200,13 @@ function runNetsh(args) {
         resolve({ err, stdout, stderr });
       });
     }
-    if (trustedNow() < netElevationRetryAt) {
-      return resolve({ err: new Error('הרשאת מנהל לא אושרה קודם לכן — נסו שוב בעוד דקה או מתוך אפליקציה שהופעלה כמנהל') });
+    if (trustedNow() < netElevationRetryAt[direction]) {
+      return resolve({ deferred: true });
     }
     const done = (err, stdout, stderr) => {
       // כשלון (כולל ביטול UAC) — קירור של דקה. זה מונע את "לולאת החלונות":
       // ביטול חסימה שנכשל לא יפתח שוב UAC כל 5 שניות.
-      if (err) netElevationRetryAt = trustedNow() + 60000;
-      else netElevationRetryAt = 0;
+      netElevationRetryAt[direction] = err ? trustedNow() + 60000 : 0;
       resolve({ err, stdout, stderr });
     };
     const elevate = elevateExe();
@@ -1177,41 +1240,44 @@ async function netBlockSet(enable) {
   // נכשל — למשל חומת האש כבויה והחוק קיים אך אינו אוכף — אסור שלולאת
   // האכיפה (כל 5 שניות) תפתח שוב UAC בכל פעם. אחרת מקבלים את "לולאת
   // החלונות" גם בלי שום שגיאה בפקודה עצמה.
-  const cooling = () => { netElevationRetryAt = trustedNow() + 60000; };
+  const direction = enable ? 'enable' : 'disable';
+  const cooling = (operation) => {
+    if (!operation.deferred) netElevationRetryAt[direction] = trustedNow() + 60000;
+  };
   if (enable) {
     const exists = await netRuleExists();
     const args = (exists === true)
       ? ['advfirewall', 'firewall', 'set', 'rule', 'name=' + NET_RULE, 'new', 'enable=yes', 'action=block', 'dir=out', 'protocol=any', 'localip=any', 'remoteip=any', 'profile=any']
       : ['advfirewall', 'firewall', 'add', 'rule', 'name=' + NET_RULE, 'dir=out', 'action=block', 'enable=yes', 'protocol=any', 'localip=any', 'remoteip=any', 'profile=any'];
-    await runNetsh(args);
+    const operation = await runNetsh(args, direction);
     // מדידת הצלחה לפי המצב בפועל — לא לפי קוד יציאה של תהליך מורם.
     // present !== true כולל גם null (לא ניתן לאמת) — בשני המקרים Fail-Closed.
     const present = await netRuleExists();
     if (present !== true) {
-      cooling();
+      cooling(operation);
       return fail('חוק חסימת האינטרנט לא נמצא לאחר ההפעלה — ייתכן שחומת האש מנוהלת על ידי תוכנה אחרת');
     }
     const firewallOn = await firewallProfilesEnabled();
     if (firewallOn === false || (firewallOn !== true && !isTestMode)) {
-      cooling();
+      cooling(operation);
       return fail(firewallOn === false
         ? 'חומת האש של Windows כבויה — החוק קיים אך אינו אוכף חסימה'
         : 'לא ניתן לאמת שחומת האש של Windows פעילה — חסימת האינטרנט לא אושרה');
     }
     return { ok: true };
   }
-  await runNetsh(['advfirewall', 'firewall', 'delete', 'rule', 'name=' + NET_RULE]);
+  const operation = await runNetsh(['advfirewall', 'firewall', 'delete', 'rule', 'name=' + NET_RULE], direction);
   // הצלחה = החוק באמת איננו. כך גם אם קוד היציאה של ההרמה אבד בדרך
   // (PowerShell/elevate), ביטול החסימה מתעדכן נכון והלולאה אינה חוזרת.
   // exists === true או null (לא ניתן לאמת) — בשני המקרים לא מדווחים
   // "בוטלה" כשהחוק עלול עדיין להיות שם: Fail-Closed.
   const exists = await netRuleExists();
   if (exists === true) {
-    cooling();
+    cooling(operation);
     return fail('לא ניתן להסיר את חוק חסימת האינטרנט — ייתכן שהמחשב או חומת האש מנוהלים על ידי תוכנה אחרת');
   }
   if (exists === null) {
-    cooling();
+    cooling(operation);
     return fail('לא ניתן לאמת שהחוק הוסר — נסו שוב בעוד רגע');
   }
   return { ok: true };
@@ -1221,10 +1287,8 @@ async function netBlockSet(enable) {
 // לא נמחקים מעצמם), כדי שהאכיפה תסיר/תפעיל אותו לפי הלוח הנוכחי.
 async function reconcileNetBlockOnStartup() {
   if (!isWin) return;
-  // null (לא ניתן לקבוע) מטופל כאילו החוק קיים — האכיפה תנסה לסנכרן
-  // ולבדוק מחדש, ולא תשאיר חוק ישן פעיל בשקט (Fail-Closed).
-  netBlockApplied = (await netRuleExists()) !== false;
-  netNeedsValidation = netBlockApplied;
+  netNeedsValidation = (await netRuleExists()) !== false;
+  netBlockApplied = false;
   // אם החוק קיים, הוא ייבדק/יופעל מחדש רק כאשר זה היעד הנוכחי; אם היעד
   // פתוח, reconcileNetBlock(false) יסיר אותו באופן סדרתי.
 }
@@ -1951,7 +2015,7 @@ function applyCoolOffIfDue() {
   clearCoolOff();
   manualLock = false;
   schedule.manualUnlockUntil = target;
-  saveSettings();
+  saveRuntimeSettings();
   logEvent('cooloff-applied');
   return true;
 }
@@ -2162,6 +2226,7 @@ function showWarningNotification(status) {
 // עם PowerShell (אסינכרוני), ולכן כל קריאה נוספת בזמן שהלולאה עסוקה רק
 // מסומנת ומבוצעת מיד אחריה — כך החסימה לא "נפספסת" גם בעומס קריאות.
 async function enforce() {
+  if (policyEditor) return;
   // backstop יחיד לתקופת הצינון: אם הזמן הגיע — מחילים את הפתיחה כאן, לפני
   // כל שאר הלוגיקה (כך גם ריצה מחדש בזמן enforceBusy מחילה אותה).
   applyCoolOffIfDue();
@@ -2258,7 +2323,7 @@ async function enforceCore() {
   // ה-Reconciliation הוא חלק מהמעבר עצמו — לא מדווחים מצב יציב לפני
   // שהפעולה האסינכרונית של Firewall הסתיימה. אם אין חוק ואין פעולה ברקע,
   // מדלגים על Promise ריק כדי שנעילה ידנית תהיה מיידית.
-  if (activeNet || netBlockApplied || netOperation || netDesired) {
+  if (activeNet || netBlockApplied || netNeedsValidation || netOperation || netDesired) {
     await reconcileNetBlock(activeNet);
   } else {
     netDesired = false;
@@ -2280,8 +2345,8 @@ async function enforceCore() {
     exitRelaxed();
     hideBlockWindows();
     unregisterBlockShortcuts();
-    finishEnforcement(activeNet && netBlockApplied ? 'netblocked' : 'allowed',
-      activeNet && !netBlockApplied ? 'חוק חסימת האינטרנט לא הופעל' : null);
+    if (netNeedsValidation) finishEnforcement('error', netBlockError || 'לא ניתן לאמת את מצב חומת האש');
+    else finishEnforcement(activeNet && netBlockApplied ? 'netblocked' : 'allowed');
     publish();
     return;
   }
@@ -2323,7 +2388,7 @@ function updateTray(status) {
   // אותו עיקרון כמו במסך הראשי: אין דיווח חסימה כוזב.
   const color = status.limitReached && status.state === 'blocked' ? 'נגמר זמן השימוש היומי'
     : (status.state === 'blocked' || status.manualLock) ? 'חסום'
-    : status.netBlockFailed ? 'שגיאה — האינטרנט לא נחסם'
+    : status.netBlockFailed ? (status.state === 'netblock' ? 'שגיאה — האינטרנט לא נחסם' : 'שגיאה בחומת האש')
     : status.state === 'netblock' ? 'האינטרנט חסום' : 'מותר';
   const warnTxt = status.warning
     ? (status.warningReason === 'limit'
@@ -2368,6 +2433,10 @@ function quitPromptOpen() {
 }
 
 function showQuitPrompt() {
+  if (!canWritePolicy()) {
+    openPolicyEditor().catch(() => {});
+    return;
+  }
   // ללא סיסמה מוגדרת — החסימה אינה פעילה בכל מקרה, יציאה חופשית (כמו במסך החסימה)
   if (!schedule.pinHash) { gracefulQuit(); return; }
   if (quitPromptOpen()) { quitWin.show(); quitWin.focus(); return; }
@@ -2435,7 +2504,7 @@ function createMainWindow() {
     height: 820,
     minWidth: 860,
     minHeight: 600,
-    title: 'בין הזמנים — ניהול זמן מחשב',
+    title: policyEditor ? 'בין הזמנים — עריכת מדיניות כמנהל' : 'בין הזמנים — ניהול זמן מחשב',
     icon: path.join(__dirname, 'assets', 'icon.png'),
     backgroundColor: windowBg(),
     autoHideMenuBar: true,
@@ -2450,7 +2519,7 @@ function createMainWindow() {
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
   // סגירה = מזעור למגש (אלא אם יוצאים באמת)
   win.on('close', (e) => {
-    if (!isQuitting) {
+    if (!isQuitting && !policyEditor) {
       e.preventDefault();
       lockSession(); // נעילה מיידית — גם אם אירוע ה-hide לא יגיע
       win.hide();
@@ -2670,15 +2739,11 @@ function buildIntegrityManifest(dir) {
     })
   };
 }
-function writeProtectedManifest() {
-  if (!isWin || !fs.existsSync(protectedAppDir())) return;
-  try {
-    atomicWrite(protectedManifestFile(), JSON.stringify(buildIntegrityManifest(protectedAppDir()), null, 2));
-  } catch { /* העותק עדיין אינו שלם */ }
-}
-function verifyIntegrityManifest(dir, manifest) {
+function verifyIntegrityManifest(dir, manifest, verifyHashes = false) {
   if (!manifest || !Array.isArray(manifest.files) || !manifest.files.length) return false;
   try {
+    const listed = new Set(manifest.files.map((entry) => path.resolve(dir, entry.path)));
+    if (!listed.has(sourceExecutable(dir)) || !listed.has(packageJsonPath(dir))) return false;
     return manifest.files.every((entry) => {
       const file = path.resolve(dir, entry.path);
       const root = path.resolve(dir) + path.sep;
@@ -2686,7 +2751,7 @@ function verifyIntegrityManifest(dir, manifest) {
       const st = fs.statSync(file);
       if (!st.isFile() || st.size !== entry.size) return false;
       // mtime הוא בדיקת cheap path; Hash הוא מקור האמת כשמטא-דאטה השתנה.
-      if (Number(st.mtimeMs) === Number(entry.mtimeMs)) return true;
+      if (!verifyHashes && Number(st.mtimeMs) === Number(entry.mtimeMs)) return true;
       return sha256File(file) === String(entry.sha256 || '').toLowerCase();
     });
   } catch { return false; }
@@ -2702,6 +2767,62 @@ function installDirMatchesProtectedManifest(dir) {
     const manifest = JSON.parse(fs.readFileSync(protectedManifestFile(), 'utf8'));
     return verifyIntegrityManifest(dir, manifest);
   } catch { return false; }
+}
+
+function installManifestFile(dir) { return path.join(dir, 'integrity.json'); }
+
+async function saveInstallManifest(dir, manifest) {
+  const file = installManifestFile(dir);
+  const content = JSON.stringify(manifest, null, 2);
+  try { if (fs.readFileSync(file, 'utf8') === content) return; } catch { /* first write */ }
+  await liftDirProtection(dir);
+  try {
+    atomicWrite(file, content);
+  } finally {
+    await hardenDirTree(dir);
+  }
+}
+
+async function replaceVerifiedTree(src, dst, manifest, prepare) {
+  const previous = dst + '.restore-previous';
+  // A process may have stopped between the two renames.
+  if (fs.existsSync(previous)) {
+    if (!fs.existsSync(dst)) fs.renameSync(previous, dst);
+    else if (verifyIntegrityManifest(dst, manifest, true)) fs.rmSync(previous, { recursive: true, force: true });
+    else throw new Error('Previous installation is still awaiting recovery');
+  }
+  if (!verifyIntegrityManifest(src, manifest, true)) throw new Error('Installation source failed verification');
+  fs.mkdirSync(path.dirname(dst), { recursive: true });
+  const staged = fs.mkdtempSync(dst + '.stage-');
+  try {
+    if (!await runAclCommandOk('icacls', [staged, '/inheritance:r',
+      '/grant:r', '*S-1-5-32-545:(OI)(CI)RX', '*S-1-5-32-544:(OI)(CI)F', '*S-1-5-18:(OI)(CI)F'])) {
+      throw new Error('Unable to protect installation staging directory');
+    }
+    fs.cpSync(src, staged, {
+      recursive: true,
+      preserveTimestamps: true,
+      filter: (item) => item !== installManifestFile(src) && item !== path.join(src, 'settings.backup.json')
+    });
+    if (!verifyIntegrityManifest(staged, manifest, true)) throw new Error('Staged installation failed verification');
+    atomicWrite(installManifestFile(staged), JSON.stringify(manifest, null, 2));
+    if (prepare) prepare(staged);
+
+    await liftDirProtection(dst);
+    const hadPrevious = fs.existsSync(dst);
+    if (hadPrevious) fs.renameSync(dst, previous);
+    try {
+      fs.renameSync(staged, dst);
+    } catch (err) {
+      if (hadPrevious) fs.renameSync(previous, dst);
+      throw err;
+    }
+    try { fs.rmSync(previous, { recursive: true, force: true }); }
+    catch { logEvent('installation-cleanup-pending', { dir: dst }); }
+  } finally {
+    try { fs.rmSync(staged, { recursive: true, force: true }); }
+    catch { logEvent('installation-staging-cleanup-failed', { dir: dst }); }
+  }
 }
 function sourceExecutable(dir) {
   return path.join(dir, path.basename(process.execPath));
@@ -2761,12 +2882,17 @@ function denyDeleteAcl(dir) {
 // הוצאת קובץ בודד מתחולת איסור המחיקה. משמשת לגיבוי ההגדרות: הוא נכתב מחדש
 // בכל שמירה ב-rename אטומי (פעולת מחיקה ברמת הקובץ) — בלי החרגה זו שמירת
 // ההגדרות הייתה נחסמת תחת האיסור. רמת ההגנה שלו נשארת כמו קודם (מנהל יכול).
-async function excludeFileFromDeny(file) {
+async function excludeFileFromDeny(file, userAccess = 'F') {
   if (!isWin || !isElevated() || !file) return;
-  await runAclCommand('icacls', [file, '/inheritance:r',
-    '/grant:r', '*S-1-5-32-545:F',
+  await runAclCommand('icacls', [file, '/remove:d', '*S-1-1-0']);
+  await runAclCommand('icacls', fileWithoutInheritedDenialsAcl(file, userAccess));
+}
+
+function fileWithoutInheritedDenialsAcl(file, userAccess) {
+  return [file, '/inheritance:r',
+    '/grant:r', '*S-1-5-32-545:' + userAccess,
     '/grant:r', '*S-1-5-32-544:F',
-    '/grant:r', '*S-1-5-18:F']);
+    '/grant:r', '*S-1-5-18:F'];
 }
 
 // הגדרת הרשאות עץ תיקייה (ללא איסור המחיקה) — בעלות למנהלים + הרשאות.
@@ -2839,13 +2965,10 @@ async function hardenDirTree(dir) {
 
 async function hardenMachineDir() {
   if (!isWin || !isElevated()) return;
+  if (managedPolicy()) return; // The installer owns the policy ACL and backup.
   const dir = machineDir();
   await runAclCommand('takeown', ['/f', dir, '/a']);
   await hardenAclTree(dir);
-  // התיקייה המשותפת וקובץ ההגדרות חייבים להישאר ניתנים לכתיבה למשתמשי המחשב
-  // כדי ששמירת הגדרות מממשק המשתמש הרגיל לא תיכשל ב-EPERM
-  await runAclCommand('icacls', [dir, '/grant', '*S-1-5-32-545:(OI)(CI)M']);
-  await runAclCommand('icacls', [machineSettingsFile(), '/grant', '*S-1-5-32-545:M']);
   // התיקייה המשותפת מכילה את העותק המוגן — האיפוס לירושה (dir\* /reset)
   // מסיר זמנית את איסור המחיקה שלו; מקשחים אותו שוב מיד כדי שלא יישאר
   // ללא הגנה גם לרגע.
@@ -2873,14 +2996,13 @@ async function hardenProtectedCopy() {
     if (!fs.existsSync(protectedSettingsFile())) {
       const mf = machineSettingsFile();
       if (fs.existsSync(mf)) fs.copyFileSync(mf, protectedSettingsFile());
-      else atomicWrite(protectedSettingsFile(), '{}');
     }
   } catch { /* ignore */ }
   await runAclCommand('takeown', ['/f', dir, '/a', '/r', '/d', 'y']);
   await hardenAclTree(dir);
   await denyDeleteAcl(dir);
   // הגיבוי נכתב מחדש בכל שמירת הגדרות — יוצא מתחולת האיסור
-  await excludeFileFromDeny(protectedSettingsFile());
+  if (fs.existsSync(protectedSettingsFile())) await excludeFileFromDeny(protectedSettingsFile(), 'R');
 }
 
 // האם העותק המוגן זהה **לתיקיית ההתקנה** — ולא לגרסה שאנחנו רצים בה.
@@ -2911,30 +3033,6 @@ function processesFromDir(dir) {
         resolve(String(stdout || '').split(/\s+/).filter((s) => /^\d+$/.test(s)).map(Number));
       });
   });
-}
-
-// מחיקת עץ תיקייה עם נסיונות חוזרים. `fs.rmSync` נכשל בקלות על Windows — קובץ
-// נעול לרגע (סורק/אנטי-וירוס/תהליך שיצא זה עתה) או איסור מחיקה שלא הוסר על
-// קובץ בודד מפילים אותו כולו — ואז כל הרענון נכשל. כאן מנסים שוב, מנקים
-// מאפיין קריאה-בלבד, ומרימים את איסור המחיקה מחדש בין הנסיונות.
-async function removeTreeRetry(dir) {
-  for (let attempt = 0; attempt < 5; attempt++) {
-    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ננסה שוב מטה */ }
-    if (!fs.existsSync(dir)) return true;
-    try {
-      for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
-        const full = path.join(dir, ent.name);
-        if (ent.isDirectory()) { await removeTreeRetry(full); continue; }
-        try { fs.chmodSync(full, 0o666); } catch { /* ignore */ }
-        try { fs.unlinkSync(full); } catch { /* ignore */ }
-      }
-      try { fs.rmdirSync(dir); } catch { /* ignore */ }
-    } catch { /* ignore */ }
-    if (!fs.existsSync(dir)) return true;
-    await liftDirProtection(dir);
-    await new Promise((r) => setTimeout(r, 1500));
-  }
-  return !fs.existsSync(dir);
 }
 
 // השומר המערכתי רץ כ-SYSTEM מתוך העותק המוגן — קובץ ההרצה וה-asar שלו טעונים,
@@ -2968,6 +3066,8 @@ async function ensureProtectedCopy() {
     }
     if (!fs.existsSync(sourceExecutable(src))) return false;
     if (protectedCopyMatchesInstallDir()) {
+      const manifest = readJsonFileQuiet(protectedManifestFile());
+      await saveInstallManifest(src, manifest);
       await hardenMachineDir();
       await hardenInstallDir();
       await hardenProtectedCopy();
@@ -2975,16 +3075,14 @@ async function ensureProtectedCopy() {
       saveInstallInfo();
       return true; // העותק עדכני — אין צורך להעתיק שוב
     }
-    // רענון העותק המוגן — לעבור את השומר, להרים זמנית את איסור המחיקה לפני
-    // החלפת הקבצים (ההקשחה שלהלן מחזירה אותו מיד אחרי ההעתקה).
+    const manifest = buildIntegrityManifest(src);
     await stopSystemGuardForRefresh();
-    await liftDirProtection(dst);
-    const removed = await removeTreeRetry(dst);
-    if (removed) fs.mkdirSync(dst, { recursive: true });
-    // מעתיקים את כל שורש ההתקנה, כולל exe + resources\\app.asar.
-    fs.cpSync(src, dst, { recursive: true, force: true });
-    if (!fs.existsSync(sourceExecutable(dst))) throw new Error('קובץ ההרצה לא הועתק');
-    writeProtectedManifest();
+    try {
+      await replaceVerifiedTree(src, dst, manifest, stageProtectedSettings);
+    } finally {
+      if (fs.existsSync(dst)) await hardenProtectedCopy();
+    }
+    await saveInstallManifest(src, manifest);
     await hardenMachineDir();
     await hardenInstallDir();
     await hardenProtectedCopy();
@@ -3496,22 +3594,28 @@ async function sendRecovery() {
     return { ok: false, error: 'כבר נשלח קוד שחזור — בדקו את המייל או נסו שוב לאחר פקיעת הקוד' };
   }
   const token = crypto.randomBytes(32).toString('hex');
-  const previous = JSON.stringify(schedule);
-  schedule.recoveryPendingHash = S.sha256Hex(token);
-  schedule.recoveryPendingUntil = trustedNow() + RECOVERY_TOKEN_TTL_MS;
+  const previousHash = schedule.recoveryPendingHash;
+  const previousUntil = schedule.recoveryPendingUntil;
+  const pendingHash = S.sha256Hex(token);
+  const pendingUntil = trustedNow() + RECOVERY_TOKEN_TTL_MS;
+  const restorePendingCode = () => {
+    if (schedule.recoveryPendingHash !== pendingHash || schedule.recoveryPendingUntil !== pendingUntil) return false;
+    schedule.recoveryPendingHash = previousHash;
+    schedule.recoveryPendingUntil = previousUntil;
+    return true;
+  };
+  schedule.recoveryPendingHash = pendingHash;
+  schedule.recoveryPendingUntil = pendingUntil;
   const persisted = saveSettings();
   if (!persisted.ok) {
-    schedule = S.normalizeSchedule(JSON.parse(previous));
+    restorePendingCode();
     return { ok: false, error: persisted.error || 'לא ניתן לשמור בקשת שחזור' };
   }
+  const partner = accountabilityActive() ? String(schedule.accountabilityEmail || '').trim() : '';
+  const wasBlocked = netBlockApplied;
   try {
-    // שותף אחריות פעיל → הקוד נשלח גם לשותף (co-visibility). השרת שולח
-    // עותק של אותו קוד לכתובת ה-partner בנוסף לכתובת השחזור.
-    const partner = accountabilityActive() ? String(schedule.accountabilityEmail || '').trim() : '';
-    const wasBlocked = netBlockApplied;
     if (wasBlocked) await netBlockSet(false);
-    try {
-      const res = await fetch(RECOVERY_URL, {
+    const res = await fetch(RECOVERY_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email, token, partner, app: 'BenHazmanim', time: new Date().toISOString() }),
@@ -3519,18 +3623,18 @@ async function sendRecovery() {
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok || data.ok !== true) {
-      schedule = S.normalizeSchedule(JSON.parse(previous));
-      saveSettings();
+      if (restorePendingCode() && !saveSettings().ok) logEvent('recovery-cleanup-failed');
       return { ok: false, error: recoveryErrorToHebrew(String(data.error || '')) };
     }
-      return { ok: true };
-    } finally {
-      if (wasBlocked) await netBlockSet(true);
-    }
+    return { ok: true };
   } catch {
-    schedule = S.normalizeSchedule(JSON.parse(previous));
-    saveSettings();
+    if (restorePendingCode() && !saveSettings().ok) logEvent('recovery-cleanup-failed');
     return { ok: false, error: 'נדרשת גישה לאינטרנט לשחזור הסיסמה' };
+  } finally {
+    if (wasBlocked && !isQuitting) {
+      netNeedsValidation = true;
+      await enforce();
+    }
   }
 }
 
@@ -3558,6 +3662,7 @@ function completeRecovery(code, newPin) {
     schedule = S.normalizeSchedule(JSON.parse(previous));
     return { ok: false, error: persisted.error || 'שמירת הסיסמה החדשה נכשלה' };
   }
+  pinSuccess();
   sessionUnlocked = true;
   sessionUnlockedAt = trustedNow();
   notifyPartner('pin-changed');
@@ -3644,7 +3749,6 @@ async function checkForUpdate(opts) {
     // ה-hash הוא מנגנון האימות של הפצה ללא Authenticode. לא מריצים עדכון
     // שחסר לו hash מלא, גם אם הכתובת נמצאת ב-GitHub הרשמי.
     const note = { version: remote, url: data.url || '', notes: data.notes || '', sha256: String(data.sha256 || '').trim().toLowerCase() };
-    updateNote = note;
     if (!silent) notifyUpdate(note);
     return { ok: true, update: note };
   } catch {
@@ -3948,10 +4052,13 @@ async function downloadAndInstallUpdate() {
   // בדיקה שקטה (בלי התראת מערכת): המשתמש כבר לחץ "הורד והתקן עכשיו",
   // והתראה נוספת בכל ניסיון היא בדיוק מה שהציף את המשתמשים.
   const chk = await checkForUpdate({ silent: true });
-  if ((!chk.ok || !chk.update) && !updateNote) {
-    return { ok: false, error: (chk && chk.error) || 'אין עדכון זמין' };
+  if (!chk.ok || !chk.update) {
+    return { ok: false, error: chk.error || 'אין עדכון זמין' };
   }
-  const version = updateNote.version;
+  const { version, sha256: expectedHash } = chk.update;
+  if (!/^[0-9a-f]{64}$/.test(expectedHash)) {
+    return { ok: false, error: 'לעדכון חסר SHA-256 תקין — ההתקנה בוטלה' };
+  }
   const dest = path.join(app.getPath('temp'), 'BenHazmanim-Setup-' + version + '.exe');
   const progress = (phase, percent, bytes) => {
     const payload = { phase, version, percent, bytes: bytes || 0 };
@@ -3984,11 +4091,6 @@ async function downloadAndInstallUpdate() {
     if (size < 1024 * 1024 || mz !== 'MZ' || size > MAX_UPDATE_BYTES) {
       try { fs.unlinkSync(dest); } catch { /* ignore */ }
       return { ok: false, error: 'הקובץ שהורד אינו תקין — נסו שוב או הורידו ידנית מהאתר' };
-    }
-    const expectedHash = String(updateNote.sha256 || '').trim().toLowerCase();
-    if (!/^[0-9a-f]{64}$/.test(expectedHash)) {
-      try { fs.unlinkSync(dest); } catch { /* ignore */ }
-      return { ok: false, error: 'לעדכון חסר SHA-256 תקין — ההתקנה בוטלה' };
     }
     const actualHash = crypto.createHash('sha256').update(fs.readFileSync(dest)).digest('hex');
     if (actualHash !== expectedHash) {
@@ -4034,6 +4136,7 @@ async function downloadAndInstallUpdate() {
     gracefulQuit();
     return { ok: true, installing: true };
   } catch (e) {
+    try { fs.unlinkSync(dest); } catch { /* ignore */ }
     return { ok: false, error: e.message || 'ההורדה נכשלה — בדקו את החיבור לאינטרנט' };
   }
 }
@@ -4418,7 +4521,7 @@ function fileExplorerList(rootId, relative) {
   return { ok: true, root: { id: root.id, label: root.label, readonly: root.readonly }, rel: path.relative(root.path, dir), items };
 }
 
-function fileExplorerOpen(rootId, relative) {
+async function fileExplorerOpen(rootId, relative) {
   const fe = activeSchedule().fileExplorer || {};
   if (!fe.enabled) return { ok: false, error: 'סייר הקבצים המוגבל אינו מופעל' };
   const root = resolveExplorerRoots().find((r) => r.id === rootId);
@@ -4437,7 +4540,9 @@ function fileExplorerOpen(rootId, relative) {
       fs.chmodSync(openTarget, 0o444);
     } catch { return { ok: false, error: 'לא ניתן ליצור עותק לקריאה בלבד' }; }
   }
-  try { shell.openPath(openTarget); } catch { return { ok: false, error: 'לא ניתן לפתוח את הקובץ' }; }
+  try {
+    if (await shell.openPath(openTarget)) return { ok: false, error: 'לא ניתן לפתוח את הקובץ' };
+  } catch { return { ok: false, error: 'לא ניתן לפתוח את הקובץ' }; }
   return { ok: true };
 }
 
@@ -4488,7 +4593,23 @@ function uiSender(event) { return senderAllowed(event, [win, ...blockWins, quitW
 function settingsSender(event) { return senderAllowed(event, [win, ...blockWins, netIconWin]); }
 function recoverySender(event) { return senderAllowed(event, [win, ...blockWins]); }
 
-function registerIpc() {
+let policyEditorOperation = null;
+function openPolicyEditor() {
+  if (!managedPolicy() || policyEditor || isElevated()) return Promise.resolve({ ok: false, error: 'חלון עריכה מוגבה אינו נדרש' });
+  if (policyEditorOperation) return policyEditorOperation;
+  const launcher = elevateExe();
+  if (!launcher) return Promise.resolve({ ok: false, error: 'רכיב האישור של המתקין חסר. הפעילו את התוכנה כמנהל' });
+  const args = ['-wait', process.execPath, ...(app.isPackaged ? [] : [app.getAppPath()]), '--policy-editor'];
+  policyEditorOperation = new Promise((resolve) => {
+    execFile(launcher, args, { windowsHide: true }, (err) => {
+      reloadSettingsIfChanged();
+      resolve(err ? { ok: false, error: 'אישור המנהל בוטל או שחלון העריכה לא נפתח' } : { ok: true });
+    });
+  }).finally(() => { policyEditorOperation = null; });
+  return policyEditorOperation;
+}
+
+function registerIpc(ipcMain = defaultPolicyIpc()) {
   ipcMain.handle('settings:get', (event) => {
     if (!senderAllowed(event, [win, ...blockWins])) return senderError();
     // סודות אימות ושחזור אינם מועברים לממשק; הממשק מקבל רק מצב (pinSet/sessionUnlocked)
@@ -4502,6 +4623,8 @@ function registerIpc() {
     delete safe.recoveryPendingUntil;
     return {
       ...safe,
+      policyReadOnly: !canWritePolicy(),
+      policyEditor,
       pinSet: !!schedule.pinHash,
       configError: !!configurationFault,
       sessionUnlocked: schedule.pinHash ? isSessionUnlocked() : true
@@ -4510,6 +4633,7 @@ function registerIpc() {
 
   ipcMain.handle('settings:save', (event, data, approvalCode) => {
     if (!mainSender(event)) return senderError();
+    if (!canWritePolicy()) return policyPermissionError();
     // אימות סיסמה בצד השרת — לא להסתמך על אימות קליינט בלבד
     if (schedule.pinHash && !isSessionUnlocked()) {
       return { ok: false, error: 'נדרשת סיסמה כדי לשנות הגדרות' };
@@ -4598,7 +4722,7 @@ function registerIpc() {
     if (!valid.includes(b)) return { ok: false, error: 'רקע לא ידוע' };
     const previous = schedule.blockBg;
     schedule.blockBg = b;
-    const persisted = saveSettings();
+    const persisted = saveRuntimeSettings();
     if (!persisted.ok) {
       schedule.blockBg = previous;
       return { ok: false, error: persisted.error || 'שמירת הרקע נכשלה' };
@@ -4786,7 +4910,7 @@ function registerIpc() {
       schedule.manualUnlockUntil = isLockedState(st)
         ? (st.nextAt ? st.nextAt.getTime() : trustedNow() + 3600 * 1000)
         : null;
-      const persisted = saveSettings();
+      const persisted = saveRuntimeSettings();
       await enforce();
       return persisted.ok
         ? { ok: true }
@@ -4865,13 +4989,14 @@ function registerIpc() {
     } else {
       schedule.manualUnlockUntil = null;
     }
-    const persisted = saveSettings();
+    const persisted = saveRuntimeSettings();
     // הפתיחה אינה מוחזרת כ"הצליחה" לפני שהאכיפה הסתיימה בפועל: ממתינים
     // להסרת חוק חומת האש, כך שהמשתמש לא יקבל "בוטלה" בזמן שהאינטרנט עדיין
     // חסום (וגם לא ייקפצו ניסיונות הרמה חוזרים כל כמה שניות).
     await enforce();
     const actual = enforcementState.actual;
-    const stillBlocked = !!(eff.enabled && S.getStatus(eff, trustedDate()).state === 'netblock' && netBlockApplied);
+    const stillBlocked = !!(eff.enabled && S.getStatus(eff, trustedDate()).state === 'netblock' &&
+      (netBlockApplied || netNeedsValidation));
     return persisted.ok
       ? (stillBlocked
         ? { ok: false, error: 'האינטרנט עדיין חסום — לא ניתן היה להסיר את חוק חומת האש (נדרש אישור מנהל או שחומת האש מנוהלת על ידי תוכנה אחרת)' }
@@ -4881,6 +5006,7 @@ function registerIpc() {
 
   ipcMain.handle('pin:set', (event, pin, oldPin) => {
     if (!mainSender(event)) return senderError();
+    if (!canWritePolicy()) return policyPermissionError();
     const newPin = String(pin || '');
     if (!S.isValidPassword(newPin)) return { ok: false, error: 'הסיסמה צריכה להיות 4-20 תווים ללא רווחים' };
     if (schedule.pinHash) {
@@ -4909,6 +5035,7 @@ function registerIpc() {
 
   ipcMain.handle('pin:clear', (event, oldPin) => {
     if (!mainSender(event)) return senderError();
+    if (!canWritePolicy()) return policyPermissionError();
     if (schedule.pinHash) {
       const v = verifyPinServer(oldPin);
       if (!v.ok) return { ok: false, error: v.error };
@@ -4966,11 +5093,13 @@ function registerIpc() {
 
   ipcMain.handle('recovery:send', (event) => {
     if (!recoverySender(event)) return senderError();
+    if (!canWritePolicy()) return policyPermissionError();
     return sendRecovery();
   });
 
   ipcMain.handle('recovery:complete', (event, code, newPin) => {
     if (!recoverySender(event) && !mainSender(event)) return senderError();
+    if (!canWritePolicy()) return policyPermissionError();
     return completeRecovery(code, newPin);
   });
 
@@ -4990,7 +5119,10 @@ function registerIpc() {
     // עדכון מאומת אינו שינוי מדיניות: מקור, גרסה, מבנה EXE ו-SHA-256
     // נבדקים בתהליך הראשי. לכן אין לחסום אותו מאחורי Session PIN — אחרת
     // הודעת עדכון ברקע תוביל את המשתמש למסך הגדרות רק כדי להתעדכן.
-    return downloadAndInstallUpdate();
+    if (updateInstallation) return updateInstallation;
+    if (isQuitting) return { ok: false, error: 'התוכנה נסגרת. נסו שוב לאחר ההפעלה מחדש' };
+    updateInstallation = downloadAndInstallUpdate().finally(() => { updateInstallation = null; });
+    return updateInstallation;
   });
 
   ipcMain.handle('shell:open', (event, url) => {
@@ -5000,18 +5132,21 @@ function registerIpc() {
   });
 
   ipcMain.handle('app:quit', async (event, pin) => {
-    if (!quitSender(event)) return senderError();
+    if (!quitSender(event) && !(policyEditor && mainSender(event))) return senderError();
+    if (!canWritePolicy()) return policyPermissionError();
     // יציאה דורשת אימות סיסמה בתהליך הראשי — מניעת עקיפת חסימה על ידי ילדים
     if (schedule.pinHash) {
       const v = verifyPinServer(pin);
       if (!v.ok) return { ok: false, error: v.error };
     }
+    if (policyEditor) await reconcileNetBlockOnStartup();
     await gracefulQuit();
     return { ok: true };
   });
 
   ipcMain.handle('app:uninstall', async (event, pin) => {
     if (!mainSender(event)) return senderError();
+    if (!canWritePolicy()) return policyPermissionError();
     // הסרת התוכנה דורשת סיסמת הורה — כמו כל פעולה רגישה
     if (schedule.pinHash) {
       const v = verifyPinServer(pin);
@@ -5074,6 +5209,7 @@ function registerIpc() {
     //    לפני הפעלת ה-Uninstaller, כדי שלא יישארו רישומים לאחר ההסרה.
     await removeStartupEntries();
     // הסרת חוק חסימת האינטרנט (אם פעיל) — לא להשאיר את הרשת חסומה אחרי ההסרה
+    if (policyEditor) await reconcileNetBlockOnStartup();
     await reconcileNetBlock(false);
     // 2) הפעלת ה-Uninstaller (מסיר קבצים, קיצורים ונתונים) —
     //    בתהליך נפרד (detached) ומוגבה, בלי תלות ב-tasklist כושל.
@@ -5115,7 +5251,10 @@ function registerIpc() {
 
   ipcMain.handle('app:hide', (event) => {
     if (!mainSender(event)) return senderError();
-    if (win && !win.isDestroyed()) win.hide(); // ה-hide נועל את הסשן
+    if (win && !win.isDestroyed()) {
+      if (policyEditor) win.close();
+      else win.hide();
+    }
     return { ok: true };
   });
 
@@ -5124,6 +5263,11 @@ function registerIpc() {
     if (!settingsSender(event)) return senderError();
     showMainWindow();
     return { ok: true };
+  });
+
+  ipcMain.handle('policy:edit', (event) => {
+    if (!senderAllowed(event, [win, ...blockWins])) return senderError();
+    return openPolicyEditor();
   });
 
   // עדכון צבע הרקע של החלונות כשערכת הנושא משתנה (מניעת הבזקים בטעינה)
@@ -5203,6 +5347,7 @@ function registerIpc() {
 
   ipcMain.handle('backup:import', async (event) => {
     if (!mainSender(event)) return senderError();
+    if (!canWritePolicy()) return policyPermissionError();
     if (schedule.pinHash && !isSessionUnlocked()) return { ok: false, error: 'נדרשת סיסמה כדי לייבא גיבוי' };
     const parent = win && !win.isDestroyed() ? win : undefined;
     try {
@@ -5228,10 +5373,18 @@ function registerIpc() {
         passwordEnc: schedule.passwordEnc,
         recoveryPendingHash: schedule.recoveryPendingHash,
         recoveryPendingUntil: schedule.recoveryPendingUntil,
+        accountabilityEmail: schedule.accountabilityEmail,
+        accountabilityEnabled: schedule.accountabilityEnabled,
+        accountabilityRequireApproval: schedule.accountabilityRequireApproval,
+        coolOffMinutes: schedule.coolOffMinutes,
         manualUnlockUntil: schedule.manualUnlockUntil
       };
       const previous = JSON.stringify(schedule);
       schedule = S.normalizeSchedule(merged);
+      if (!schedule.pinHash && hasAnyBlockingPolicy(schedule)) {
+        schedule = S.normalizeSchedule(JSON.parse(previous));
+        return { ok: false, error: 'יש להגדיר סיסמת הורה לפני ייבוא מדיניות חסימה' };
+      }
       const persisted = saveSettings();
       if (!persisted.ok) {
         schedule = S.normalizeSchedule(JSON.parse(previous));
@@ -5239,11 +5392,27 @@ function registerIpc() {
       }
       logEvent('settings', { from: 'backup-import' });
       enforce();
-      return { ok: true };
+      return { ok: true, warning: persisted.warning };
     } catch (err) {
       return { ok: false, error: 'קובץ גיבוי לא תקין: ' + err.message };
     }
   });
+}
+
+function defaultPolicyIpc() {
+  if (!policyEditor) return ipcMain;
+  const allowed = new Set([
+    'settings:get', 'settings:save', 'status:get', 'pin:set', 'pin:clear', 'pin:verify',
+    'session:get', 'session:unlock', 'session:lock', 'recovery:send', 'recovery:complete',
+    'accountability:request-approval', 'backup:import', 'activity:get', 'security:get',
+    'allowed-apps:pick', 'allowed-apps:detect', 'allowed-apps:inspect-path', 'theme:apply',
+    'app:hide', 'app:version', 'app:quit', 'app:uninstall'
+  ]);
+  return {
+    handle(channel, handler) {
+      ipcMain.handle(channel, allowed.has(channel) ? handler : () => senderError());
+    }
+  };
 }
 
 /* ================= שומר-שער (הגנה מפני סגירה ממנהל המשימות) =================
@@ -5624,49 +5793,59 @@ function lastTamper() {
 }
 
 function restoreSharedSettings() {
-  if (fs.existsSync(machineSettingsFile()) || !fs.existsSync(protectedSettingsFile())) return;
+  const target = machineSettingsFile();
+  const secured = managedPolicy();
+  const backupFile = secured ? policyBackupFile() : protectedSettingsFile();
+  if (!fs.existsSync(backupFile) || (!secured && fs.existsSync(target))) return;
+  if (fs.existsSync(target)) {
+    try {
+      const raw = JSON.parse(fs.readFileSync(target, 'utf8'));
+      if (raw && typeof raw === 'object' && !Array.isArray(raw)) return;
+    } catch (err) {
+      if (!(err instanceof SyntaxError)) return;
+    }
+  }
   try {
-    fs.mkdirSync(machineDir(), { recursive: true });
-    fs.copyFileSync(protectedSettingsFile(), machineSettingsFile());
+    const backup = fs.readFileSync(backupFile, 'utf8');
+    parseSettingsObject(backup);
+    atomicWrite(target, backup, secured ? preparePolicyFile : undefined);
     logTamper('settings-restored');
   } catch { /* ignore */ }
 }
 
+function stageProtectedSettings(staged) {
+  const files = [machineSettingsFile(), protectedSettingsFile()];
+  for (const file of files) {
+    let data;
+    try {
+      data = fs.readFileSync(file, 'utf8');
+      parseSettingsObject(data);
+    } catch { continue; }
+    atomicWrite(path.join(staged, 'settings.backup.json'), data);
+    return;
+  }
+  if (files.some((file) => fs.existsSync(file))) throw new Error('Unable to preserve existing settings');
+}
+
 async function restoreProtectedCopy() {
-  // העותק המוגן נמחק/ניזוק — לשחזר מתיקיית ההתקנה המקורית (אם היא שלמה)
   const info = installInfo();
   const dst = protectedAppDir();
-  if (!info || !info.dir) return;
-  const srcOk = fs.existsSync(sourceExecutable(info.dir)) && fs.existsSync(packageJsonPath(info.dir));
-  const dstCoreExists = fs.existsSync(sourceExecutable(dst)) && fs.existsSync(packageJsonPath(dst));
-  // Manifest חסר הוא כשל שלמות, לא מצב Bootstrap. לעולם לא חותמים מחדש
-  // עותק שעלול להיות פגום; משחזרים אותו ממקור ההתקנה הידוע.
-  const dstOk = dstCoreExists && protectedCopyIntegrity();
-  if (srcOk && !dstOk) {
-    logTamper('protected-copy-restored');
+  if (!info || !info.dir || protectedCopyIntegrity()) return;
+  const manifests = [readJsonFileQuiet(protectedManifestFile()), readJsonFileQuiet(installManifestFile(info.dir))];
+  const manifest = manifests.find((candidate) => verifyIntegrityManifest(info.dir, candidate));
+  if (!manifest) {
+    logEvent('protected-copy-restore-failed', { error: 'No manifest matches the installed files' });
+    return;
+  }
+  try {
     try {
-      // Keep the protected settings backup before replacing the application
-      // directory. The backup lives below that directory, so deleting `dst`
-      // first would remove the only copy the watchdog can use to restore a
-      // deleted shared settings file.
-      let settingsBackup = null;
-      try {
-        if (fs.existsSync(protectedSettingsFile())) {
-          settingsBackup = fs.readFileSync(protectedSettingsFile());
-        } else if (fs.existsSync(machineSettingsFile())) {
-          settingsBackup = fs.readFileSync(machineSettingsFile());
-        }
-      } catch { /* restore the application even if the backup is unreadable */ }
-      // הרמה זמנית של איסור המחיקה — אחרת השומר עצמו (מנהל) לא יוכל
-      // להחליף את הקבצים; ההקשחה שלהלן מחזירה את האיסור מיד.
-      await liftDirProtection(dst);
-      fs.rmSync(dst, { recursive: true, force: true });
-      fs.mkdirSync(dst, { recursive: true });
-      fs.cpSync(info.dir, dst, { recursive: true });
-      writeProtectedManifest();
-      if (settingsBackup) atomicWrite(protectedSettingsFile(), settingsBackup);
-      await hardenProtectedCopy();
-    } catch { /* ignore */ }
+      await replaceVerifiedTree(info.dir, dst, manifest, stageProtectedSettings);
+    } finally {
+      if (fs.existsSync(dst)) await hardenProtectedCopy();
+    }
+    logTamper('protected-copy-restored');
+  } catch (err) {
+    logEvent('protected-copy-restore-failed', { error: err.message });
   }
 }
 
@@ -5674,19 +5853,17 @@ async function restoreInstallDir() {
   // תיקיית ההתקנה המקורית נמחקה — לשחזר מהעותק המוגן
   const info = installInfo();
   if (!info || !info.dir) return;
-  const srcOk = fs.existsSync(sourceExecutable(protectedAppDir())) && fs.existsSync(packageJsonPath(protectedAppDir()));
-  const dstOk = fs.existsSync(sourceExecutable(info.dir)) && fs.existsSync(packageJsonPath(info.dir)) && installDirMatchesProtectedManifest(info.dir);
-  if (srcOk && !dstOk) {
-    logTamper('install-dir-restored');
+  if (installDirMatchesProtectedManifest(info.dir) || !protectedCopyIntegrity()) return;
+  const manifest = readJsonFileQuiet(protectedManifestFile());
+  try {
     try {
-      // הרמה זמנית של איסור המחיקה — אחרת השומר (מנהל) לא יוכל להחליף
-      // את הקבצים; מיד אחרי ההעתקה מחזירים את ההקשחה.
-      await liftDirProtection(info.dir);
-      fs.rmSync(info.dir, { recursive: true, force: true });
-      fs.mkdirSync(info.dir, { recursive: true });
-      fs.cpSync(protectedAppDir(), info.dir, { recursive: true });
-      await hardenDirTree(info.dir);
-    } catch { /* ignore */ }
+      await replaceVerifiedTree(protectedAppDir(), info.dir, manifest);
+    } finally {
+      if (fs.existsSync(info.dir)) await hardenDirTree(info.dir);
+    }
+    logTamper('install-dir-restored');
+  } catch (err) {
+    logEvent('install-dir-restore-failed', { error: err.message });
   }
 }
 
@@ -5702,7 +5879,7 @@ async function restoreUninstaller() {
   if (!info || !info.dir) return;
   const src = protectedAppDir();
   const dst = info.dir;
-  if (!fs.existsSync(src) || !fs.existsSync(dst)) return;
+  if (!protectedCopyIntegrity() || !fs.existsSync(dst)) return;
   try {
     let restored = false;
     for (const name of fs.readdirSync(src)) {
@@ -5738,7 +5915,7 @@ function ensureInteractiveMain() {
     "try { " +
     "  @(Get-CimInstance Win32_Process -Filter \"Name='$n'\" -ErrorAction Stop) | ForEach-Object { " +
     "    $c = [string]$_.CommandLine; " +
-    "    if ($c -notmatch '--watchdog-system' -and $c -notmatch '--watchdog' -and $c -notmatch '--type=' -and $c -notmatch '--setup-privileged') { $alive = $true } " +
+    "    if ($c -notmatch '--watchdog-system' -and $c -notmatch '--watchdog' -and $c -notmatch '--type=' -and $c -notmatch '--setup-privileged' -and $c -notmatch '--policy-editor') { $alive = $true } " +
     "  } " +
     "} catch { " +
     "  $procs = @(Get-Process -Name ([System.IO.Path]::GetFileNameWithoutExtension($n)) -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -gt 0 }); " +
@@ -5827,7 +6004,7 @@ async function gracefulQuit() {
   }
   // במסלול רגיל אין צורך להמתין ל-Promise ריק; כאשר קיים חוק או פעולה
   // בתהליך, ממתינים להסרה בפועל לפני יציאה.
-  if (netBlockApplied || netOperation || netDesired) {
+  if (netBlockApplied || netNeedsValidation || netOperation || netDesired) {
     try { await reconcileNetBlock(false); } catch (err) {
       logEvent('netblock-quit-error', { error: String(err && err.message || err) });
     }
@@ -5835,7 +6012,19 @@ async function gracefulQuit() {
   app.quit();
 }
 
-/* ================= אתחול ================= */if (isPrivilegedSetup) {
+/* ================= אתחול ================= */
+if (policyEditor) {
+  app.whenReady().then(() => {
+    if (!isWin || !isElevated() || !fs.existsSync(policyAclMarker()) || updateInProgress()) { app.exit(1); return; }
+    loadSettings();
+    loadUsage();
+    loadPinLock();
+    registerIpc();
+    showMainWindow();
+    win.setAlwaysOnTop(true, 'screen-saver');
+  });
+  app.on('window-all-closed', () => app.quit());
+} else if (isPrivilegedSetup) {
   // הרצה חד-פעמית של ההגדרה המוגבת. תנאי סף: הרשאות מנהל ו**לא** מהעותק
   // המוגן — תהליך שרץ מהעותק המוגן אינו יכול להחליף את עצמו, והרענון חייב
   // לבוא מתיקיית ההתקנה. בסיום יוצאים מיד; אין חלון, מגש או נעילה.

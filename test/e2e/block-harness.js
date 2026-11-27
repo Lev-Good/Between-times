@@ -14,9 +14,10 @@ if (process.env.ELECTRON_E2E !== '1') {
 
 // פחות תקלות GPU בסביבות שונות — לבדיקת עשן אין צורך בהאצה.
 app.disableHardwareAcceleration();
+const offscreen = process.env.ELECTRON_E2E_OFFSCREEN === '1';
 
 // ---- ה-IPC שמחליף את התהליך הראשי האמיתי (בדיוק הערוצים שמסך החסימה קורא להם) ----
-const calls = { settingsOpen: 0, unlock: [], setBg: [], launch: [] };
+const calls = { settingsOpen: 0, unlock: [], setBg: [], launch: [], recovery: [] };
 let currentStatus = null;
 
 function registerIpc() {
@@ -25,8 +26,11 @@ function registerIpc() {
   ipcMain.handle('unlock:now', (_e, pin) => { calls.unlock.push(String(pin)); return { ok: false, error: 'E2E: לא נפתח בפועל' }; });
   ipcMain.handle('block:set-bg', (_e, bg) => { calls.setBg.push(String(bg)); return { ok: true }; });
   ipcMain.handle('allowed-apps:launch', (_e, app) => { calls.launch.push(app); return { ok: false, error: 'E2E: אין תוכנה אמיתית' }; });
-  ipcMain.handle('recovery:send', () => ({ ok: false, error: 'E2E: אין מייל' }));
-  ipcMain.handle('recovery:complete', () => ({ ok: false, error: 'E2E' }));
+  ipcMain.handle('recovery:send', () => ({ ok: true }));
+  ipcMain.handle('recovery:complete', (_event, code, pin) => {
+    calls.recovery.push({ code, pin });
+    return { ok: true };
+  });
 }
 
 // סטטוס כמו buildStatus בתהליך הראשי (כולל שדות שמסך החסימה קורא)
@@ -70,11 +74,13 @@ function createWindow() {
     const win = new BrowserWindow({
       width: 960,
       height: 640,
-      show: true, // סמוק אמיתי ונראה — נסגר בסוף הבדיקה
+      show: !offscreen,
       frame: false,
       backgroundColor: '#0b1020',
       webPreferences: {
         preload: path.join(__dirname, '..', '..', 'preload.js'),
+        offscreen,
+        backgroundThrottling: false,
         contextIsolation: true,
         nodeIntegration: false
       }
@@ -129,6 +135,33 @@ async function run() {
   await sleep(150);
   const s2 = await snapshot(win);
   add('blocked+pin: לחיצה על כפתור הפתיחה מרחיבה את שדה הסיסמה', s2.pinBox === '', 'pinBox=' + s2.pinBox);
+
+  await win.webContents.executeJavaScript("document.getElementById('forgotBtn').click(); true", true);
+  const recovery = await win.webContents.executeJavaScript(`
+    (async () => {
+      for (let i = 0; i < 30 && !document.querySelector('dialog[open]'); i++) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      const dialog = document.querySelector('dialog[open]');
+      if (!dialog) return { opened: false };
+      const [code, pin, confirmation] = dialog.querySelectorAll('input');
+      const masked = pin.type === 'password' && confirmation.type === 'password';
+      code.value = 'fixture-code';
+      pin.value = 'fixture-pin';
+      confirmation.value = 'mismatch';
+      const form = dialog.querySelector('form');
+      form.requestSubmit();
+      const validation = dialog.open && !!dialog.querySelector('[role="alert"]').textContent;
+      confirmation.value = pin.value;
+      form.requestSubmit();
+      return { opened: true, masked, validation };
+    })()
+  `);
+  await sleep(150);
+  add('recovery: חלונית נפתחת ומסתירה סיסמאות', recovery.opened && recovery.masked);
+  add('recovery: אי התאמה בין הסיסמאות עוצרת אישור', recovery.validation);
+  add('recovery: הקוד והסיסמה נשלחים דרך IPC', calls.recovery.length === 1 &&
+    calls.recovery[0].code === 'fixture-code' && calls.recovery[0].pin === 'fixture-pin');
 
   // ---------- 3) ללא סיסמה: הגדרה + דלג, והדלג שולח unlockNow('') ----------
   currentStatus = status({ pinSet: false });

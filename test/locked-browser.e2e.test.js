@@ -9,14 +9,18 @@
 
 const test = require('node:test');
 const assert = require('node:assert');
+const fs = require('node:fs');
+const os = require('node:os');
 const path = require('path');
 const { spawn } = require('child_process');
 
 // במוד Node, 'electron' מייצא את הנתיב לקובץ ההרצה עצמו
 const electron = require('electron');
 
-test('locked browser E2E: שני מצבי רשימת האתרים חוסמים ניווט לאתר האסור בדפדפן אמיתי', async () => {
-  const child = spawn(electron, [path.join(__dirname, 'e2e', 'locked-browser-harness.js')], {
+test('locked browser E2E: שני מצבי רשימת האתרים חוסמים ניווט לאתר האסור בדפדפן אמיתי', async (t) => {
+  const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'bhz-browser-e2e-'));
+  t.after(() => fs.rmSync(profile, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 }));
+  const child = spawn(electron, ['--user-data-dir=' + profile, path.join(__dirname, 'e2e', 'locked-browser-harness.js')], {
     env: { ...process.env, ELECTRON_E2E: '1' },
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true
@@ -42,10 +46,10 @@ test('locked browser E2E: שני מצבי רשימת האתרים חוסמים �
     '\n--- stdout ---\n' + stdout.slice(-1500));
 
   const report = JSON.parse(m[1]);
-  assert.equal(code, 0, 'קוד יציאה של ה-harness: ' + code + ' — ' + stderr.slice(-500));
   for (const c of report.checks) {
     assert.ok(c.ok, c.name + ' — ' + c.detail);
   }
+  assert.equal(code, 0, 'קוד יציאה של ה-harness: ' + code + ' — ' + stderr.slice(-500));
   assert.ok(report.checks.length >= 35, 'צפויים לפחות 35 אימותי E2E, התקבלו ' + report.checks.length);
 
   // שני המצבים חייבים להיות מכוסים, וכל אחד מהם עם אימות חסימה ואימות אי-חסימת-יתר

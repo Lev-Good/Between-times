@@ -434,6 +434,30 @@ FunctionEnd
     Goto WaitAppExit
   AppExited:
   !insertmacro BENHAZ_LOG "preinit-app-wait-done"
+  InitPluginsDir
+  Push $OUTDIR
+  SetOutPath "$PLUGINSDIR"
+  File "/oname=protect-policy.ps1" "${BUILD_RESOURCES_DIR}\protect-policy.ps1"
+  Pop $OUTDIR
+  SetOutPath "$OUTDIR"
+  nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\protect-policy.ps1" -Root "$R0\BenHazmanim"'
+  Pop $0
+  Pop $1
+  ${If} $0 != 0
+    !insertmacro BENHAZ_LOG "policy-migration-failed: $0 $1"
+    !insertmacro BENHAZ_WRITE_RESULT false policy-migration
+    Delete "$R0\BenHazmanim\update-in-progress.json"
+    Delete "$R0\BenHazmanim\quit.flag"
+    Delete "$APPDATA\BenHazmanim\quit.flag"
+    Delete "$APPDATA\בין הזמנים - ניהול זמן מחשב\quit.flag"
+    Delete "$APPDATA\${PRODUCT_NAME}\quit.flag"
+    DeleteRegValue HKLM "Software\BenHazmanim" "Quit"
+    nsExec::Exec 'schtasks /Run /TN BenHazmanimGuard'
+    nsExec::Exec 'schtasks /Run /TN BenHazmanim'
+    MessageBox MB_ICONSTOP|MB_OK "לא ניתן היה להגן על קובץ המדיניות או לשחזר אותו. ההתקנה הופסקה לפני החלפת קובצי התוכנה." /SD IDOK
+    SetErrorLevel 1
+    Quit
+  ${EndIf}
   !endif ; !BUILD_UNINSTALLER — בבניית המסיר אין תוכנה שצריך לעצור ואין דגלים
          ; לכתוב: בנייה במחשב שבו התוכנה מותקנת לא תסגור אותה יותר.
 !macroend
@@ -544,16 +568,6 @@ FunctionEnd
   IfFileExists "$R1\BenHazmanim\relaunch.flag" 0 RelaunchCheckDone
     StrCpy $R0 "1"
   RelaunchCheckDone:
-  ; Fix #5: create settings file with write access for everyone so any user can save settings
-  CreateDirectory "$R1\BenHazmanim"
-  IfFileExists "$R1\BenHazmanim\settings.json" SettingsExists
-    FileOpen $0 "$R1\BenHazmanim\settings.json" w
-    FileWrite $0 "{}"
-    FileClose $0
-  SettingsExists:
-  nsExec::Exec 'cmd /c icacls "$R1\BenHazmanim" /grant *S-1-5-32-545:(OI)(CI)M /C'
-  nsExec::Exec 'cmd /c icacls "$R1\BenHazmanim\settings.json" /grant *S-1-5-32-545:(M)'
-
   ; ---------------------------------------------------------------------------
   ; אימות ההתקנה ותיקון קבצים נעולים — לפני שמסירים את דגלי העצירה ומפעילים
   ; את התוכנה. אם ההעתקה האטומית נכשלה, כאן משלימים אותה (או נכשלים בגלוי).

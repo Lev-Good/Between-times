@@ -138,7 +138,7 @@
     const d = date || new Date();
     const minutes = d.getHours() * 60 + d.getMinutes();
     const today = (h[d.getDay()] || { slots: [] }).slots;
-    for (const s of today) if (slotCovers(s, minutes)) return true;
+    for (const s of today) if (slotCoversToday(s, minutes)) return true;
     // חלון שחוצה חצות שהתחיל אתמול ותקף גם עכשיו (למשל 22:00–02:00)
     const prev = new Date(d);
     prev.setDate(prev.getDate() - 1);
@@ -586,9 +586,8 @@
   }
 
   // חלון שמתחיל אחרי שהוא נגמר = חוצה חצות (למחרת)
-  function slotCovers(slot, minutes) {
-    if (slot.start < slot.end) return minutes >= slot.start && minutes < slot.end;
-    return minutes >= slot.start || minutes < slot.end;
+  function slotCoversToday(slot, minutes) {
+    return minutes >= slot.start && (slot.start > slot.end || minutes < slot.end);
   }
 
   // החלון הפעיל כרגע (של היום או של אתמול שחוצה חצות) — או null אם אף חלון
@@ -596,7 +595,7 @@
   function activeSlot(schedule, date) {
     const minutes = date.getHours() * 60 + date.getMinutes();
     for (const s of daySlots(schedule, date)) {
-      if (slotCovers(s, minutes)) return s;
+      if (slotCoversToday(s, minutes)) return s;
     }
     const prev = new Date(date);
     prev.setDate(prev.getDate() - 1);
@@ -626,36 +625,52 @@
   // המעבר הבא בין מותר לחסום (בודק לפחות מחזור שבועי מלא)
   // מדלג על גבולות שאינם משנים בפועל את המצב (למשל שני חלונות זהים סמוכים).
   // בנוסף נבדקים חריגים חד-פעמיים עתידיים, גם אם הם רחוקים ביותר משבוע.
-  function nextTransition(schedule, now) {
-    const current = stateAt(schedule, now);
-    const ats = [];
+  function nextTransition(schedule, now, unlockUntil) {
+    const unlocked = unlockUntil > now.getTime();
+    const current = unlocked ? 'allowed' : stateAt(schedule, now);
+    const searchFrom = unlocked ? new Date(unlockUntil) : now;
+    const ats = unlocked ? [searchFrom] : [];
     const days = new Map();
     const addDay = (day) => days.set(dateKey(day), startOfDay(day, 0));
-    for (let i = 0; i < 8; i++) addDay(startOfDay(now, i));
+    const firstDay = startOfDay(searchFrom, 0);
+    for (let i = 0; i < 8; i++) addDay(startOfDay(firstDay, i));
     for (const ov of (schedule.overrides || [])) {
       const parts = String(ov.date).split('-').map(Number);
       if (parts.length !== 3 || parts.some((n) => !Number.isFinite(n))) continue;
       const day = new Date(parts[0], parts[1] - 1, parts[2]);
       if (dateKey(day) !== ov.date) continue;
-      if (day.getTime() >= startOfDay(now, 0).getTime()) {
-        addDay(day);
-        addDay(startOfDay(day, 1));
+      if (day >= firstDay) {
+        for (let i = 0; i < 8; i++) addDay(startOfDay(day, i));
       }
     }
     for (const day of days.values()) {
+      const nextDay = startOfDay(day, 1);
+      const minutes = new Set([0]);
       for (const s of daySlots(schedule, day)) {
-        const start = dayAt(day, s.start);
-        let end = dayAt(day, s.end);
-        if (s.start >= s.end) end.setDate(end.getDate() + 1);
-        ats.push(start);
-        ats.push(end);
+        minutes.add(s.start);
+        if (s.start < s.end && s.end < 1440) minutes.add(s.end);
+      }
+      for (const s of daySlots(schedule, startOfDay(day, -1))) {
+        if (s.start > s.end) minutes.add(s.end);
+      }
+      if (day.getTimezoneOffset() === new Date(nextDay - 1).getTimezoneOffset()) {
+        ats.push(day);
+        for (const minute of minutes) ats.push(dayAt(day, minute));
+      } else {
+        // Walk actual minutes on clock-change days to include skipped and repeated hours.
+        let previousOffset = day.getTimezoneOffset();
+        for (let time = day.getTime(); time < nextDay.getTime(); time += 60000) {
+          const at = new Date(time);
+          const offset = at.getTimezoneOffset();
+          if (offset !== previousOffset || minutes.has(at.getHours() * 60 + at.getMinutes())) ats.push(at);
+          previousOffset = offset;
+        }
       }
     }
     ats.sort((a, b) => a - b);
     for (const at of ats) {
-      if (at.getTime() > now.getTime()) {
-        const probe = new Date(at.getTime() + 1000);
-        const to = stateAt(schedule, probe);
+      if (at.getTime() > now.getTime() && at >= searchFrom) {
+        const to = stateAt(schedule, at);
         if (to !== current) return { at, to };
       }
     }
@@ -682,10 +697,10 @@
     // חסימה לפי ברירת המחדל של "התר" (לוח ריק — חסום תמיד) ולא לפי חלון
     // מוגדר — כדי שמסך החסימה יוכל להסביר להורה מה בדיוק חוסם.
     const byDefault = raw === 'blocked' && s.mode === 'allowlist' && !activeSlot(s, d);
-    const t = nextTransition(s, d);
-    const nextAt = override ? new Date(s.manualUnlockUntil) : t.at;
+    const t = nextTransition(s, d, override ? s.manualUnlockUntil : null);
+    const nextAt = t.at;
 
-    const secondsUntilNext = nextAt ? Math.max(0, Math.round((nextAt.getTime() - d.getTime()) / 1000)) : null;
+    const secondsUntilNext = nextAt ? Math.ceil((nextAt.getTime() - d.getTime()) / 1000) : null;
 
     // חלון אזהרה לפני חסימה: כשהמחשב עדיין פתוח אבל עומד להיחסם בתוך
     // warnMinutes — מסמנים warning עם ספירה לאחור עד תחילת החסימה.

@@ -5,6 +5,8 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('electronAPI', {
   getSettings: () => ipcRenderer.invoke('settings:get'),
   saveSettings: (s, approvalCode) => ipcRenderer.invoke('settings:save', s, approvalCode),
+  openPolicyEditor: () => ipcRenderer.invoke('policy:edit'),
+  onPolicyChanged: (cb) => ipcRenderer.on('policy-changed', () => cb()),
   getStatus: () => ipcRenderer.invoke('status:get'),
   lockNow: () => ipcRenderer.invoke('lock:now'),
   unlockNow: (pin, approvalCode) => ipcRenderer.invoke('unlock:now', pin, approvalCode),

@@ -68,7 +68,7 @@ function applyLockedNavigationGuards(webContents, opts) {
   webContents.setWindowOpenHandler((details) => {
     const url = details && details.url ? String(details.url) : '';
     if (allows(url)) {
-      try { webContents.loadURL(url); } catch { /* ignore */ }
+      try { Promise.resolve(webContents.loadURL(url)).catch(() => {}); } catch { /* ignore */ }
     } else {
       onBlocked(url);
     }

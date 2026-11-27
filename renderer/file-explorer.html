@@ -35,6 +35,7 @@
     .meta { color: #6d6d88; font-size: 12px; }
     .empty, .err { color: #9a9ab5; padding: 24px; text-align: center; }
     .err { color: #ffb3b3; }
+    #fileOpenError:empty { display: none; }
   </style>
 </head>
 <body>
@@ -47,6 +48,7 @@
     <span class="crumb" id="crumb"></span>
     <span class="ro-badge" id="roBadge" style="display:none">לקריאה בלבד</span>
   </div>
+  <div id="fileOpenError" class="err" role="alert"></div>
   <main id="list"></main>
 
   <script src="file-explorer.js"></script>
